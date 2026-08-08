@@ -1,0 +1,355 @@
+import React, { useState } from 'react';
+import { ShippingOrder, AppSetting } from '../types';
+import { jsPDF } from 'jspdf';
+import { Printer, Download, X, FileText, PackageCheck, Sparkles, Eye } from 'lucide-react';
+
+interface BatchPrintModalProps {
+  orders: ShippingOrder[];
+  settings: AppSetting;
+  onClose: () => void;
+}
+
+export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({ orders, settings, onClose }) => {
+  const [viewMode, setViewMode] = useState<'both' | 'labels' | 'slips'>('both');
+  const [isExporting, setIsExporting] = useState(false);
+
+  const handlePrint = () => {
+    window.print();
+  };
+
+  const handleExportPDF = () => {
+    setIsExporting(true);
+    try {
+      const doc = new jsPDF({
+        unit: 'in',
+        format: 'letter',
+      });
+
+      orders.forEach((order, index) => {
+        if (index > 0) {
+          doc.addPage();
+        }
+
+        // --- PACKING SLIP PAGE ---
+        doc.setFontSize(20);
+        doc.setTextColor(30, 41, 59);
+        doc.text(settings.companyName || 'Acme Shipping Corp', 0.5, 0.75);
+
+        doc.setFontSize(14);
+        doc.setTextColor(71, 85, 105);
+        doc.text('PACKING SLIP / INVOICE', 6.0, 0.75);
+
+        doc.setFontSize(10);
+        doc.text(`Order #: ${order.orderNumber}`, 6.0, 1.0);
+        doc.text(`Ship Date: ${new Date().toLocaleDateString()}`, 6.0, 1.2);
+        doc.text(`Package Box: ${order.boxName || 'Standard Package'}`, 6.0, 1.4);
+
+        // Return Address
+        doc.setFontSize(9);
+        doc.text('FROM:', 0.5, 1.2);
+        doc.text(settings.returnAddress.name, 0.5, 1.35);
+        doc.text(settings.returnAddress.street1, 0.5, 1.5);
+        doc.text(`${settings.returnAddress.city}, ${settings.returnAddress.state} ${settings.returnAddress.zip}`, 0.5, 1.65);
+
+        // Ship To Address
+        doc.text('SHIP TO:', 3.0, 1.2);
+        doc.text(order.recipientName, 3.0, 1.35);
+        if (order.company) doc.text(order.company, 3.0, 1.5);
+        doc.text(order.street1, 3.0, 1.65);
+        if (order.street2) doc.text(order.street2, 3.0, 1.8);
+        doc.text(`${order.city}, ${order.state} ${order.zip}`, 3.0, 1.95);
+
+        // Line Items Table Header
+        let y = 2.4;
+        doc.setFillColor(241, 245, 249);
+        doc.rect(0.5, y, 7.5, 0.3, 'F');
+        doc.setFontSize(10);
+        doc.setTextColor(15, 23, 42);
+        doc.text('SKU / ITEM CODE', 0.6, y + 0.2);
+        doc.text('DESCRIPTION', 2.2, y + 0.2);
+        doc.text('QTY', 6.2, y + 0.2);
+        doc.text('WEIGHT', 7.0, y + 0.2);
+
+        y += 0.4;
+
+        order.items.forEach((item) => {
+          doc.setFontSize(9);
+          doc.text(item.sku || 'ITEM', 0.6, y);
+          doc.text(item.name, 2.2, y);
+          doc.text(String(item.quantity), 6.3, y);
+          doc.text(`${item.weightOz || 12} oz`, 7.0, y);
+          y += 0.25;
+        });
+
+        // Custom Packing Slip Content Box (From DB Settings Table)
+        y += 0.4;
+        doc.setFillColor(248, 250, 252);
+        doc.setDrawColor(203, 213, 225);
+        doc.roundedRect(0.5, y, 7.5, 1.2, 0.1, 0.1, 'FD');
+
+        doc.setFontSize(10);
+        doc.setTextColor(30, 58, 138);
+        doc.text('IMPORTANT CUSTOMER INFORMATION & RETURN POLICY:', 0.7, y + 0.25);
+
+        doc.setFontSize(8.5);
+        doc.setTextColor(51, 65, 85);
+
+        // Split text cleanly for PDF rendering
+        const splitContent = doc.splitTextToSize(settings.packingSlipContent || 'Thank you for your order!', 7.1);
+        doc.text(splitContent, 0.7, y + 0.45);
+
+        // --- SHIPPING LABEL PAGE (4x6 format) ---
+        doc.addPage('letter', 'portrait');
+        doc.setLineWidth(0.02);
+        doc.rect(1.5, 1.0, 5.0, 7.0);
+
+        doc.setFontSize(16);
+        doc.setTextColor(0, 0, 0);
+        doc.text(`${order.carrier || 'USPS'} POSTAGE PAID`, 1.7, 1.5);
+        doc.setFontSize(12);
+        doc.text(order.serviceLevel || 'PRIORITY MAIL 2-DAY', 1.7, 1.8);
+
+        doc.setFontSize(8);
+        doc.text('SHIP FROM:', 1.7, 2.3);
+        doc.text(settings.returnAddress.name, 1.7, 2.45);
+        doc.text(settings.returnAddress.street1, 1.7, 2.6);
+        doc.text(`${settings.returnAddress.city}, ${settings.returnAddress.state} ${settings.returnAddress.zip}`, 1.7, 2.75);
+
+        doc.setFontSize(12);
+        doc.text('SHIP TO:', 1.7, 3.3);
+        doc.setFontSize(14);
+        doc.text(order.recipientName, 1.7, 3.6);
+        if (order.company) doc.text(order.company, 1.7, 3.85);
+        doc.text(order.street1, 1.7, 4.1);
+        if (order.street2) doc.text(order.street2, 1.7, 4.35);
+        doc.text(`${order.city}, ${order.state} ${order.zip}`, 1.7, 4.6);
+
+        // Simulated Barcode Box
+        doc.setFillColor(0, 0, 0);
+        doc.rect(1.7, 5.2, 4.6, 0.8, 'F');
+        doc.setFontSize(10);
+        doc.setTextColor(0, 0, 0);
+        doc.text(`TRACKING #: ${order.trackingNumber || '9400111202482390123'}`, 1.7, 6.3);
+      });
+
+      doc.save(`Shipping_Batch_Labels_Slips_${Date.now()}.pdf`);
+    } catch (err) {
+      console.error('PDF export error:', err);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
+      <div className="bg-slate-100 border border-slate-200 rounded-xl shadow-2xl max-w-5xl w-full max-h-[92vh] flex flex-col text-slate-800 relative my-auto">
+        {/* Modal Top Bar */}
+        <div className="p-4 sm:p-5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-4 bg-white rounded-t-xl">
+          <div className="flex items-center space-x-3">
+            <div className="w-10 h-10 rounded-lg bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-600">
+              <Printer className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-slate-900 flex items-center space-x-2">
+                <span>Batch Label &amp; Packing Slip Generator</span>
+                <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-bold px-2 py-0.5 rounded-full">
+                  {orders.length} Order{orders.length > 1 ? 's' : ''} Ready
+                </span>
+              </h3>
+              <p className="text-xs text-slate-500">Generated EasyPost Postage Labels and DB Packing Slips</p>
+            </div>
+          </div>
+
+          {/* View Filter Switch */}
+          <div className="flex items-center space-x-1 bg-slate-100 p-1 rounded-lg border border-slate-200">
+            <button
+              onClick={() => setViewMode('both')}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${
+                viewMode === 'both' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              All Documents
+            </button>
+            <button
+              onClick={() => setViewMode('labels')}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${
+                viewMode === 'labels' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Shipping Labels
+            </button>
+            <button
+              onClick={() => setViewMode('slips')}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${
+                viewMode === 'slips' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Packing Slips
+            </button>
+          </div>
+
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={handleExportPDF}
+              disabled={isExporting}
+              className="flex items-center space-x-1.5 bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 px-3.5 py-2 rounded-lg text-xs font-semibold shadow-sm transition-all cursor-pointer"
+            >
+              <Download className="w-4 h-4 text-indigo-600" />
+              <span>{isExporting ? 'Exporting PDF...' : 'Download PDF Batch'}</span>
+            </button>
+
+            <button
+              onClick={handlePrint}
+              className="flex items-center space-x-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-xs font-semibold shadow-sm transition-all cursor-pointer"
+            >
+              <Printer className="w-4 h-4" />
+              <span>Print Batch</span>
+            </button>
+
+            <button
+              onClick={onClose}
+              className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+
+        {/* Scrollable Printable Documents Preview Area */}
+        <div className="p-6 overflow-y-auto space-y-8 flex-1 bg-slate-50 print:bg-white print:p-0">
+          {orders.map((order, index) => (
+            <div key={order.id} className="space-y-6 print:space-y-0">
+              {/* --- 1. PACKING SLIP --- */}
+              {(viewMode === 'both' || viewMode === 'slips') && (
+                <div className="bg-white text-slate-900 rounded-xl p-8 shadow-xl max-w-3xl mx-auto border border-slate-200 print:shadow-none print:border-none print:rounded-none print:max-w-none print:p-8 page-break-after">
+                  {/* Header */}
+                  <div className="flex items-start justify-between border-b border-slate-200 pb-6 mb-6">
+                    <div>
+                      <h1 className="text-2xl font-bold text-slate-900">{settings.companyName || 'Acme Shipping Corp'}</h1>
+                      <p className="text-xs text-slate-500 mt-0.5">{settings.returnAddress.street1}, {settings.returnAddress.city}, {settings.returnAddress.state} {settings.returnAddress.zip}</p>
+                      <p className="text-xs text-slate-500">Phone: {settings.returnAddress.phone}</p>
+                    </div>
+                    <div className="text-right">
+                      <span className="inline-block bg-slate-900 text-white text-xs font-bold uppercase tracking-wider px-3 py-1 rounded">
+                        Packing Slip
+                      </span>
+                      <div className="text-sm font-bold text-slate-800 mt-2">Order #: {order.orderNumber}</div>
+                      <div className="text-xs text-slate-500">Date: {new Date(order.orderDate).toLocaleDateString()}</div>
+                      <div className="text-xs text-slate-600 font-medium">Box Used: {order.boxName || 'Standard Package'}</div>
+                    </div>
+                  </div>
+
+                  {/* Recipient & Address Box */}
+                  <div className="grid grid-cols-2 gap-6 bg-slate-50 p-4 rounded-lg border border-slate-200 mb-6 text-xs">
+                    <div>
+                      <span className="font-bold text-slate-700 uppercase tracking-wider block mb-1">Ship To:</span>
+                      <p className="font-bold text-slate-900 text-sm">{order.recipientName}</p>
+                      {order.company && <p className="font-medium text-slate-700">{order.company}</p>}
+                      <p>{order.street1}</p>
+                      {order.street2 && <p>{order.street2}</p>}
+                      <p>{order.city}, {order.state} {order.zip}</p>
+                      <p className="text-slate-500 mt-1">Phone: {order.phone || 'N/A'}</p>
+                    </div>
+
+                    <div>
+                      <span className="font-bold text-slate-700 uppercase tracking-wider block mb-1">Shipping Details:</span>
+                      <p>Carrier: <strong className="text-blue-700">{order.carrier || 'USPS'}</strong> ({order.serviceLevel || 'Priority'})</p>
+                      <p className="mt-1">Tracking Number:</p>
+                      <p className="font-mono bg-white px-2 py-1 rounded border border-slate-300 font-bold text-slate-800 inline-block mt-0.5">
+                        {order.trackingNumber || '9400111202482390123'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Line Items Table */}
+                  <div className="mb-6">
+                    <table className="w-full text-xs text-left border-collapse">
+                      <thead>
+                        <tr className="bg-slate-100 text-slate-700 border-b border-slate-300 font-bold uppercase tracking-wider">
+                          <th className="py-2.5 px-3">SKU</th>
+                          <th className="py-2.5 px-3">Item Description</th>
+                          <th className="py-2.5 px-3 text-center">Qty</th>
+                          <th className="py-2.5 px-3 text-right">Weight</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-200">
+                        {order.items.map((item, idx) => (
+                          <tr key={idx} className="hover:bg-slate-50">
+                            <td className="py-2.5 px-3 font-mono font-semibold text-slate-800">{item.sku}</td>
+                            <td className="py-2.5 px-3 text-slate-800 font-medium">{item.name}</td>
+                            <td className="py-2.5 px-3 text-center font-bold text-slate-900">{item.quantity}</td>
+                            <td className="py-2.5 px-3 text-right text-slate-600">{item.weightOz || 12} oz</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* CUSTOM PACKING SLIP CONTENT AREA (From Settings Table) */}
+                  <div className="bg-blue-50/80 border border-blue-200 rounded-xl p-4 text-xs text-slate-700">
+                    <div className="flex items-center space-x-1.5 font-bold text-blue-900 uppercase tracking-wide mb-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+                      <span>Important Notice & Customer Service Policy</span>
+                    </div>
+                    <p className="leading-relaxed whitespace-pre-wrap text-slate-800">
+                      {settings.packingSlipContent || 'Thank you for your business! Please keep this packing slip for your records.'}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* --- 2. 4x6 SHIPPING LABEL --- */}
+              {(viewMode === 'both' || viewMode === 'labels') && (
+                <div className="bg-white text-slate-900 rounded-xl p-6 shadow-xl max-w-md mx-auto border-2 border-slate-900 print:shadow-none print:max-w-none print:w-[4in] print:h-[6in] print:p-4 print:mx-0 page-break-after">
+                  {/* Label Header */}
+                  <div className="flex items-center justify-between border-b-2 border-slate-900 pb-3 mb-3">
+                    <div>
+                      <div className="font-extrabold text-2xl tracking-tight text-slate-900">
+                        {order.carrier || 'USPS'}
+                      </div>
+                      <div className="text-xs font-bold text-slate-700 uppercase">
+                        {order.serviceLevel || 'PRIORITY MAIL 2-DAY'}
+                      </div>
+                    </div>
+                    <div className="text-right border-2 border-slate-900 px-2 py-1 font-bold text-xs uppercase">
+                      US POSTAGE PAID
+                    </div>
+                  </div>
+
+                  {/* Return Address */}
+                  <div className="text-[10px] text-slate-700 border-b border-slate-300 pb-2 mb-3">
+                    <div className="font-bold text-slate-900">{settings.returnAddress.name}</div>
+                    <div>{settings.returnAddress.street1}</div>
+                    <div>{settings.returnAddress.city}, {settings.returnAddress.state} {settings.returnAddress.zip}</div>
+                  </div>
+
+                  {/* Recipient Ship-To Block */}
+                  <div className="my-4 pl-3 border-l-4 border-slate-900">
+                    <div className="text-[10px] font-bold text-slate-500 uppercase">SHIP TO:</div>
+                    <div className="text-base font-extrabold text-slate-900">{order.recipientName}</div>
+                    {order.company && <div className="text-xs font-bold text-slate-800">{order.company}</div>}
+                    <div className="text-sm font-semibold text-slate-900 mt-1">{order.street1}</div>
+                    {order.street2 && <div className="text-sm text-slate-800">{order.street2}</div>}
+                    <div className="text-base font-extrabold text-slate-900 mt-1">
+                      {order.city.toUpperCase()}, {order.state} {order.zip}
+                    </div>
+                  </div>
+
+                  {/* Barcode & Tracking Block */}
+                  <div className="pt-3 border-t-2 border-slate-900 text-center">
+                    <div className="bg-slate-900 text-white font-mono text-center py-5 text-sm tracking-widest font-extrabold mb-1.5 rounded">
+                      ||| | ||||| ||| |||| |||||| ||||| |||
+                    </div>
+                    <div className="text-[11px] font-mono font-bold text-slate-900">
+                      TRACKING #: {order.trackingNumber || '9400111202482390123'}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};

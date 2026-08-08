@@ -1,0 +1,6 @@
+{
+  "name": "ShipStation Shipping Management",
+  "description": "Shipping management portal with EasyPost address validation, MSSQL sync, batch label & packing slip PDF creation, reship, and shipping analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
