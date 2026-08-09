@@ -78,9 +78,13 @@ export interface AppSetting {
   easyPostApiKey: string;
   easyPostMode: 'test' | 'production';
   mssqlServer: string;
+  mssqlPort?: number;
   mssqlDatabase: string;
   mssqlUser: string;
+  mssqlPassword?: string;
+  mssqlEncrypt?: boolean;
   mssqlConnected: boolean;
+  mssqlError?: string | null;
   companyName: string;
   returnAddress: ReturnAddress;
   appPassword?: string;

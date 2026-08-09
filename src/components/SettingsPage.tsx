@@ -41,8 +41,11 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   const [easyPostApiKey, setEasyPostApiKey] = useState(settings.easyPostApiKey || '');
   const [easyPostMode, setEasyPostMode] = useState<'test' | 'production'>(settings.easyPostMode || 'test');
   const [mssqlServer, setMssqlServer] = useState(settings.mssqlServer || '');
+  const [mssqlPort, setMssqlPort] = useState<string>(String(settings.mssqlPort || 1433));
   const [mssqlDatabase, setMssqlDatabase] = useState(settings.mssqlDatabase || '');
   const [mssqlUser, setMssqlUser] = useState(settings.mssqlUser || '');
+  const [mssqlPassword, setMssqlPassword] = useState(settings.mssqlPassword || '');
+  const [mssqlEncrypt, setMssqlEncrypt] = useState<boolean>(settings.mssqlEncrypt || false);
   const [appPassword, setAppPassword] = useState('');
 
   // Package Form state
@@ -53,11 +56,13 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   const [newPkgTare, setNewPkgTare] = useState('3');
   const [newPkgEasyPostType, setNewPkgEasyPostType] = useState('Parcel');
 
-  // MSSQL Schema state
+  // MSSQL Schema & Connection test state
   const [ddlScript, setDdlScript] = useState('');
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [copiedDdl, setCopiedDdl] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [testingMssql, setTestingMssql] = useState(false);
+  const [testResult, setTestResult] = useState<{ success: boolean; message: string; version?: string } | null>(null);
 
   useEffect(() => {
     fetch('/api/mssql/schema')
@@ -82,10 +87,54 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     triggerSuccess();
   };
 
+  const handleTestMssqlConnection = async () => {
+    setTestingMssql(true);
+    setTestResult(null);
+    try {
+      const res = await fetch('/api/mssql/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          server: mssqlServer,
+          port: parseInt(mssqlPort, 10) || 1433,
+          database: mssqlDatabase,
+          user: mssqlUser,
+          password: mssqlPassword,
+          encrypt: mssqlEncrypt,
+        }),
+      });
+      const data = await res.json();
+      setTestResult(data);
+      // Refresh parent settings
+      await onUpdateSettings({
+        mssqlServer,
+        mssqlPort: parseInt(mssqlPort, 10) || 1433,
+        mssqlDatabase,
+        mssqlUser,
+        mssqlPassword,
+        mssqlEncrypt,
+      });
+    } catch (err: any) {
+      setTestResult({
+        success: false,
+        message: `Network error reaching app server test endpoint: ${err.message}`,
+      });
+    } finally {
+      setTestingMssql(false);
+    }
+  };
+
   const handleSaveMssql = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
-    await onUpdateSettings({ mssqlServer, mssqlDatabase, mssqlUser });
+    await onUpdateSettings({
+      mssqlServer,
+      mssqlPort: parseInt(mssqlPort, 10) || 1433,
+      mssqlDatabase,
+      mssqlUser,
+      mssqlPassword,
+      mssqlEncrypt,
+    });
     setSaving(false);
     triggerSuccess();
   };
@@ -450,53 +499,192 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   <span>Microsoft SQL Server (MS SQL) Connection &amp; Schema DDL</span>
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Configure your external MS SQL connection settings and copy the SQL DDL statements to run on your SQL Server.
+                  Configure real MS SQL Server connection credentials, test database accessibility, and view table creation DDL scripts.
                 </p>
               </div>
 
-              <form onSubmit={handleSaveMssql} className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {/* Status Banner */}
+              <div
+                className={`p-4 rounded-xl border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                  settings.mssqlConnected
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                    : 'bg-amber-50 border-amber-200 text-amber-900'
+                }`}
+              >
+                <div className="flex items-start space-x-2.5">
+                  {settings.mssqlConnected ? (
+                    <ShieldCheck className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                  )}
                   <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">MS SQL Server Host</label>
+                    <span className="font-bold block">
+                      {settings.mssqlConnected
+                        ? `Connected to MS SQL Database (${settings.mssqlServer})`
+                        : 'MS SQL Server Disconnected or Unreachable'}
+                    </span>
+                    <p className="mt-0.5 text-[11px] opacity-90">
+                      {settings.mssqlConnected
+                        ? 'The node backend is successfully connected to your external MS SQL instance.'
+                        : settings.mssqlError ||
+                          'Could not establish socket connection to MS SQL Server. The app is falling back to local operational memory state.'}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleTestMssqlConnection}
+                  disabled={testingMssql}
+                  className="bg-slate-900 hover:bg-slate-800 text-white font-semibold px-3.5 py-1.5 rounded-lg shrink-0 flex items-center justify-center space-x-1.5 transition-colors cursor-pointer disabled:opacity-50 text-xs"
+                >
+                  <Server className="w-3.5 h-3.5" />
+                  <span>{testingMssql ? 'Testing...' : 'Test Connection'}</span>
+                </button>
+              </div>
+
+              {/* Form Controls */}
+              <form onSubmit={handleSaveMssql} className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      MS SQL Server Host / IP
+                    </label>
                     <input
                       type="text"
                       value={mssqlServer}
                       onChange={(e) => setMssqlServer(e.target.value)}
+                      placeholder="e.g. sql.example.com or 192.168.1.50"
                       className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
                     />
                   </div>
+
                   <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">Database Name</label>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">Port (Default: 1433)</label>
+                    <input
+                      type="number"
+                      value={mssqlPort}
+                      onChange={(e) => setMssqlPort(e.target.value)}
+                      placeholder="1433"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">Database Name</label>
                     <input
                       type="text"
                       value={mssqlDatabase}
                       onChange={(e) => setMssqlDatabase(e.target.value)}
+                      placeholder="e.g. ShippingProductionDB"
                       className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
                     />
                   </div>
+
                   <div>
-                    <label className="block text-xs font-semibold text-slate-600 mb-1">Database User</label>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">SQL User Account</label>
                     <input
                       type="text"
                       value={mssqlUser}
                       onChange={(e) => setMssqlUser(e.target.value)}
+                      placeholder="e.g. sa or app_user"
                       className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
                     />
                   </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">SQL User Password</label>
+                    <input
+                      type="password"
+                      value={mssqlPassword}
+                      onChange={(e) => setMssqlPassword(e.target.value)}
+                      placeholder="••••••••••••"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="flex items-center space-x-2 pt-6">
+                    <input
+                      type="checkbox"
+                      id="mssqlEncrypt"
+                      checked={mssqlEncrypt}
+                      onChange={(e) => setMssqlEncrypt(e.target.checked)}
+                      className="rounded text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                    />
+                    <label htmlFor="mssqlEncrypt" className="text-xs font-medium text-slate-700 cursor-pointer">
+                      Require Encrypted SSL Connection
+                    </label>
+                  </div>
                 </div>
 
-                <div className="flex justify-end">
+                <div className="flex items-center justify-between pt-2">
+                  <button
+                    type="button"
+                    onClick={handleTestMssqlConnection}
+                    disabled={testingMssql}
+                    className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold text-xs px-4 py-2 rounded-lg border border-indigo-200 cursor-pointer transition-colors disabled:opacity-50"
+                  >
+                    {testingMssql ? 'Testing connection...' : 'Test Connection Now'}
+                  </button>
+
                   <button
                     type="submit"
-                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs px-4 py-2 rounded-lg shadow-sm cursor-pointer"
+                    disabled={saving}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs px-5 py-2 rounded-lg shadow-sm cursor-pointer transition-colors disabled:opacity-50"
                   >
-                    Save MS SQL Connection Config
+                    {saving ? 'Saving...' : 'Save MS SQL Connection Config'}
                   </button>
                 </div>
               </form>
 
+              {/* Test Diagnostics Result Box */}
+              {testResult && (
+                <div
+                  className={`p-4 rounded-xl border text-xs font-mono overflow-x-auto ${
+                    testResult.success
+                      ? 'bg-emerald-950 border-emerald-800 text-emerald-300'
+                      : 'bg-rose-950 border-rose-800 text-rose-300'
+                  }`}
+                >
+                  <span className="font-bold block mb-1">
+                    {testResult.success ? '✅ CONNECTION SUCCESSFUL:' : '❌ CONNECTION FAILED:'}
+                  </span>
+                  <p>{testResult.message}</p>
+                  {testResult.version && (
+                    <p className="mt-1 text-[11px] text-emerald-400 opacity-80">
+                      Server Version: {testResult.version}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Guide box for local / personal web server setup */}
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-2 text-xs text-slate-600">
+                <h4 className="font-bold text-slate-800 flex items-center space-x-1.5">
+                  <Server className="w-4 h-4 text-indigo-600" />
+                  <span>Connecting Your Personal or Remote MS SQL Database</span>
+                </h4>
+                <p>
+                  To connect this cloud-hosted app to an MS SQL Server database on your local network or web server:
+                </p>
+                <ul className="list-disc list-inside space-y-1 pl-1 text-[11px] text-slate-600">
+                  <li>
+                    <strong>Network Accessibility:</strong> Ensure your SQL Server host domain or public IP is reachable over the Internet. (Internal hostnames like <code className="bg-slate-200 px-1 py-0.5 rounded text-slate-800">sql-east.internal.company.net</code> or <code className="bg-slate-200 px-1 py-0.5 rounded text-slate-800">localhost</code> cannot be resolved from Cloud Run).
+                  </li>
+                  <li>
+                    <strong>Firewall &amp; Port:</strong> Open TCP Port <strong>1433</strong> in your firewall / router port forwarding settings for SQL Server.
+                  </li>
+                  <li>
+                    <strong>SQL Authentication:</strong> Enable <em>SQL Server and Windows Authentication mode</em> in SQL Server Management Studio (SSMS) and create a SQL user account.
+                  </li>
+                  <li>
+                    <strong>Environment Variables:</strong> You can also set <code className="bg-slate-200 px-1 py-0.5 rounded text-slate-800">MSSQL_SERVER</code>, <code className="bg-slate-200 px-1 py-0.5 rounded text-slate-800">MSSQL_DATABASE</code>, <code className="bg-slate-200 px-1 py-0.5 rounded text-slate-800">MSSQL_USER</code>, and <code className="bg-slate-200 px-1 py-0.5 rounded text-slate-800">MSSQL_PASSWORD</code> in your environment.
+                  </li>
+                </ul>
+              </div>
+
               {/* SQL DDL Code Snippet Box */}
-              <div className="space-y-2">
+              <div className="space-y-2 pt-2">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold uppercase text-slate-600 tracking-wider">
                     MS SQL Table Creation DDL Script:

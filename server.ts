@@ -1,12 +1,76 @@
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
+import sql from 'mssql';
 import { ShippingOrder, PackageType, AppSetting, MonthlyReportData } from './src/types.js';
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+
+// Helper: Attempt MS SQL Server Database Connection Test
+async function testMssqlConnection(config: {
+  server: string;
+  port?: number;
+  database: string;
+  user: string;
+  password?: string;
+  encrypt?: boolean;
+}): Promise<{ success: boolean; message: string; version?: string }> {
+  if (!config.server || !config.database || !config.user) {
+    return {
+      success: false,
+      message: 'MS SQL Server configuration incomplete. Please provide Host, Database Name, and User.',
+    };
+  }
+
+  let serverHost = config.server.trim();
+  let serverPort = config.port || 1433;
+
+  if (serverHost.includes(':')) {
+    const parts = serverHost.split(':');
+    serverHost = parts[0];
+    serverPort = parseInt(parts[1], 10) || serverPort;
+  } else if (serverHost.includes(',')) {
+    const parts = serverHost.split(',');
+    serverHost = parts[0];
+    serverPort = parseInt(parts[1], 10) || serverPort;
+  }
+
+  const sqlConfig: sql.config = {
+    server: serverHost,
+    port: serverPort,
+    database: config.database,
+    user: config.user,
+    password: config.password || process.env.MSSQL_PASSWORD || '',
+    options: {
+      encrypt: config.encrypt ?? false,
+      trustServerCertificate: true,
+      connectTimeout: 5000,
+      requestTimeout: 5000,
+    },
+  };
+
+  try {
+    const pool = new sql.ConnectionPool(sqlConfig);
+    await pool.connect();
+    const result = await pool.request().query('SELECT @@VERSION as version');
+    await pool.close();
+    const versionStr = (result.recordset[0]?.version as string)?.split('\n')[0] || 'MS SQL Server Connected';
+    return {
+      success: true,
+      message: `Successfully connected to MS SQL Server (${serverHost}:${serverPort}/${config.database})`,
+      version: versionStr,
+    };
+  } catch (err: any) {
+    const errorMsg = err?.message || err?.code || String(err);
+    return {
+      success: false,
+      message: `Failed to connect to MS SQL Server (${serverHost}:${serverPort}): ${errorMsg}`,
+    };
+  }
+}
 
 // In-Memory Database Store with persistence simulator
 interface DatabaseSchema {
@@ -98,9 +162,13 @@ const initialSettings: AppSetting = {
   easyPostApiKey: process.env.EASYPOST_API_KEY || 'EZTK_TEST_99824_KEY',
   easyPostMode: (process.env.EASYPOST_MODE as 'test' | 'production') || 'test',
   mssqlServer: process.env.MSSQL_SERVER || 'sql-east.internal.company.net',
+  mssqlPort: process.env.MSSQL_PORT ? parseInt(process.env.MSSQL_PORT, 10) : 1433,
   mssqlDatabase: process.env.MSSQL_DATABASE || 'ShippingProductionDB',
   mssqlUser: process.env.MSSQL_USER || 'shipstation_app_user',
-  mssqlConnected: true,
+  mssqlPassword: process.env.MSSQL_PASSWORD || '',
+  mssqlEncrypt: process.env.MSSQL_ENCRYPT === 'true',
+  mssqlConnected: false,
+  mssqlError: null,
   companyName: 'Acme Logistics & Shipping Corp',
   returnAddress: {
     name: 'Acme Fulfillment Dept',
@@ -752,15 +820,56 @@ app.delete('/api/packages/:id', (req, res) => {
 
 // Settings API (including Packing Slip Content custom editor)
 app.get('/api/settings', (req, res) => {
-  // Hide password hash/secret in clear response if needed
-  const { appPassword, ...safeSettings } = db.settings;
+  // Hide password hash/secret in clear response
+  const { appPassword, mssqlPassword, ...safeSettings } = db.settings;
   res.json(safeSettings);
 });
 
-app.put('/api/settings', (req, res) => {
+app.put('/api/settings', async (req, res) => {
   db.settings = { ...db.settings, ...req.body };
-  const { appPassword, ...safeSettings } = db.settings;
+
+  // If MS SQL settings are updated, test connection
+  if (
+    req.body.mssqlServer !== undefined ||
+    req.body.mssqlDatabase !== undefined ||
+    req.body.mssqlUser !== undefined ||
+    req.body.mssqlPassword !== undefined
+  ) {
+    const testRes = await testMssqlConnection({
+      server: db.settings.mssqlServer,
+      port: db.settings.mssqlPort,
+      database: db.settings.mssqlDatabase,
+      user: db.settings.mssqlUser,
+      password: db.settings.mssqlPassword,
+      encrypt: db.settings.mssqlEncrypt,
+    });
+    db.settings.mssqlConnected = testRes.success;
+    db.settings.mssqlError = testRes.success ? null : testRes.message;
+  }
+
+  const { appPassword, mssqlPassword, ...safeSettings } = db.settings;
   res.json({ success: true, settings: safeSettings });
+});
+
+// Explicit MS SQL Connection Test Route
+app.post('/api/mssql/test', async (req, res) => {
+  const { server, port, database, user, password, encrypt } = req.body;
+  const config = {
+    server: server ?? db.settings.mssqlServer,
+    port: port ? Number(port) : db.settings.mssqlPort || 1433,
+    database: database ?? db.settings.mssqlDatabase,
+    user: user ?? db.settings.mssqlUser,
+    password: password !== undefined ? password : db.settings.mssqlPassword,
+    encrypt: encrypt !== undefined ? encrypt : db.settings.mssqlEncrypt,
+  };
+
+  const result = await testMssqlConnection(config);
+
+  // Update in-memory settings status
+  db.settings.mssqlConnected = result.success;
+  db.settings.mssqlError = result.success ? null : result.message;
+
+  res.json(result);
 });
 
 // Reports & Analytics API
@@ -914,6 +1023,30 @@ VALUES ('packing_slip_content', '${db.settings.packingSlipContent.replace(/'/g, 
 
 // Vite Middleware for Dev / Static fallback for Prod
 async function startServer() {
+  // Test MS SQL Server connectivity on startup
+  if (db.settings.mssqlServer) {
+    testMssqlConnection({
+      server: db.settings.mssqlServer,
+      port: db.settings.mssqlPort,
+      database: db.settings.mssqlDatabase,
+      user: db.settings.mssqlUser,
+      password: db.settings.mssqlPassword,
+      encrypt: db.settings.mssqlEncrypt,
+    })
+      .then((testRes) => {
+        db.settings.mssqlConnected = testRes.success;
+        db.settings.mssqlError = testRes.success ? null : testRes.message;
+        console.log(`[MSSQL] Connection status: ${testRes.success ? 'CONNECTED' : 'DISCONNECTED'}`);
+        if (!testRes.success) {
+          console.log(`[MSSQL] Details: ${testRes.message}`);
+        }
+      })
+      .catch((err) => {
+        db.settings.mssqlConnected = false;
+        db.settings.mssqlError = String(err);
+      });
+  }
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
