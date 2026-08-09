@@ -247,6 +247,28 @@ export default function App() {
     }
   };
 
+  // MS SQL Sync Handler
+  const handleSyncMssql = async (action: 'pull' | 'push' = 'pull') => {
+    try {
+      const res = await fetch('/api/mssql/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        if (data.orders) {
+          setOrders(data.orders);
+        }
+        showToast(data.message, 'success');
+      } else {
+        showToast(data.message || 'Sync with MS SQL failed', 'error');
+      }
+    } catch (err) {
+      showToast('Error syncing with MS SQL database.', 'error');
+    }
+  };
+
   if (!isAuthenticated) {
     return <LoginModal onLoginSuccess={() => setIsAuthenticated(true)} />;
   }
@@ -292,6 +314,7 @@ export default function App() {
         mssqlConnected={settings?.mssqlConnected ?? true}
         easyPostMode={settings?.easyPostMode ?? 'test'}
         onLogout={() => setIsAuthenticated(false)}
+        onSyncMssql={handleSyncMssql}
       />
 
       {/* Primary Workspace View Switcher */}
@@ -306,6 +329,7 @@ export default function App() {
             onOpenAddressFixModal={(order) => setAddressFixOrder(order)}
             onGenerateBatchLabels={handleGenerateBatchLabels}
             onRefreshData={refreshAllData}
+            onSyncMssql={handleSyncMssql}
             loading={loading}
           />
         )}

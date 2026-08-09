@@ -24,6 +24,7 @@ interface NavbarProps {
   mssqlConnected: boolean;
   easyPostMode: string;
   onLogout: () => void;
+  onSyncMssql?: () => Promise<void>;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -36,7 +37,16 @@ export const Navbar: React.FC<NavbarProps> = ({
   mssqlConnected,
   easyPostMode,
   onLogout,
+  onSyncMssql,
 }) => {
+  const [isSyncing, setIsSyncing] = React.useState(false);
+
+  const handleSyncClick = async () => {
+    if (!onSyncMssql) return;
+    setIsSyncing(true);
+    await onSyncMssql();
+    setIsSyncing(false);
+  };
   return (
     <header className="bg-slate-900 border-b border-slate-800 text-white sticky top-0 z-30 shadow-sm">
       {/* Top Banner with System Statuses */}
@@ -46,9 +56,20 @@ export const Navbar: React.FC<NavbarProps> = ({
             <Database className={`w-3.5 h-3.5 ${mssqlConnected ? 'text-emerald-400' : 'text-rose-400'}`} />
             <span>
               MSSQL DB: <strong className={mssqlConnected ? 'text-emerald-300 font-medium' : 'text-rose-300'}>
-                {mssqlConnected ? 'Connected (ProductionShippingDB)' : 'Disconnected'}
+                {mssqlConnected ? 'Connected (Live DB)' : 'Disconnected'}
               </strong>
             </span>
+            {mssqlConnected && onSyncMssql && (
+              <button
+                type="button"
+                onClick={handleSyncClick}
+                disabled={isSyncing}
+                className="ml-1 bg-emerald-950 hover:bg-emerald-900 border border-emerald-700/60 text-emerald-300 text-[10px] font-semibold px-2 py-0.5 rounded cursor-pointer transition-colors disabled:opacity-50"
+                title="Sync orders directly with MS SQL database"
+              >
+                {isSyncing ? 'Syncing...' : 'Sync MS SQL'}
+              </button>
+            )}
           </div>
           <span className="text-slate-800">|</span>
           <div className="flex items-center space-x-1.5">

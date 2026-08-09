@@ -72,6 +72,298 @@ async function testMssqlConnection(config: {
   }
 }
 
+// MS SQL Active Connection Pool & Query Helpers
+let activeMssqlPool: sql.ConnectionPool | null = null;
+
+async function getMssqlPool(): Promise<sql.ConnectionPool | null> {
+  if (!db.settings.mssqlServer || !db.settings.mssqlDatabase || !db.settings.mssqlUser) {
+    return null;
+  }
+
+  if (activeMssqlPool && activeMssqlPool.connected) {
+    return activeMssqlPool;
+  }
+
+  let serverHost = db.settings.mssqlServer.trim();
+  let serverPort = db.settings.mssqlPort || 1433;
+
+  if (serverHost.includes(':')) {
+    const parts = serverHost.split(':');
+    serverHost = parts[0];
+    serverPort = parseInt(parts[1], 10) || serverPort;
+  } else if (serverHost.includes(',')) {
+    const parts = serverHost.split(',');
+    serverHost = parts[0];
+    serverPort = parseInt(parts[1], 10) || serverPort;
+  }
+
+  const sqlConfig: sql.config = {
+    server: serverHost,
+    port: serverPort,
+    database: db.settings.mssqlDatabase,
+    user: db.settings.mssqlUser,
+    password: db.settings.mssqlPassword || process.env.MSSQL_PASSWORD || '',
+    options: {
+      encrypt: db.settings.mssqlEncrypt ?? false,
+      trustServerCertificate: true,
+      connectTimeout: 5000,
+      requestTimeout: 10000,
+    },
+  };
+
+  try {
+    const pool = new sql.ConnectionPool(sqlConfig);
+    await pool.connect();
+    activeMssqlPool = pool;
+    db.settings.mssqlConnected = true;
+    db.settings.mssqlError = null;
+    return pool;
+  } catch (err: any) {
+    db.settings.mssqlConnected = false;
+    db.settings.mssqlError = err?.message || String(err);
+    activeMssqlPool = null;
+    return null;
+  }
+}
+
+// Ensure Database Tables Exist in MS SQL Server
+async function ensureMssqlTables(pool: sql.ConnectionPool) {
+  try {
+    // 1. Packages table
+    await pool.request().query(`
+      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'packages')
+      BEGIN
+          CREATE TABLE packages (
+              id VARCHAR(50) PRIMARY KEY,
+              code VARCHAR(20) NOT NULL,
+              name VARCHAR(100) NOT NULL,
+              length DECIMAL(8,2) NOT NULL,
+              width DECIMAL(8,2) NOT NULL,
+              height DECIMAL(8,2) NOT NULL,
+              weight_empty_oz DECIMAL(8,2) DEFAULT 0,
+              max_weight_lbs DECIMAL(8,2) DEFAULT 70,
+              easypost_type VARCHAR(50) DEFAULT 'Parcel',
+              is_active BIT DEFAULT 1,
+              created_at DATETIME2 DEFAULT GETDATE()
+          );
+      END;
+    `);
+
+    // 2. Shipping orders table
+    await pool.request().query(`
+      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'shipping')
+      BEGIN
+          CREATE TABLE shipping (
+              id VARCHAR(50) PRIMARY KEY,
+              order_number VARCHAR(50) NOT NULL,
+              recipient_name VARCHAR(150) NOT NULL,
+              company VARCHAR(150),
+              street1 VARCHAR(255) NOT NULL,
+              street2 VARCHAR(255),
+              city VARCHAR(100) NOT NULL,
+              state VARCHAR(50) NOT NULL,
+              zip VARCHAR(20) NOT NULL,
+              country VARCHAR(10) DEFAULT 'US',
+              phone VARCHAR(50),
+              email VARCHAR(150),
+              order_date DATETIME2 NOT NULL,
+              status VARCHAR(30) DEFAULT 'pending_validation',
+              box_id VARCHAR(50),
+              weight_oz DECIMAL(8,2) DEFAULT 16,
+              declared_value DECIMAL(10,2) DEFAULT 0,
+              address_validated BIT DEFAULT 0,
+              address_notes NVARCHAR(MAX),
+              tracking_number VARCHAR(100),
+              carrier VARCHAR(30),
+              service_level VARCHAR(50),
+              shipping_cost DECIMAL(10,2),
+              shipping_date DATETIME2,
+              label_url NVARCHAR(MAX),
+              is_reshipment BIT DEFAULT 0,
+              reshipped_from_order_number VARCHAR(50),
+              items_json NVARCHAR(MAX),
+              updated_at DATETIME2 DEFAULT GETDATE()
+          );
+      END;
+    `);
+
+    // Check count in shipping table; if empty and we have seed orders, populate MS SQL
+    const countRes = await pool.request().query('SELECT COUNT(*) as cnt FROM shipping');
+    const orderCount = countRes.recordset[0]?.cnt || 0;
+    if (orderCount === 0 && db.orders.length > 0) {
+      console.log('[MSSQL] Table empty. Seeding initial orders into MS SQL database...');
+      for (const order of db.orders) {
+        await saveOrderToMssqlPool(pool, order);
+      }
+    }
+  } catch (err) {
+    console.error('[MSSQL] Error verifying/creating tables:', err);
+  }
+}
+
+// Save or Update a single order in MS SQL Server
+async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrder) {
+  try {
+    const req = pool.request();
+    req.input('id', sql.VarChar(50), order.id);
+    req.input('order_number', sql.VarChar(50), order.orderNumber);
+    req.input('recipient_name', sql.VarChar(150), order.recipientName);
+    req.input('company', sql.VarChar(150), order.company || '');
+    req.input('street1', sql.VarChar(255), order.street1);
+    req.input('street2', sql.VarChar(255), order.street2 || '');
+    req.input('city', sql.VarChar(100), order.city);
+    req.input('state', sql.VarChar(50), order.state);
+    req.input('zip', sql.VarChar(20), order.zip);
+    req.input('country', sql.VarChar(10), order.country || 'US');
+    req.input('phone', sql.VarChar(50), order.phone || '');
+    req.input('email', sql.VarChar(150), order.email || '');
+    req.input('order_date', sql.DateTime2, new Date(order.orderDate));
+    req.input('status', sql.VarChar(30), order.status);
+    req.input('box_id', sql.VarChar(50), order.boxId || 'pkg_medium');
+    req.input('weight_oz', sql.Decimal(8, 2), order.weightOz || 16);
+    req.input('declared_value', sql.Decimal(10, 2), order.declaredValue || 0);
+    req.input('address_validated', sql.Bit, order.addressValidated ? 1 : 0);
+    req.input('address_notes', sql.NVarChar(sql.MAX), order.addressNotes || '');
+    req.input('tracking_number', sql.VarChar(100), order.trackingNumber || null);
+    req.input('carrier', sql.VarChar(30), order.carrier || null);
+    req.input('service_level', sql.VarChar(50), order.serviceLevel || null);
+    req.input('shipping_cost', sql.Decimal(10, 2), order.shippingCost || null);
+    req.input('shipping_date', sql.DateTime2, order.shippingDate ? new Date(order.shippingDate) : null);
+    req.input('label_url', sql.NVarChar(sql.MAX), order.labelUrl || null);
+    req.input('is_reshipment', sql.Bit, order.isReshipment ? 1 : 0);
+    req.input('reshipped_from_order_number', sql.VarChar(50), order.reshippedFromOrderNumber || null);
+    req.input('items_json', sql.NVarChar(sql.MAX), JSON.stringify(order.items || []));
+
+    await req.query(`
+      MERGE INTO shipping AS target
+      USING (SELECT @id AS id) AS source
+      ON (target.id = source.id)
+      WHEN MATCHED THEN
+        UPDATE SET
+          order_number = @order_number,
+          recipient_name = @recipient_name,
+          company = @company,
+          street1 = @street1,
+          street2 = @street2,
+          city = @city,
+          state = @state,
+          zip = @zip,
+          country = @country,
+          phone = @phone,
+          email = @email,
+          order_date = @order_date,
+          status = @status,
+          box_id = @box_id,
+          weight_oz = @weight_oz,
+          declared_value = @declared_value,
+          address_validated = @address_validated,
+          address_notes = @address_notes,
+          tracking_number = @tracking_number,
+          carrier = @carrier,
+          service_level = @service_level,
+          shipping_cost = @shipping_cost,
+          shipping_date = @shipping_date,
+          label_url = @label_url,
+          is_reshipment = @is_reshipment,
+          reshipped_from_order_number = @reshipped_from_order_number,
+          items_json = @items_json,
+          updated_at = GETDATE()
+      WHEN NOT MATCHED THEN
+        INSERT (
+          id, order_number, recipient_name, company, street1, street2, city, state, zip, country,
+          phone, email, order_date, status, box_id, weight_oz, declared_value, address_validated,
+          address_notes, tracking_number, carrier, service_level, shipping_cost, shipping_date,
+          label_url, is_reshipment, reshipped_from_order_number, items_json
+        ) VALUES (
+          @id, @order_number, @recipient_name, @company, @street1, @street2, @city, @state, @zip, @country,
+          @phone, @email, @order_date, @status, @box_id, @weight_oz, @declared_value, @address_validated,
+          @address_notes, @tracking_number, @carrier, @service_level, @shipping_cost, @shipping_date,
+          @label_url, @is_reshipment, @reshipped_from_order_number, @items_json
+        );
+    `);
+  } catch (err) {
+    console.error('[MSSQL] Error in saveOrderToMssqlPool:', err);
+  }
+}
+
+// Fetch Orders directly from MS SQL Server database
+async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
+  const pool = await getMssqlPool();
+  if (!pool) return null;
+
+  try {
+    await ensureMssqlTables(pool);
+    const result = await pool.request().query(`
+      SELECT 
+        s.*,
+        p.name as box_name
+      FROM shipping s
+      LEFT JOIN packages p ON s.box_id = p.id
+      ORDER BY s.order_date DESC
+    `);
+
+    const orders: ShippingOrder[] = result.recordset.map((row: any) => {
+      let items: any[] = [];
+      if (row.items_json) {
+        try {
+          items = JSON.parse(row.items_json);
+        } catch (e) {
+          items = [];
+        }
+      }
+      if (!Array.isArray(items) || items.length === 0) {
+        items = [
+          {
+            sku: 'SKU-GENERAL',
+            name: 'Standard Order Item',
+            quantity: 1,
+            price: Number(row.declared_value) || 0,
+            weightOz: Number(row.weight_oz) || 16,
+          },
+        ];
+      }
+
+      return {
+        id: String(row.id),
+        orderNumber: String(row.order_number),
+        recipientName: String(row.recipient_name),
+        company: row.company ? String(row.company) : '',
+        street1: String(row.street1),
+        street2: row.street2 ? String(row.street2) : '',
+        city: String(row.city),
+        state: String(row.state),
+        zip: String(row.zip),
+        country: row.country ? String(row.country) : 'US',
+        phone: row.phone ? String(row.phone) : '',
+        email: row.email ? String(row.email) : '',
+        orderDate: row.order_date ? new Date(row.order_date).toISOString() : new Date().toISOString(),
+        status: row.status || 'pending_validation',
+        boxId: row.box_id || 'pkg_medium',
+        boxName: row.box_name || 'Medium Flat Rate Box',
+        weightOz: Number(row.weight_oz) || 16,
+        declaredValue: Number(row.declared_value) || 0,
+        addressValidated: Boolean(row.address_validated),
+        addressNotes: row.address_notes || undefined,
+        trackingNumber: row.tracking_number || undefined,
+        carrier: row.carrier || undefined,
+        serviceLevel: row.service_level || undefined,
+        shippingCost: row.shipping_cost ? Number(row.shipping_cost) : undefined,
+        shippingDate: row.shipping_date ? new Date(row.shipping_date).toISOString() : undefined,
+        labelUrl: row.label_url || undefined,
+        isReshipment: Boolean(row.is_reshipment),
+        reshippedFromOrderNumber: row.reshipped_from_order_number || undefined,
+        items,
+      };
+    });
+
+    db.orders = orders;
+    return orders;
+  } catch (err: any) {
+    console.error('[MSSQL] Error fetching orders from MS SQL:', err);
+    return null;
+  }
+}
+
 // In-Memory Database Store with persistence simulator
 interface DatabaseSchema {
   packages: PackageType[];
@@ -507,8 +799,17 @@ app.post('/api/auth/logout', (req, res) => {
 });
 
 // Orders API
-app.get('/api/orders', (req, res) => {
+app.get('/api/orders', async (req, res) => {
   const { status, search, shippedOnly } = req.query;
+
+  // If MS SQL Server settings are present, attempt to pull live orders from MS SQL
+  if (db.settings.mssqlServer && db.settings.mssqlDatabase && db.settings.mssqlUser) {
+    const liveOrders = await fetchOrdersFromMssql();
+    if (liveOrders) {
+      db.orders = liveOrders;
+    }
+  }
+
   let result = [...db.orders];
 
   if (shippedOnly === 'true') {
@@ -536,7 +837,7 @@ app.get('/api/orders', (req, res) => {
 });
 
 // Create Manual Order
-app.post('/api/orders', (req, res) => {
+app.post('/api/orders', async (req, res) => {
   const { recipientName, company, street1, street2, city, state, zip, country, phone, email, orderNumber, boxId, weightOz } = req.body;
 
   if (!recipientName || !street1 || !city || !state || !zip) {
@@ -583,11 +884,18 @@ app.post('/api/orders', (req, res) => {
   };
 
   db.orders.unshift(newOrder);
+
+  // Sync to MS SQL Server
+  const pool = await getMssqlPool();
+  if (pool) {
+    await saveOrderToMssqlPool(pool, newOrder);
+  }
+
   res.status(201).json(newOrder);
 });
 
 // Update Order (Box selection, address fix, etc.)
-app.put('/api/orders/:id', (req, res) => {
+app.put('/api/orders/:id', async (req, res) => {
   const { id } = req.params;
   const index = db.orders.findIndex((o) => o.id === id);
   if (index === -1) return res.status(404).json({ error: 'Order not found' });
@@ -625,11 +933,17 @@ app.put('/api/orders/:id', (req, res) => {
   const updatedOrder = { ...current, ...updates, updatedAt: new Date().toISOString() };
   db.orders[index] = updatedOrder;
 
+  // Sync to MS SQL Server
+  const pool = await getMssqlPool();
+  if (pool) {
+    await saveOrderToMssqlPool(pool, updatedOrder);
+  }
+
   res.json(updatedOrder);
 });
 
 // Validate Addresses Batch Endpoint
-app.post('/api/orders/validate-addresses', (req, res) => {
+app.post('/api/orders/validate-addresses', async (req, res) => {
   const { orderIds } = req.body;
   const targetOrders = orderIds
     ? db.orders.filter((o) => orderIds.includes(o.id))
@@ -638,7 +952,9 @@ app.post('/api/orders/validate-addresses', (req, res) => {
   let validatedCount = 0;
   let errorCount = 0;
 
-  targetOrders.forEach((order) => {
+  const pool = await getMssqlPool();
+
+  for (const order of targetOrders) {
     const val = validateAddressWithEasyPost({
       street1: order.street1,
       street2: order.street2,
@@ -662,7 +978,11 @@ app.post('/api/orders/validate-addresses', (req, res) => {
       order.status = 'address_error';
       errorCount++;
     }
-  });
+
+    if (pool) {
+      await saveOrderToMssqlPool(pool, order);
+    }
+  }
 
   res.json({
     success: true,
@@ -672,7 +992,7 @@ app.post('/api/orders/validate-addresses', (req, res) => {
 });
 
 // Create Postage Labels Batch Endpoint
-app.post('/api/orders/create-labels-batch', (req, res) => {
+app.post('/api/orders/create-labels-batch', async (req, res) => {
   const { orderIds } = req.body;
   if (!orderIds || !Array.isArray(orderIds) || orderIds.length === 0) {
     return res.status(400).json({ error: 'Please select at least one order for label generation.' });
@@ -692,7 +1012,10 @@ app.post('/api/orders/create-labels-batch', (req, res) => {
   let batchTotalCost = 0;
   const processed: ShippingOrder[] = [];
 
-  selectedOrders.forEach((order, idx) => {
+  const pool = await getMssqlPool();
+
+  for (let idx = 0; idx < selectedOrders.length; idx++) {
+    const order = selectedOrders[idx];
     const box = db.packages.find((p) => p.id === order.boxId) || db.packages[0];
     const carrier = carriers[idx % carriers.length];
 
@@ -713,9 +1036,13 @@ app.post('/api/orders/create-labels-batch', (req, res) => {
     order.shippingDate = new Date().toISOString();
     order.boxName = box.name;
 
+    if (pool) {
+      await saveOrderToMssqlPool(pool, order);
+    }
+
     batchTotalCost += cost;
     processed.push(order);
-  });
+  }
 
   res.json({
     success: true,
@@ -767,6 +1094,13 @@ app.post('/api/orders/:id/reship', (req, res) => {
   };
 
   db.orders.unshift(replacementOrder);
+
+  // Sync to MS SQL Server
+  getMssqlPool().then((pool) => {
+    if (pool) {
+      saveOrderToMssqlPool(pool, replacementOrder);
+    }
+  });
 
   res.status(201).json({
     success: true,
@@ -870,6 +1204,48 @@ app.post('/api/mssql/test', async (req, res) => {
   db.settings.mssqlError = result.success ? null : result.message;
 
   res.json(result);
+});
+
+// Explicit Sync MS SQL Orders (Pull latest from DB or Push current queue to DB)
+app.post('/api/mssql/sync', async (req, res) => {
+  const pool = await getMssqlPool();
+  if (!pool) {
+    return res.status(400).json({
+      success: false,
+      message: db.settings.mssqlError || 'Could not establish connection to MS SQL Server.',
+    });
+  }
+
+  await ensureMssqlTables(pool);
+
+  const action = req.body.action || 'pull'; // 'pull' or 'push'
+
+  if (action === 'push') {
+    let synced = 0;
+    for (const order of db.orders) {
+      await saveOrderToMssqlPool(pool, order);
+      synced++;
+    }
+    return res.json({
+      success: true,
+      message: `Successfully pushed ${synced} orders to MS SQL Server database.`,
+      orders: db.orders,
+    });
+  } else {
+    const liveOrders = await fetchOrdersFromMssql();
+    if (liveOrders) {
+      return res.json({
+        success: true,
+        message: `Successfully pulled ${liveOrders.length} live orders from MS SQL Server database.`,
+        orders: liveOrders,
+      });
+    } else {
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to retrieve orders from MS SQL Server database.',
+      });
+    }
+  }
 });
 
 // Reports & Analytics API
@@ -1037,7 +1413,15 @@ async function startServer() {
         db.settings.mssqlConnected = testRes.success;
         db.settings.mssqlError = testRes.success ? null : testRes.message;
         console.log(`[MSSQL] Connection status: ${testRes.success ? 'CONNECTED' : 'DISCONNECTED'}`);
-        if (!testRes.success) {
+        if (testRes.success) {
+          fetchOrdersFromMssql()
+            .then((orders) => {
+              if (orders) {
+                console.log(`[MSSQL] Pre-loaded ${orders.length} orders from MS SQL database.`);
+              }
+            })
+            .catch((e) => console.error('[MSSQL] Error loading orders on start:', e));
+        } else {
           console.log(`[MSSQL] Details: ${testRes.message}`);
         }
       })

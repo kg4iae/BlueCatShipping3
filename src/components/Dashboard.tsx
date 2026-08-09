@@ -17,6 +17,7 @@ import {
   ShieldCheck,
   RefreshCw,
   Info,
+  Database,
 } from 'lucide-react';
 
 interface DashboardProps {
@@ -28,6 +29,7 @@ interface DashboardProps {
   onOpenAddressFixModal: (order: ShippingOrder) => void;
   onGenerateBatchLabels: (selectedOrderIds: string[]) => Promise<void>;
   onRefreshData: () => Promise<void>;
+  onSyncMssql?: (action?: 'pull' | 'push') => Promise<void>;
   loading: boolean;
 }
 
@@ -40,6 +42,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onOpenAddressFixModal,
   onGenerateBatchLabels,
   onRefreshData,
+  onSyncMssql,
   loading,
 }) => {
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -47,6 +50,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [selectedOrderIds, setSelectedOrderIds] = useState<string[]>([]);
   const [isValidating, setIsValidating] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  const handleSyncMssql = async (action: 'pull' | 'push' = 'pull') => {
+    if (!onSyncMssql) return;
+    setIsSyncing(true);
+    await onSyncMssql(action);
+    setIsSyncing(false);
+  };
 
   // Filter orders
   const filteredOrders = orders.filter((order) => {
@@ -106,6 +117,77 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* MS SQL Database Status Banner */}
+      <div className={`rounded-xl p-4 border shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 ${
+        settings.mssqlConnected
+          ? 'bg-emerald-50/80 border-emerald-200/80 text-emerald-950'
+          : 'bg-amber-50/80 border-amber-200/80 text-amber-950'
+      }`}>
+        <div className="flex items-start space-x-3">
+          <div className={`p-2 rounded-lg border mt-0.5 ${
+            settings.mssqlConnected
+              ? 'bg-emerald-100 border-emerald-200 text-emerald-700'
+              : 'bg-amber-100 border-amber-200 text-amber-700'
+          }`}>
+            <Database className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center space-x-2">
+              <h4 className="font-semibold text-sm">
+                MS SQL Database Connection: {settings.mssqlConnected ? 'Connected & Active' : 'Not Connected / Local Mode'}
+              </h4>
+              <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                settings.mssqlConnected ? 'bg-emerald-600 text-white' : 'bg-amber-600 text-white'
+              }`}>
+                {settings.mssqlConnected ? 'Live MS SQL' : 'Local Data'}
+              </span>
+            </div>
+            <p className="text-xs mt-0.5 opacity-80">
+              {settings.mssqlConnected
+                ? `Server: ${settings.mssqlServer || 'Configured'} | Database: ${settings.mssqlDatabase || 'shipping'} | Total Records: ${orders.length}`
+                : 'Connect your MS SQL Server in Settings to load live shipping orders directly from your database.'}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center space-x-2 w-full sm:w-auto justify-end">
+          {settings.mssqlConnected ? (
+            <>
+              <button
+                type="button"
+                onClick={() => handleSyncMssql('pull')}
+                disabled={isSyncing}
+                className="inline-flex items-center space-x-1.5 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold px-3 py-1.5 rounded-lg shadow-sm cursor-pointer transition-colors disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                <span>{isSyncing ? 'Pulling...' : 'Pull Live MS SQL Orders'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSyncMssql('push')}
+                disabled={isSyncing}
+                className="inline-flex items-center space-x-1.5 bg-white hover:bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs font-semibold px-3 py-1.5 rounded-lg shadow-sm cursor-pointer transition-colors disabled:opacity-50"
+                title="Upload all active dashboard orders into the MS SQL shipping table"
+              >
+                <span>Push Queue to MS SQL</span>
+              </button>
+            </>
+          ) : (
+            <a
+              href="#settings"
+              onClick={(e) => {
+                e.preventDefault();
+                const settingsBtn = document.querySelector('[data-tab="settings"]') as HTMLButtonElement;
+                if (settingsBtn) settingsBtn.click();
+              }}
+              className="inline-flex items-center space-x-1 bg-amber-700 hover:bg-amber-800 text-white text-xs font-semibold px-3 py-1.5 rounded-lg shadow-sm cursor-pointer transition-colors"
+            >
+              <span>Configure MS SQL Database</span>
+            </a>
+          )}
+        </div>
+      </div>
+
       {/* Overview Stat Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between">
