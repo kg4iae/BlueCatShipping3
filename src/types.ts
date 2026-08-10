@@ -131,6 +131,32 @@ export interface MonthlyReportData {
   boxBreakdown: Record<string, number>;
 }
 
+export interface ScanFormType {
+  id: string;
+  status: 'created' | 'submitted';
+  formUrl?: string;
+  createdAt: string;
+  formDate: string;
+  totalPackages: number;
+  trackingNumbers: string[];
+  orderNumbers: string[];
+  carrier: string;
+  batchId?: string;
+  easypostId?: string;
+  serviceBreakdown?: Record<string, number>;
+  senderAddress?: {
+    name?: string;
+    company?: string;
+    street1?: string;
+    street2?: string;
+    city?: string;
+    state?: string;
+    zip?: string;
+    country?: string;
+    phone?: string;
+  };
+}
+
 export interface UserSession {
   isAuthenticated: boolean;
   username: string;

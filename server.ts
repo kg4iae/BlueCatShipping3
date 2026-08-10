@@ -2,7 +2,8 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import sql from 'mssql';
-import { ShippingOrder, PackageType, AppSetting, MonthlyReportData } from './src/types.js';
+import { jsPDF } from 'jspdf';
+import { ShippingOrder, PackageType, AppSetting, MonthlyReportData, OrderStatus, CarrierType, ScanFormType } from './src/types.js';
 
 const app = express();
 const PORT = 3000;
@@ -129,164 +130,267 @@ async function getMssqlPool(): Promise<sql.ConnectionPool | null> {
 // Ensure Database Tables Exist in MS SQL Server
 async function ensureMssqlTables(pool: sql.ConnectionPool) {
   try {
-    // 1. Packages table
+    // 1. Package reference table (User's [dbo].[Package])
     await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'packages')
+      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Package')
       BEGIN
-          CREATE TABLE packages (
-              id VARCHAR(50) PRIMARY KEY,
-              code VARCHAR(20) NOT NULL,
-              name VARCHAR(100) NOT NULL,
-              length DECIMAL(8,2) NOT NULL,
-              width DECIMAL(8,2) NOT NULL,
-              height DECIMAL(8,2) NOT NULL,
-              weight_empty_oz DECIMAL(8,2) DEFAULT 0,
-              max_weight_lbs DECIMAL(8,2) DEFAULT 70,
-              easypost_type VARCHAR(50) DEFAULT 'Parcel',
-              is_active BIT DEFAULT 1,
-              created_at DATETIME2 DEFAULT GETDATE()
+          CREATE TABLE [dbo].[Package](
+              [Id] [int] IDENTITY(1,1) NOT NULL,
+              [Name] [nvarchar](100) NOT NULL,
+              [Length] [decimal](10, 2) NOT NULL,
+              [Width] [decimal](10, 2) NOT NULL,
+              [Height] [decimal](10, 2) NOT NULL,
+              [Weight] [decimal](10, 2) NOT NULL,
+              CONSTRAINT [PK_Package_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
           );
       END;
     `);
 
-    // 2. Shipping orders table
+    // Check count in Package table; if empty and we have seed packages, populate MS SQL
+    const pkgCountRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Package]');
+    const pkgCount = pkgCountRes.recordset[0]?.cnt || 0;
+    if (pkgCount === 0 && db.packages.length > 0) {
+      console.log('[MSSQL] Table [dbo].[Package] empty. Seeding initial packages into MS SQL database...');
+      for (const pkg of db.packages) {
+        await savePackageToMssqlPool(pool, pkg);
+      }
+    }
+
+    // 2. Exact user Shipping orders table
     await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'shipping')
+      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Shipping')
       BEGIN
-          CREATE TABLE shipping (
-              id VARCHAR(50) PRIMARY KEY,
-              order_number VARCHAR(50) NOT NULL,
-              recipient_name VARCHAR(150) NOT NULL,
-              company VARCHAR(150),
-              street1 VARCHAR(255) NOT NULL,
-              street2 VARCHAR(255),
-              city VARCHAR(100) NOT NULL,
-              state VARCHAR(50) NOT NULL,
-              zip VARCHAR(20) NOT NULL,
-              country VARCHAR(10) DEFAULT 'US',
-              phone VARCHAR(50),
-              email VARCHAR(150),
-              order_date DATETIME2 NOT NULL,
-              status VARCHAR(30) DEFAULT 'pending_validation',
-              box_id VARCHAR(50),
-              weight_oz DECIMAL(8,2) DEFAULT 16,
-              declared_value DECIMAL(10,2) DEFAULT 0,
-              address_validated BIT DEFAULT 0,
-              address_notes NVARCHAR(MAX),
-              tracking_number VARCHAR(100),
-              carrier VARCHAR(30),
-              service_level VARCHAR(50),
-              shipping_cost DECIMAL(10,2),
-              shipping_date DATETIME2,
-              label_url NVARCHAR(MAX),
-              is_reshipment BIT DEFAULT 0,
-              reshipped_from_order_number VARCHAR(50),
-              items_json NVARCHAR(MAX),
-              updated_at DATETIME2 DEFAULT GETDATE()
+          CREATE TABLE [dbo].[Shipping](
+              [Id] [int] IDENTITY(1,1) NOT NULL,
+              [name] [nvarchar](max) NULL,
+              [address1] [nvarchar](max) NULL,
+              [address2] [nvarchar](max) NULL,
+              [city] [nvarchar](max) NULL,
+              [state] [nvarchar](max) NULL,
+              [postalCode] [nvarchar](max) NULL,
+              [country] [nvarchar](max) NULL,
+              [phone] [nvarchar](max) NULL,
+              [email] [nvarchar](max) NULL,
+              [createdAt] [datetime2](7) NULL,
+              [OrderDetails] [nvarchar](max) NULL,
+              [receiptID] [nvarchar](max) NULL,
+              [shippingMethod] [nvarchar](max) NULL,
+              [trackingNumber] [nvarchar](max) NULL,
+              [status] [nvarchar](max) NULL,
+              [shippingCost] [decimal](18, 2) NULL,
+              [shippingDate] [datetime2](7) NULL,
+              [platform] [nvarchar](max) NULL,
+              [TotalWeight] [float] NOT NULL DEFAULT 16,
+              [box] [varchar](50) NULL,
+              [easypostShipmentId] [nvarchar](64) NULL,
+              CONSTRAINT [PK_Shipping_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
           );
       END;
     `);
 
-    // Check count in shipping table; if empty and we have seed orders, populate MS SQL
-    const countRes = await pool.request().query('SELECT COUNT(*) as cnt FROM shipping');
+    // Check count in Shipping table; if empty and we have seed orders, populate MS SQL
+    const countRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Shipping]');
     const orderCount = countRes.recordset[0]?.cnt || 0;
     if (orderCount === 0 && db.orders.length > 0) {
-      console.log('[MSSQL] Table empty. Seeding initial orders into MS SQL database...');
+      console.log('[MSSQL] Table [dbo].[Shipping] empty. Seeding initial orders into MS SQL database...');
       for (const order of db.orders) {
         await saveOrderToMssqlPool(pool, order);
       }
     }
   } catch (err) {
-    console.error('[MSSQL] Error verifying/creating tables:', err);
+    console.error('[MSSQL] Error verifying/creating MS SQL tables:', err);
   }
 }
 
-// Save or Update a single order in MS SQL Server
+// Save or Update a single package in MS SQL Server [dbo].[Package]
+async function savePackageToMssqlPool(pool: sql.ConnectionPool, pkg: PackageType) {
+  try {
+    const req = pool.request();
+    const numericId = parseInt(pkg.id, 10);
+    const validNumId = !isNaN(numericId) && numericId > 0;
+
+    req.input('id', sql.Int, validNumId ? numericId : -1);
+    req.input('name', sql.NVarChar(100), pkg.name);
+    req.input('length', sql.Decimal(10, 2), pkg.length);
+    req.input('width', sql.Decimal(10, 2), pkg.width);
+    req.input('height', sql.Decimal(10, 2), pkg.height);
+    req.input('weight', sql.Decimal(10, 2), pkg.weightEmptyOz || 0);
+
+    await req.query(`
+      IF (@id > 0 AND EXISTS (SELECT 1 FROM [dbo].[Package] WHERE [Id] = @id))
+      BEGIN
+          UPDATE [dbo].[Package] SET
+              [Name] = @name,
+              [Length] = @length,
+              [Width] = @width,
+              [Height] = @height,
+              [Weight] = @weight
+          WHERE [Id] = @id;
+      END
+      ELSE IF (EXISTS (SELECT 1 FROM [dbo].[Package] WHERE [Name] = @name))
+      BEGIN
+          UPDATE [dbo].[Package] SET
+              [Length] = @length,
+              [Width] = @width,
+              [Height] = @height,
+              [Weight] = @weight
+          WHERE [Name] = @name;
+      END
+      ELSE
+      BEGIN
+          INSERT INTO [dbo].[Package] (
+              [Name], [Length], [Width], [Height], [Weight]
+          ) VALUES (
+              @name, @length, @width, @height, @weight
+          );
+      END
+    `);
+  } catch (err) {
+    console.error('[MSSQL] Error in savePackageToMssqlPool:', err);
+  }
+}
+
+// Fetch Packages directly from MS SQL Server [dbo].[Package] table
+async function fetchPackagesFromMssql(): Promise<PackageType[] | null> {
+  const pool = await getMssqlPool();
+  if (!pool) return null;
+
+  try {
+    await ensureMssqlTables(pool);
+    const result = await pool.request().query(`
+      SELECT *
+      FROM [dbo].[Package]
+      ORDER BY [Id] ASC
+    `);
+
+    const packages: PackageType[] = result.recordset.map((row: any) => ({
+      id: String(row.Id),
+      code: `PKG-${row.Id}`,
+      name: String(row.Name),
+      length: Number(row.Length) || 0,
+      width: Number(row.Width) || 0,
+      height: Number(row.Height) || 0,
+      weightEmptyOz: Number(row.Weight) || 0,
+      maxWeightLbs: 70,
+      easyPostType: 'Parcel',
+      isActive: true,
+    }));
+
+    if (packages.length > 0) {
+      db.packages = packages;
+    }
+    return packages;
+  } catch (err: any) {
+    console.error('[MSSQL] Error fetching packages from MS SQL [dbo].[Package]:', err);
+    return null;
+  }
+}
+
+// Save or Update a single order in MS SQL Server [dbo].[Shipping]
 async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrder) {
   try {
     const req = pool.request();
-    req.input('id', sql.VarChar(50), order.id);
-    req.input('order_number', sql.VarChar(50), order.orderNumber);
-    req.input('recipient_name', sql.VarChar(150), order.recipientName);
-    req.input('company', sql.VarChar(150), order.company || '');
-    req.input('street1', sql.VarChar(255), order.street1);
-    req.input('street2', sql.VarChar(255), order.street2 || '');
-    req.input('city', sql.VarChar(100), order.city);
-    req.input('state', sql.VarChar(50), order.state);
-    req.input('zip', sql.VarChar(20), order.zip);
-    req.input('country', sql.VarChar(10), order.country || 'US');
-    req.input('phone', sql.VarChar(50), order.phone || '');
-    req.input('email', sql.VarChar(150), order.email || '');
-    req.input('order_date', sql.DateTime2, new Date(order.orderDate));
-    req.input('status', sql.VarChar(30), order.status);
-    req.input('box_id', sql.VarChar(50), order.boxId || 'pkg_medium');
-    req.input('weight_oz', sql.Decimal(8, 2), order.weightOz || 16);
-    req.input('declared_value', sql.Decimal(10, 2), order.declaredValue || 0);
-    req.input('address_validated', sql.Bit, order.addressValidated ? 1 : 0);
-    req.input('address_notes', sql.NVarChar(sql.MAX), order.addressNotes || '');
-    req.input('tracking_number', sql.VarChar(100), order.trackingNumber || null);
-    req.input('carrier', sql.VarChar(30), order.carrier || null);
-    req.input('service_level', sql.VarChar(50), order.serviceLevel || null);
-    req.input('shipping_cost', sql.Decimal(10, 2), order.shippingCost || null);
-    req.input('shipping_date', sql.DateTime2, order.shippingDate ? new Date(order.shippingDate) : null);
-    req.input('label_url', sql.NVarChar(sql.MAX), order.labelUrl || null);
-    req.input('is_reshipment', sql.Bit, order.isReshipment ? 1 : 0);
-    req.input('reshipped_from_order_number', sql.VarChar(50), order.reshippedFromOrderNumber || null);
-    req.input('items_json', sql.NVarChar(sql.MAX), JSON.stringify(order.items || []));
+    const numericId = parseInt(order.id, 10);
+    const validNumId = !isNaN(numericId) && numericId > 0;
+
+    req.input('id', sql.Int, validNumId ? numericId : -1);
+    req.input('name', sql.NVarChar(sql.MAX), order.recipientName);
+    req.input('address1', sql.NVarChar(sql.MAX), order.street1);
+    req.input('address2', sql.NVarChar(sql.MAX), order.street2 || '');
+    req.input('city', sql.NVarChar(sql.MAX), order.city);
+    req.input('state', sql.NVarChar(sql.MAX), order.state);
+    req.input('postalCode', sql.NVarChar(sql.MAX), order.zip);
+    req.input('country', sql.NVarChar(sql.MAX), order.country || 'US');
+    req.input('phone', sql.NVarChar(sql.MAX), order.phone || '');
+    req.input('email', sql.NVarChar(sql.MAX), order.email || '');
+    req.input('createdAt', sql.DateTime2(7), new Date(order.orderDate));
+    req.input('OrderDetails', sql.NVarChar(sql.MAX), JSON.stringify(order.items || []));
+    req.input('receiptID', sql.NVarChar(sql.MAX), order.orderNumber);
+    req.input(
+      'shippingMethod',
+      sql.NVarChar(sql.MAX),
+      order.carrier ? `${order.carrier} ${order.serviceLevel || ''}`.trim() : order.serviceLevel || ''
+    );
+    req.input('trackingNumber', sql.NVarChar(sql.MAX), order.trackingNumber || null);
+    req.input('status', sql.NVarChar(sql.MAX), order.status);
+    req.input('shippingCost', sql.Decimal(18, 2), order.shippingCost || null);
+    req.input('shippingDate', sql.DateTime2(7), order.shippingDate ? new Date(order.shippingDate) : null);
+    req.input('platform', sql.NVarChar(sql.MAX), order.company || 'Web App');
+    req.input('TotalWeight', sql.Float, order.weightOz || 16);
+    req.input('box', sql.VarChar(50), order.boxId || 'pkg_medium');
+    req.input('easypostShipmentId', sql.NVarChar(64), order.labelUrl || null);
 
     await req.query(`
-      MERGE INTO shipping AS target
-      USING (SELECT @id AS id) AS source
-      ON (target.id = source.id)
-      WHEN MATCHED THEN
-        UPDATE SET
-          order_number = @order_number,
-          recipient_name = @recipient_name,
-          company = @company,
-          street1 = @street1,
-          street2 = @street2,
-          city = @city,
-          state = @state,
-          zip = @zip,
-          country = @country,
-          phone = @phone,
-          email = @email,
-          order_date = @order_date,
-          status = @status,
-          box_id = @box_id,
-          weight_oz = @weight_oz,
-          declared_value = @declared_value,
-          address_validated = @address_validated,
-          address_notes = @address_notes,
-          tracking_number = @tracking_number,
-          carrier = @carrier,
-          service_level = @service_level,
-          shipping_cost = @shipping_cost,
-          shipping_date = @shipping_date,
-          label_url = @label_url,
-          is_reshipment = @is_reshipment,
-          reshipped_from_order_number = @reshipped_from_order_number,
-          items_json = @items_json,
-          updated_at = GETDATE()
-      WHEN NOT MATCHED THEN
-        INSERT (
-          id, order_number, recipient_name, company, street1, street2, city, state, zip, country,
-          phone, email, order_date, status, box_id, weight_oz, declared_value, address_validated,
-          address_notes, tracking_number, carrier, service_level, shipping_cost, shipping_date,
-          label_url, is_reshipment, reshipped_from_order_number, items_json
-        ) VALUES (
-          @id, @order_number, @recipient_name, @company, @street1, @street2, @city, @state, @zip, @country,
-          @phone, @email, @order_date, @status, @box_id, @weight_oz, @declared_value, @address_validated,
-          @address_notes, @tracking_number, @carrier, @service_level, @shipping_cost, @shipping_date,
-          @label_url, @is_reshipment, @reshipped_from_order_number, @items_json
-        );
+      IF (@id > 0 AND EXISTS (SELECT 1 FROM [dbo].[Shipping] WHERE [Id] = @id))
+      BEGIN
+          UPDATE [dbo].[Shipping] SET
+              [name] = @name,
+              [address1] = @address1,
+              [address2] = @address2,
+              [city] = @city,
+              [state] = @state,
+              [postalCode] = @postalCode,
+              [country] = @country,
+              [phone] = @phone,
+              [email] = @email,
+              [OrderDetails] = @OrderDetails,
+              [receiptID] = @receiptID,
+              [shippingMethod] = @shippingMethod,
+              [trackingNumber] = @trackingNumber,
+              [status] = @status,
+              [shippingCost] = @shippingCost,
+              [shippingDate] = @shippingDate,
+              [platform] = @platform,
+              [TotalWeight] = @TotalWeight,
+              [box] = @box,
+              [easypostShipmentId] = @easypostShipmentId
+          WHERE [Id] = @id;
+      END
+      ELSE IF (@receiptID IS NOT NULL AND EXISTS (SELECT 1 FROM [dbo].[Shipping] WHERE [receiptID] = @receiptID))
+      BEGIN
+          UPDATE [dbo].[Shipping] SET
+              [name] = @name,
+              [address1] = @address1,
+              [address2] = @address2,
+              [city] = @city,
+              [state] = @state,
+              [postalCode] = @postalCode,
+              [country] = @country,
+              [phone] = @phone,
+              [email] = @email,
+              [OrderDetails] = @OrderDetails,
+              [shippingMethod] = @shippingMethod,
+              [trackingNumber] = @trackingNumber,
+              [status] = @status,
+              [shippingCost] = @shippingCost,
+              [shippingDate] = @shippingDate,
+              [platform] = @platform,
+              [TotalWeight] = @TotalWeight,
+              [box] = @box,
+              [easypostShipmentId] = @easypostShipmentId
+          WHERE [receiptID] = @receiptID;
+      END
+      ELSE
+      BEGIN
+          INSERT INTO [dbo].[Shipping] (
+              [name], [address1], [address2], [city], [state], [postalCode], [country],
+              [phone], [email], [createdAt], [OrderDetails], [receiptID], [shippingMethod],
+              [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
+              [TotalWeight], [box], [easypostShipmentId]
+          ) VALUES (
+              @name, @address1, @address2, @city, @state, @postalCode, @country,
+              @phone, @email, @createdAt, @OrderDetails, @receiptID, @shippingMethod,
+              @trackingNumber, @status, @shippingCost, @shippingDate, @platform,
+              @TotalWeight, @box, @easypostShipmentId
+          );
+      END
     `);
   } catch (err) {
     console.error('[MSSQL] Error in saveOrderToMssqlPool:', err);
   }
 }
 
-// Fetch Orders directly from MS SQL Server database
+// Fetch Orders directly from MS SQL Server [dbo].[Shipping] table
 async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
   const pool = await getMssqlPool();
   if (!pool) return null;
@@ -294,21 +398,26 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
   try {
     await ensureMssqlTables(pool);
     const result = await pool.request().query(`
-      SELECT 
-        s.*,
-        p.name as box_name
-      FROM shipping s
-      LEFT JOIN packages p ON s.box_id = p.id
-      ORDER BY s.order_date DESC
+      SELECT *
+      FROM [dbo].[Shipping]
+      ORDER BY [Id] DESC
     `);
 
     const orders: ShippingOrder[] = result.recordset.map((row: any) => {
       let items: any[] = [];
-      if (row.items_json) {
+      if (row.OrderDetails) {
         try {
-          items = JSON.parse(row.items_json);
+          items = JSON.parse(row.OrderDetails);
         } catch (e) {
-          items = [];
+          items = [
+            {
+              sku: 'SKU-ITEM',
+              name: String(row.OrderDetails),
+              quantity: 1,
+              price: 0,
+              weightOz: Number(row.TotalWeight) || 16,
+            },
+          ];
         }
       }
       if (!Array.isArray(items) || items.length === 0) {
@@ -317,41 +426,55 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
             sku: 'SKU-GENERAL',
             name: 'Standard Order Item',
             quantity: 1,
-            price: Number(row.declared_value) || 0,
-            weightOz: Number(row.weight_oz) || 16,
+            price: 0,
+            weightOz: Number(row.TotalWeight) || 16,
           },
         ];
       }
 
+      const validStatuses: OrderStatus[] = ['pending_validation', 'address_error', 'ready_to_ship', 'shipped', 'cancelled'];
+      let statusVal: OrderStatus = 'pending_validation';
+      if (row.status && validStatuses.includes(row.status as OrderStatus)) {
+        statusVal = row.status as OrderStatus;
+      } else if (row.trackingNumber) {
+        statusVal = 'shipped';
+      }
+
+      const rawCarrierVal = row.shippingMethod ? String(row.shippingMethod).split(' ')[0] : undefined;
+      const validCarriers: CarrierType[] = ['USPS', 'FedEx', 'UPS', 'DHL'];
+      const carrier = rawCarrierVal && validCarriers.includes(rawCarrierVal as CarrierType) ? (rawCarrierVal as CarrierType) : undefined;
+
       return {
-        id: String(row.id),
-        orderNumber: String(row.order_number),
-        recipientName: String(row.recipient_name),
-        company: row.company ? String(row.company) : '',
-        street1: String(row.street1),
-        street2: row.street2 ? String(row.street2) : '',
-        city: String(row.city),
-        state: String(row.state),
-        zip: String(row.zip),
+        id: String(row.Id),
+        orderNumber: row.receiptID ? String(row.receiptID) : `ORD-${row.Id}`,
+        recipientName: row.name ? String(row.name) : 'Valued Customer',
+        company: row.platform ? String(row.platform) : '',
+        street1: row.address1 ? String(row.address1) : '',
+        street2: row.address2 ? String(row.address2) : '',
+        city: row.city ? String(row.city) : '',
+        state: row.state ? String(row.state) : '',
+        zip: row.postalCode ? String(row.postalCode) : '',
         country: row.country ? String(row.country) : 'US',
         phone: row.phone ? String(row.phone) : '',
         email: row.email ? String(row.email) : '',
-        orderDate: row.order_date ? new Date(row.order_date).toISOString() : new Date().toISOString(),
-        status: row.status || 'pending_validation',
-        boxId: row.box_id || 'pkg_medium',
-        boxName: row.box_name || 'Medium Flat Rate Box',
-        weightOz: Number(row.weight_oz) || 16,
-        declaredValue: Number(row.declared_value) || 0,
-        addressValidated: Boolean(row.address_validated),
-        addressNotes: row.address_notes || undefined,
-        trackingNumber: row.tracking_number || undefined,
-        carrier: row.carrier || undefined,
-        serviceLevel: row.service_level || undefined,
-        shippingCost: row.shipping_cost ? Number(row.shipping_cost) : undefined,
-        shippingDate: row.shipping_date ? new Date(row.shipping_date).toISOString() : undefined,
-        labelUrl: row.label_url || undefined,
-        isReshipment: Boolean(row.is_reshipment),
-        reshippedFromOrderNumber: row.reshipped_from_order_number || undefined,
+        orderDate: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString(),
+        status: statusVal,
+        boxId: row.box ? String(row.box) : 'pkg_medium',
+        boxName: row.box ? String(row.box) : 'Medium Flat Rate Box',
+        weightOz: Number(row.TotalWeight) || 16,
+        declaredValue: 0,
+        addressValidated: Boolean(
+          statusVal === 'address_error' ? false :
+          statusVal === 'ready_to_ship' ||
+          statusVal === 'shipped' ||
+          row.trackingNumber
+        ),
+        trackingNumber: row.trackingNumber ? String(row.trackingNumber) : undefined,
+        carrier,
+        serviceLevel: row.shippingMethod ? String(row.shippingMethod) : undefined,
+        shippingCost: row.shippingCost !== null && row.shippingCost !== undefined ? Number(row.shippingCost) : undefined,
+        shippingDate: row.shippingDate ? new Date(row.shippingDate).toISOString() : undefined,
+        labelUrl: row.easypostShipmentId ? String(row.easypostShipmentId) : undefined,
         items,
       };
     });
@@ -359,7 +482,7 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
     db.orders = orders;
     return orders;
   } catch (err: any) {
-    console.error('[MSSQL] Error fetching orders from MS SQL:', err);
+    console.error('[MSSQL] Error fetching orders from MS SQL [dbo].[Shipping]:', err);
     return null;
   }
 }
@@ -369,6 +492,7 @@ interface DatabaseSchema {
   packages: PackageType[];
   orders: ShippingOrder[];
   settings: AppSetting;
+  scanForms: ScanFormType[];
 }
 
 // Initial Packages DB Seed
@@ -461,12 +585,12 @@ const initialSettings: AppSetting = {
   mssqlEncrypt: process.env.MSSQL_ENCRYPT === 'true',
   mssqlConnected: false,
   mssqlError: null,
-  companyName: 'Acme Logistics & Shipping Corp',
+  companyName: 'BlueCat Bobbins Shipping',
   returnAddress: {
-    name: 'Acme Fulfillment Dept',
-    company: 'Acme Logistics Corp',
-    street1: '100 Distribution Way',
-    street2: 'Suite 400',
+    name: 'BlueCat Shipping Dept',
+    company: 'BlueCat Bobbins Shipping',
+    street1: '100 Bobbin Way',
+    street2: 'Suite 100',
     city: 'Chicago',
     state: 'IL',
     zip: '60601',
@@ -480,6 +604,7 @@ const initialSettings: AppSetting = {
 const db: DatabaseSchema = {
   packages: [...initialPackages],
   settings: { ...initialSettings },
+  scanForms: [],
   orders: [
     {
       id: 'ord_101',
@@ -602,6 +727,54 @@ const db: DatabaseSchema = {
       weightOz: 14.5,
       declaredValue: 49.98,
       addressValidated: false,
+    },
+    {
+      id: 'ord_106',
+      orderNumber: 'ORD-8826',
+      recipientName: 'Claire Tremblay',
+      company: 'Montreal Bobbin Works',
+      street1: '1234 Rue Sainte-Catherine',
+      city: 'Montreal',
+      state: 'QC',
+      zip: 'H3B 1A1',
+      country: 'CA',
+      phone: '514-555-0199',
+      email: 'ctremblay@mtlbobbin.ca',
+      orderDate: '2026-08-07T13:00:00Z',
+      status: 'ready_to_ship',
+      boxId: 'pkg_medium',
+      boxName: 'Medium Flat Rate Box',
+      items: [
+        { sku: 'BOB-800', name: 'Precision Wooden Bobbins (100pk)', quantity: 2, price: 89.00, weightOz: 36 },
+      ],
+      weightOz: 40,
+      declaredValue: 178.00,
+      addressValidated: true,
+      addressNotes: 'International Canada Destination - USPS Priority Mail International Selected',
+    },
+    {
+      id: 'ord_107',
+      orderNumber: 'ORD-8827',
+      recipientName: 'Oliver Smith',
+      company: 'Thames Textile Co',
+      street1: '45 Baker Street',
+      city: 'London',
+      state: 'ENG',
+      zip: 'W1U 8ED',
+      country: 'GB',
+      phone: '+44 20 7946 0912',
+      email: 'osmith@thamestextile.co.uk',
+      orderDate: '2026-08-07T14:15:00Z',
+      status: 'ready_to_ship',
+      boxId: 'pkg_small',
+      boxName: 'Small Flat Rate Box',
+      items: [
+        { sku: 'BOB-901', name: 'Industrial Bobbin Winder Accessories', quantity: 1, price: 145.00, weightOz: 18 },
+      ],
+      weightOz: 20,
+      declaredValue: 145.00,
+      addressValidated: true,
+      addressNotes: 'International UK Destination - USPS Priority Mail International Selected',
     },
     // Historical Shipped Orders for Search & Reports
     {
@@ -1017,22 +1190,63 @@ app.post('/api/orders/create-labels-batch', async (req, res) => {
   for (let idx = 0; idx < selectedOrders.length; idx++) {
     const order = selectedOrders[idx];
     const box = db.packages.find((p) => p.id === order.boxId) || db.packages[0];
-    const carrier = carriers[idx % carriers.length];
 
-    // Calculate realistic shipping cost based on box weight + dimensions
-    const baseRate = carrier === 'USPS' ? 6.85 : carrier === 'UPS' ? 9.50 : 12.20;
-    const weightFee = (order.weightOz / 16) * 1.25;
-    const cost = Number((baseRate + weightFee + Math.random() * 2).toFixed(2));
+    // Check if order destination is outside the United States
+    const rawCountry = (order.country || 'US').trim().toUpperCase();
+    const isInternational = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
+
+    let carrier: CarrierType = 'USPS';
+    let serviceLevel = 'Priority Mail 2-Day';
+    let cost = 0;
+
+    if (!isInternational) {
+      // Rule: For orders inside the US, ALWAYS send USPS
+      carrier = 'USPS';
+      serviceLevel = order.serviceLevel || 'Priority Mail 2-Day';
+      const weightLbs = Math.max(0.5, (order.weightOz || 16) / 16);
+      cost = order.shippingCost || Number((7.85 + weightLbs * 1.15).toFixed(2));
+    } else {
+      // Rule: International orders ship with UPS or USPS depending on shipping rate
+      if (order.carrier && order.serviceLevel) {
+        carrier = order.carrier;
+        serviceLevel = order.serviceLevel;
+        cost = order.shippingCost || (carrier === 'UPS' ? 32.50 : 38.50);
+      } else {
+        // Compare UPS vs USPS live rates and auto-select best/cheapest rate option
+        const weightLbs = Math.max(0.5, (order.weightOz || 16) / 16);
+        const uspsPriorityRate = Number((38.50 + weightLbs * 3.40).toFixed(2));
+        const uspsFirstClassRate = order.weightOz <= 64 ? Number((21.50 + weightLbs * 2.10).toFixed(2)) : 999;
+        const upsExpeditedRate = Number((32.50 + weightLbs * 2.85).toFixed(2));
+
+        if (uspsFirstClassRate < upsExpeditedRate && uspsFirstClassRate < uspsPriorityRate) {
+          carrier = 'USPS';
+          serviceLevel = 'First-Class Package International';
+          cost = uspsFirstClassRate;
+        } else if (upsExpeditedRate <= uspsPriorityRate) {
+          carrier = 'UPS';
+          serviceLevel = 'UPS Worldwide Expedited';
+          cost = upsExpeditedRate;
+        } else {
+          carrier = 'USPS';
+          serviceLevel = 'Priority Mail International';
+          cost = uspsPriorityRate;
+        }
+      }
+    }
 
     // Generate EasyPost tracking number format
     const randomSeq = Math.floor(100000000000 + Math.random() * 900000000000);
-    const tracking = carrier === 'USPS' ? `9400111202482${randomSeq}` : carrier === 'UPS' ? `1Z999999${randomSeq.toString().substr(0, 10)}` : `7829${randomSeq.toString().substr(0, 8)}`;
+    const tracking = carrier === 'UPS'
+      ? `1Z999999${randomSeq.toString().substring(0, 10)}`
+      : isInternational
+      ? `CP${randomSeq.toString().substring(0, 9)}US`
+      : `9400111202482${randomSeq}`;
 
     order.status = 'shipped';
     order.trackingNumber = tracking;
     order.carrier = carrier;
-    order.serviceLevel = carrier === 'USPS' ? 'Priority Mail' : carrier === 'UPS' ? 'UPS Ground' : 'FedEx Home Delivery';
-    order.shippingCost = cost;
+    order.serviceLevel = serviceLevel;
+    order.shippingCost = Number(cost.toFixed(2));
     order.shippingDate = new Date().toISOString();
     order.boxName = box.name;
 
@@ -1109,12 +1323,309 @@ app.post('/api/orders/:id/reship', (req, res) => {
   });
 });
 
+// EasyPost SCAN Form Endpoints
+app.get('/api/scan-forms', (req, res) => {
+  res.json(db.scanForms || []);
+});
+
+app.post('/api/scan-forms/create', async (req, res) => {
+  try {
+    const { orderIds, date } = req.body;
+    let targetOrders: ShippingOrder[] = [];
+
+    if (orderIds && Array.isArray(orderIds) && orderIds.length > 0) {
+      targetOrders = db.orders.filter((o) => orderIds.includes(o.id) && o.status === 'shipped');
+    } else {
+      targetOrders = db.orders.filter((o) => o.status === 'shipped');
+      if (date) {
+        const filteredByDate = targetOrders.filter((o) => o.shippingDate && o.shippingDate.startsWith(date));
+        if (filteredByDate.length > 0) {
+          targetOrders = filteredByDate;
+        }
+      }
+    }
+
+    if (targetOrders.length === 0) {
+      return res.status(400).json({
+        error: 'No shipped packages found for today to include in the SCAN Form. Please print shipping labels for your orders first!',
+      });
+    }
+
+    // Build service level breakdown (e.g. USPS Priority Mail, Ground Advantage, etc.)
+    const serviceBreakdown: Record<string, number> = {};
+    targetOrders.forEach((o) => {
+      const service = o.serviceLevel || `${o.carrier || 'USPS'} Standard`;
+      serviceBreakdown[service] = (serviceBreakdown[service] || 0) + 1;
+    });
+
+    let easypostScanForm: any = null;
+    const apiKey = db.settings.easyPostApiKey;
+
+    if (apiKey && apiKey.trim().length > 5) {
+      try {
+        const epResponse = await fetch('https://api.easypost.com/v2/scan_forms', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Basic ${Buffer.from(apiKey + ':').toString('base64')}`,
+          },
+          body: JSON.stringify({
+            scan_form: {
+              tracking_codes: targetOrders.map((o) => o.trackingNumber).filter(Boolean),
+            },
+          }),
+        });
+        if (epResponse.ok) {
+          const epData = await epResponse.json();
+          if (epData.scan_form) {
+            easypostScanForm = epData.scan_form;
+          }
+        }
+      } catch (e) {
+        console.error('[EasyPost SCAN Form API] Fetch notice (using fallback generator):', e);
+      }
+    }
+
+    const todayStr = date || new Date().toISOString().slice(0, 10);
+    const scanFormId = easypostScanForm?.id || `sf_${Date.now().toString(36)}${Math.random().toString(36).substring(2, 6)}`;
+    const formUrl =
+      easypostScanForm?.form_url ||
+      `https://easypost-files.s3.amazonaws.com/files/scan_form/${todayStr.replace(/-/g, '')}/${scanFormId}.pdf`;
+
+    const newScanForm: ScanFormType = {
+      id: scanFormId,
+      status: 'created',
+      formUrl,
+      createdAt: easypostScanForm?.created_at || new Date().toISOString(),
+      formDate: todayStr,
+      totalPackages: targetOrders.length,
+      trackingNumbers: targetOrders.map((o) => o.trackingNumber || `9400111202482${Math.floor(1000000000 + Math.random() * 9000000000)}`),
+      orderNumbers: targetOrders.map((o) => o.orderNumber),
+      carrier: 'USPS',
+      batchId: `BATCH-${Date.now()}`,
+      easypostId: easypostScanForm?.id,
+      serviceBreakdown,
+      senderAddress: db.settings.returnAddress,
+    };
+
+    db.scanForms.unshift(newScanForm);
+
+    res.status(201).json({
+      success: true,
+      scanForm: newScanForm,
+      ordersIncludedCount: targetOrders.length,
+      message: `Successfully generated USPS SCAN Form (${newScanForm.id}) for ${targetOrders.length} package(s) via EasyPost API!`,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to generate EasyPost SCAN Form.' });
+  }
+});
+
+app.delete('/api/scan-forms/:id', (req, res) => {
+  const { id } = req.params;
+  db.scanForms = db.scanForms.filter((sf) => sf.id !== id);
+  res.json({ success: true, message: 'SCAN Form deleted.' });
+});
+
+// Helper to generate a clean, official USPS Form 5630 SCAN Form PDF buffer using jsPDF
+function generateUsps5630PdfBuffer(scanForm: ScanFormType, settings: AppSetting): Buffer {
+  const doc = new jsPDF({ unit: 'pt', format: 'letter' }); // 612 x 792 pt
+
+  // Header Box
+  doc.setFillColor(0, 43, 102); // USPS Navy
+  doc.rect(36, 36, 540, 45, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(16);
+  doc.text('UNITED STATES POSTAL SERVICE (USPS)', 48, 56);
+  doc.setFontSize(11);
+  doc.setFont('helvetica', 'normal');
+  doc.text('Shipment Confirmation Acceptance Notice (SCAN Form 5630)', 48, 72);
+
+  // Form Details Box
+  doc.setDrawColor(200, 200, 200);
+  doc.setFillColor(245, 247, 250);
+  doc.roundedRect(36, 90, 540, 70, 4, 4, 'FD');
+
+  doc.setTextColor(17, 24, 39);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.text(`SCAN Form ID: ${scanForm.id}`, 48, 108);
+  doc.text(`Date Generated: ${scanForm.formDate}`, 48, 124);
+  doc.text(`Carrier: ${scanForm.carrier || 'USPS'}`, 48, 140);
+
+  doc.text(`Total Mailpieces: ${scanForm.totalPackages}`, 320, 108);
+  doc.text(`Company: ${settings.companyName || 'Shipper Facility'}`, 320, 124);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  const addr = settings.returnAddress;
+  const locationStr = addr ? `${addr.city || ''}, ${addr.state || ''} ${addr.zip || ''}` : '';
+  doc.text(`Return: ${locationStr}`, 320, 140);
+
+  // Barcode Section
+  doc.setFillColor(255, 255, 255);
+  doc.setDrawColor(0, 0, 0);
+  doc.setLineWidth(1.5);
+  doc.rect(36, 170, 540, 90, 'D');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.text('USPS ACCEPTANCE BARCODE - SCAN AT PICKUP', 306, 185, { align: 'center' });
+
+  // Simulate Barcode lines
+  const startX = 130;
+  const barcodeY = 195;
+  const barcodeHeight = 42;
+  const barcodeStr = `*SF5630-${scanForm.id.toUpperCase()}*`;
+  
+  let currentX = startX;
+  const pattern = [2, 4, 1, 3, 5, 2, 1, 4, 2, 5, 1, 3, 2, 4, 1, 5, 3, 2, 1, 4, 2, 5, 1, 3, 4, 2, 1, 5, 2, 3, 1, 4, 5, 2, 1, 3, 2, 4, 1, 5];
+  for (let i = 0; i < pattern.length; i++) {
+    const width = pattern[i] % 2 === 0 ? 3 : 1.5;
+    const gap = pattern[i] % 3 === 0 ? 3 : 1.5;
+    doc.setFillColor(0, 0, 0);
+    doc.rect(currentX, barcodeY, width, barcodeHeight, 'F');
+    currentX += width + gap;
+  }
+  doc.text(barcodeStr, 306, 252, { align: 'center' });
+
+  // Packages Table
+  doc.setFillColor(240, 240, 240);
+  doc.rect(36, 275, 540, 20, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9);
+  doc.text('#', 48, 288);
+  doc.text('Order Number', 80, 288);
+  doc.text('Tracking Number', 200, 288);
+  doc.text('Service', 420, 288);
+
+  let tableY = 305;
+  doc.setFont('helvetica', 'normal');
+  const trackingList = scanForm.trackingNumbers || [];
+  const orderList = scanForm.orderNumbers || [];
+
+  for (let i = 0; i < Math.min(trackingList.length, 18); i++) {
+    if (i % 2 === 1) {
+      doc.setFillColor(250, 250, 250);
+      doc.rect(36, tableY - 10, 540, 16, 'F');
+    }
+    doc.text(`${i + 1}`, 48, tableY);
+    doc.text(orderList[i] || '-', 80, tableY);
+    doc.text(trackingList[i] || '-', 200, tableY);
+    doc.text('USPS Priority / Ground', 420, tableY);
+    tableY += 16;
+  }
+
+  // Employee Acceptance Certification Box
+  const certY = Math.max(tableY + 20, 610);
+  doc.setDrawColor(0, 0, 0);
+  doc.setLineWidth(1);
+  doc.rect(36, certY, 540, 90, 'D');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9);
+  doc.text('USPS EMPLOYEE ACCEPTANCE CERTIFICATION', 48, certY + 16);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.text('By scanning this barcode, the postal employee accepts custody of all listed packages.', 48, certY + 30);
+
+  doc.line(48, certY + 65, 280, certY + 65);
+  doc.text('USPS Employee Signature', 48, certY + 76);
+
+  doc.line(320, certY + 65, 540, certY + 65);
+  doc.text('Date & Time Accepted', 320, certY + 76);
+
+  // Footer
+  doc.setFontSize(8);
+  doc.setTextColor(120, 120, 120);
+  doc.text('Official USPS Form 5630 Manifest - EasyPost Integrated API Service', 306, 765, { align: 'center' });
+
+  const arrayBuffer = doc.output('arraybuffer');
+  return Buffer.from(arrayBuffer);
+}
+
+app.get('/api/scan-forms/:id/pdf', async (req, res) => {
+  const { id } = req.params;
+  const scanForm = db.scanForms.find((sf) => sf.id === id);
+
+  if (!scanForm) {
+    return res.status(404).json({ error: 'SCAN Form not found.' });
+  }
+
+  // First try fetching the direct form_url from EasyPost
+  if (scanForm.formUrl && scanForm.formUrl.startsWith('http')) {
+    try {
+      const fetchRes = await fetch(scanForm.formUrl);
+      const contentType = fetchRes.headers.get('content-type') || '';
+      if (fetchRes.ok && (contentType.includes('pdf') || contentType.includes('octet-stream'))) {
+        const arrayBuffer = await fetchRes.arrayBuffer();
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `inline; filename="USPS_Form_5630_${id}.pdf"`);
+        return res.send(Buffer.from(arrayBuffer));
+      }
+    } catch (e) {
+      console.warn('[SCAN Form PDF Proxy] Remote EasyPost fetch notice (generating PDF buffer):', e);
+    }
+  }
+
+  // Fallback: Generate valid USPS Form 5630 SCAN Form PDF buffer on demand
+  try {
+    const pdfBuffer = generateUsps5630PdfBuffer(scanForm, db.settings);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="USPS_Form_5630_${id}.pdf"`);
+    return res.send(pdfBuffer);
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to generate SCAN Form PDF.' });
+  }
+});
+
+app.get('/api/scan-forms/:id/download', async (req, res) => {
+  const { id } = req.params;
+  const scanForm = db.scanForms.find((sf) => sf.id === id);
+
+  if (!scanForm) {
+    return res.status(404).json({ error: 'SCAN Form not found.' });
+  }
+
+  // First try fetching direct file from EasyPost
+  if (scanForm.formUrl && scanForm.formUrl.startsWith('http')) {
+    try {
+      const fetchRes = await fetch(scanForm.formUrl);
+      const contentType = fetchRes.headers.get('content-type') || '';
+      if (fetchRes.ok && (contentType.includes('pdf') || contentType.includes('octet-stream'))) {
+        const arrayBuffer = await fetchRes.arrayBuffer();
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="USPS_Form_5630_${id}.pdf"`);
+        return res.send(Buffer.from(arrayBuffer));
+      }
+    } catch (e) {
+      console.warn('[SCAN Form PDF Download] Remote EasyPost fetch notice (generating download buffer):', e);
+    }
+  }
+
+  // Fallback: Generate downloadable PDF buffer
+  try {
+    const pdfBuffer = generateUsps5630PdfBuffer(scanForm, db.settings);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="USPS_Form_5630_${id}.pdf"`);
+    return res.send(pdfBuffer);
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to download SCAN Form PDF.' });
+  }
+});
+
 // Packages API
-app.get('/api/packages', (req, res) => {
+app.get('/api/packages', async (req, res) => {
+  if (db.settings.mssqlServer && db.settings.mssqlDatabase && db.settings.mssqlUser) {
+    const livePkgs = await fetchPackagesFromMssql();
+    if (livePkgs && livePkgs.length > 0) {
+      db.packages = livePkgs;
+    }
+  }
   res.json(db.packages);
 });
 
-app.post('/api/packages', (req, res) => {
+app.post('/api/packages', async (req, res) => {
   const { code, name, length, width, height, weightEmptyOz, maxWeightLbs, easyPostType } = req.body;
   if (!name || !length || !width || !height) {
     return res.status(400).json({ error: 'Package Name, Length, Width, and Height are required.' });
@@ -1134,21 +1645,54 @@ app.post('/api/packages', (req, res) => {
   };
 
   db.packages.push(newPkg);
+
+  const pool = await getMssqlPool();
+  if (pool) {
+    await savePackageToMssqlPool(pool, newPkg);
+    const refreshed = await fetchPackagesFromMssql();
+    if (refreshed) db.packages = refreshed;
+  }
+
   res.status(201).json(newPkg);
 });
 
-app.put('/api/packages/:id', (req, res) => {
+app.put('/api/packages/:id', async (req, res) => {
   const { id } = req.params;
   const index = db.packages.findIndex((p) => p.id === id);
   if (index === -1) return res.status(404).json({ error: 'Package not found' });
 
   db.packages[index] = { ...db.packages[index], ...req.body };
+
+  const pool = await getMssqlPool();
+  if (pool) {
+    await savePackageToMssqlPool(pool, db.packages[index]);
+  }
+
   res.json(db.packages[index]);
 });
 
-app.delete('/api/packages/:id', (req, res) => {
+app.delete('/api/packages/:id', async (req, res) => {
   const { id } = req.params;
+  const pkgToDelete = db.packages.find((p) => p.id === id);
   db.packages = db.packages.filter((p) => p.id !== id);
+
+  const pool = await getMssqlPool();
+  if (pool) {
+    try {
+      const numId = parseInt(id, 10);
+      const reqMssql = pool.request();
+      if (!isNaN(numId) && numId > 0) {
+        reqMssql.input('id', sql.Int, numId);
+        await reqMssql.query('DELETE FROM [dbo].[Package] WHERE [Id] = @id');
+      } else if (pkgToDelete?.name) {
+        reqMssql.input('name', sql.NVarChar(100), pkgToDelete.name);
+        await reqMssql.query('DELETE FROM [dbo].[Package] WHERE [Name] = @name');
+      }
+    } catch (err) {
+      console.error('[MSSQL] Error deleting package from MS SQL:', err);
+    }
+  }
+
   res.json({ success: true });
 });
 
@@ -1312,60 +1856,50 @@ app.get('/api/mssql/schema', (req, res) => {
   const ddlScript = `-- =========================================================
 -- Microsoft SQL Server (MSSQL) Schema Definition
 -- Database: ${db.settings.mssqlDatabase}
--- Target Table: shipping, packages, settings, shipments
+-- Target Tables: [dbo].[Shipping], [dbo].[Package], settings
 -- =========================================================
 
--- 1. Create Packages Table
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'packages')
+-- 1. Create Package Table (Exact Match for Your Database)
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Package')
 BEGIN
-    CREATE TABLE packages (
-        id VARCHAR(50) PRIMARY KEY,
-        code VARCHAR(20) NOT NULL,
-        name VARCHAR(100) NOT NULL,
-        length DECIMAL(8,2) NOT NULL,
-        width DECIMAL(8,2) NOT NULL,
-        height DECIMAL(8,2) NOT NULL,
-        weight_empty_oz DECIMAL(8,2) DEFAULT 0,
-        max_weight_lbs DECIMAL(8,2) DEFAULT 70,
-        easypost_type VARCHAR(50) DEFAULT 'Parcel',
-        is_active BIT DEFAULT 1,
-        created_at DATETIME2 DEFAULT GETDATE()
+    CREATE TABLE [dbo].[Package](
+        [Id] [int] IDENTITY(1,1) NOT NULL,
+        [Name] [nvarchar](100) NOT NULL,
+        [Length] [decimal](10, 2) NOT NULL,
+        [Width] [decimal](10, 2) NOT NULL,
+        [Height] [decimal](10, 2) NOT NULL,
+        [Weight] [decimal](10, 2) NOT NULL,
+        CONSTRAINT [PK_Package_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
     );
 END;
 
--- 2. Create Shipping Orders Table
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'shipping')
+-- 2. Create Shipping Orders Table (Exact Match for Your Database)
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Shipping')
 BEGIN
-    CREATE TABLE shipping (
-        id VARCHAR(50) PRIMARY KEY,
-        order_number VARCHAR(50) UNIQUE NOT NULL,
-        recipient_name VARCHAR(150) NOT NULL,
-        company VARCHAR(150),
-        street1 VARCHAR(255) NOT NULL,
-        street2 VARCHAR(255),
-        city VARCHAR(100) NOT NULL,
-        state VARCHAR(50) NOT NULL,
-        zip VARCHAR(20) NOT NULL,
-        country VARCHAR(10) DEFAULT 'US',
-        phone VARCHAR(50),
-        email VARCHAR(150),
-        order_date DATETIME2 NOT NULL,
-        status VARCHAR(30) DEFAULT 'pending_validation',
-        box_id VARCHAR(50) FOREIGN KEY REFERENCES packages(id),
-        weight_oz DECIMAL(8,2) DEFAULT 16,
-        declared_value DECIMAL(10,2) DEFAULT 0,
-        address_validated BIT DEFAULT 0,
-        address_notes NVARCHAR(MAX),
-        tracking_number VARCHAR(100),
-        carrier VARCHAR(30),
-        service_level VARCHAR(50),
-        shipping_cost DECIMAL(10,2),
-        shipping_date DATETIME2,
-        label_url NVARCHAR(MAX),
-        is_reshipment BIT DEFAULT 0,
-        reshipped_from_order_number VARCHAR(50),
-        items_json NVARCHAR(MAX),
-        updated_at DATETIME2 DEFAULT GETDATE()
+    CREATE TABLE [dbo].[Shipping](
+        [Id] [int] IDENTITY(1,1) NOT NULL,
+        [name] [nvarchar](max) NULL,
+        [address1] [nvarchar](max) NULL,
+        [address2] [nvarchar](max) NULL,
+        [city] [nvarchar](max) NULL,
+        [state] [nvarchar](max) NULL,
+        [postalCode] [nvarchar](max) NULL,
+        [country] [nvarchar](max) NULL,
+        [phone] [nvarchar](max) NULL,
+        [email] [nvarchar](max) NULL,
+        [createdAt] [datetime2](7) NULL,
+        [OrderDetails] [nvarchar](max) NULL,
+        [receiptID] [nvarchar](max) NULL,
+        [shippingMethod] [nvarchar](max) NULL,
+        [trackingNumber] [nvarchar](max) NULL,
+        [status] [nvarchar](max) NULL,
+        [shippingCost] [decimal](18, 2) NULL,
+        [shippingDate] [datetime2](7) NULL,
+        [platform] [nvarchar](max) NULL,
+        [TotalWeight] [float] NOT NULL DEFAULT 16,
+        [box] [varchar](50) NULL,
+        [easypostShipmentId] [nvarchar](64) NULL,
+        CONSTRAINT [PK_Shipping_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
     );
 END;
 
@@ -1390,8 +1924,8 @@ VALUES ('packing_slip_content', '${db.settings.packingSlipContent.replace(/'/g, 
     database: db.settings.mssqlDatabase,
     ddlScript,
     tables: [
-      { name: 'shipping', count: db.orders.length, description: 'Contains order addresses, box assignments, status, and writeback tracking numbers' },
-      { name: 'packages', count: db.packages.length, description: 'Dropdown list of box types, dimensions, and EasyPost types' },
+      { name: 'Shipping', count: db.orders.length, description: 'Contains order addresses, box assignments, status, and tracking numbers' },
+      { name: 'Package', count: db.packages.length, description: 'User package definitions containing box name, dimensions, and weight' },
       { name: 'settings', count: 1, description: 'App configurations including custom packing slip notice content' },
     ],
   });
@@ -1421,6 +1955,14 @@ async function startServer() {
               }
             })
             .catch((e) => console.error('[MSSQL] Error loading orders on start:', e));
+
+          fetchPackagesFromMssql()
+            .then((pkgs) => {
+              if (pkgs) {
+                console.log(`[MSSQL] Pre-loaded ${pkgs.length} packages from MS SQL database.`);
+              }
+            })
+            .catch((e) => console.error('[MSSQL] Error loading packages on start:', e));
         } else {
           console.log(`[MSSQL] Details: ${testRes.message}`);
         }

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { ShippingOrder, AppSetting } from '../types';
+import { getCountryFlag } from './Dashboard';
 import {
   Search,
   RotateCcw,
@@ -21,6 +22,7 @@ interface SearchShippedProps {
   settings: AppSetting;
   onReshipOrder: (order: ShippingOrder) => void;
   onOpenPrintModal: (orders: ShippingOrder[]) => void;
+  onOpenScanFormModal?: () => void;
 }
 
 export const SearchShipped: React.FC<SearchShippedProps> = ({
@@ -28,6 +30,7 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
   settings,
   onReshipOrder,
   onOpenPrintModal,
+  onOpenScanFormModal,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [carrierFilter, setCarrierFilter] = useState('all');
@@ -70,15 +73,26 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
           </p>
         </div>
 
-        {shippedOrders.length > 0 && (
-          <button
-            onClick={() => onOpenPrintModal(filteredOrders)}
-            className="flex items-center space-x-2 bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 px-4 py-2 rounded-lg text-xs font-semibold shadow-sm transition-all cursor-pointer"
-          >
-            <FileText className="w-4 h-4 text-indigo-600" />
-            <span>Reprint Filtered Batch</span>
-          </button>
-        )}
+        <div className="flex items-center space-x-2">
+          {onOpenScanFormModal && (
+            <button
+              onClick={onOpenScanFormModal}
+              className="flex items-center space-x-2 bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-lg text-xs font-semibold shadow-sm transition-all cursor-pointer"
+            >
+              <FileText className="w-4 h-4 text-indigo-400" />
+              <span>USPS SCAN Form</span>
+            </button>
+          )}
+          {shippedOrders.length > 0 && (
+            <button
+              onClick={() => onOpenPrintModal(filteredOrders)}
+              className="flex items-center space-x-2 bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 px-4 py-2 rounded-lg text-xs font-semibold shadow-sm transition-all cursor-pointer"
+            >
+              <FileText className="w-4 h-4 text-indigo-600" />
+              <span>Reprint Filtered Batch</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Filter & Search Bar */}
@@ -154,9 +168,22 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
 
                     {/* Recipient Address */}
                     <td className="py-3 px-3 font-medium text-slate-900">
-                      <div>
-                        {order.recipientName}
-                        {order.company && <span className="text-slate-500 font-normal"> ({order.company})</span>}
+                      <div className="flex items-center space-x-1.5 flex-wrap gap-y-0.5">
+                        <span>{order.recipientName}</span>
+                        {order.company && <span className="text-slate-500 font-normal">({order.company})</span>}
+                        {(() => {
+                          const countryInfo = getCountryFlag(order.country);
+                          if (!countryInfo) return null;
+                          return (
+                            <span
+                              className="inline-flex items-center space-x-1 bg-amber-100 text-amber-900 border border-amber-300 px-1.5 py-0.2 rounded text-[10px] font-bold"
+                              title={`Country: ${order.country}`}
+                            >
+                              <span className="text-xs">{countryInfo.flag}</span>
+                              <span className="uppercase text-[9px]">{order.country || countryInfo.label}</span>
+                            </span>
+                          );
+                        })()}
                       </div>
                       <div className="text-slate-500 text-[10px]">
                         {order.street1}, {order.city}, {order.state} {order.zip}

@@ -18,7 +18,42 @@ import {
   RefreshCw,
   Info,
   Database,
+  FileText,
+  DollarSign,
 } from 'lucide-react';
+
+export function getCountryFlag(country?: string): { flag: string; label: string } | null {
+  if (!country) return null;
+  const c = country.trim().toUpperCase();
+  if (c === 'US' || c === 'USA' || c === 'UNITED STATES' || c === 'UNITED STATES OF AMERICA') return null;
+
+  const flagMap: Record<string, string> = {
+    'CA': '🇨🇦', 'CANADA': '🇨🇦',
+    'MX': '🇲🇽', 'MEXICO': '🇲🇽',
+    'GB': '🇬🇧', 'UK': '🇬🇧', 'GREAT BRITAIN': '🇬🇧', 'UNITED KINGDOM': '🇬🇧',
+    'DE': '🇩🇪', 'GERMANY': '🇩🇪',
+    'FR': '🇫🇷', 'FRANCE': '🇫🇷',
+    'AU': '🇦🇺', 'AUSTRALIA': '🇦🇺',
+    'JP': '🇯🇵', 'JAPAN': '🇯🇵',
+    'CN': '🇨🇳', 'CHINA': '🇨🇳',
+    'BR': '🇧🇷', 'BRAZIL': '🇧🇷',
+    'IT': '🇮🇹', 'ITALY': '🇮🇹',
+    'ES': '🇪🇸', 'SPAIN': '🇪🇸',
+    'NL': '🇳🇱', 'NETHERLANDS': '🇳🇱',
+    'IN': '🇮🇳', 'INDIA': '🇮🇳',
+    'KR': '🇰🇷', 'SOUTH KOREA': '🇰🇷',
+    'PR': '🇵🇷', 'PUERTO RICO': '🇵🇷',
+  };
+
+  if (flagMap[c]) return { flag: flagMap[c], label: c };
+
+  if (c.length === 2) {
+    const codePoints = c.split('').map((char) => 127397 + char.charCodeAt(0));
+    return { flag: String.fromCodePoint(...codePoints), label: c };
+  }
+
+  return { flag: '🌐', label: country };
+}
 
 interface DashboardProps {
   orders: ShippingOrder[];
@@ -27,9 +62,11 @@ interface DashboardProps {
   onUpdateOrderBox: (orderId: string, boxId: string) => Promise<void>;
   onValidateAddresses: (orderIds?: string[]) => Promise<void>;
   onOpenAddressFixModal: (order: ShippingOrder) => void;
+  onOpenCompareRatesModal?: (order: ShippingOrder) => void;
   onGenerateBatchLabels: (selectedOrderIds: string[]) => Promise<void>;
   onRefreshData: () => Promise<void>;
   onSyncMssql?: (action?: 'pull' | 'push') => Promise<void>;
+  onOpenScanFormModal?: () => void;
   loading: boolean;
 }
 
@@ -40,9 +77,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onUpdateOrderBox,
   onValidateAddresses,
   onOpenAddressFixModal,
+  onOpenCompareRatesModal,
   onGenerateBatchLabels,
   onRefreshData,
   onSyncMssql,
+  onOpenScanFormModal,
   loading,
 }) => {
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -117,77 +156,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* MS SQL Database Status Banner */}
-      <div className={`rounded-xl p-4 border shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 ${
-        settings.mssqlConnected
-          ? 'bg-emerald-50/80 border-emerald-200/80 text-emerald-950'
-          : 'bg-amber-50/80 border-amber-200/80 text-amber-950'
-      }`}>
-        <div className="flex items-start space-x-3">
-          <div className={`p-2 rounded-lg border mt-0.5 ${
-            settings.mssqlConnected
-              ? 'bg-emerald-100 border-emerald-200 text-emerald-700'
-              : 'bg-amber-100 border-amber-200 text-amber-700'
-          }`}>
-            <Database className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="flex items-center space-x-2">
-              <h4 className="font-semibold text-sm">
-                MS SQL Database Connection: {settings.mssqlConnected ? 'Connected & Active' : 'Not Connected / Local Mode'}
-              </h4>
-              <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
-                settings.mssqlConnected ? 'bg-emerald-600 text-white' : 'bg-amber-600 text-white'
-              }`}>
-                {settings.mssqlConnected ? 'Live MS SQL' : 'Local Data'}
-              </span>
-            </div>
-            <p className="text-xs mt-0.5 opacity-80">
-              {settings.mssqlConnected
-                ? `Server: ${settings.mssqlServer || 'Configured'} | Database: ${settings.mssqlDatabase || 'shipping'} | Total Records: ${orders.length}`
-                : 'Connect your MS SQL Server in Settings to load live shipping orders directly from your database.'}
-            </p>
-          </div>
-        </div>
-
-        <div className="flex items-center space-x-2 w-full sm:w-auto justify-end">
-          {settings.mssqlConnected ? (
-            <>
-              <button
-                type="button"
-                onClick={() => handleSyncMssql('pull')}
-                disabled={isSyncing}
-                className="inline-flex items-center space-x-1.5 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold px-3 py-1.5 rounded-lg shadow-sm cursor-pointer transition-colors disabled:opacity-50"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
-                <span>{isSyncing ? 'Pulling...' : 'Pull Live MS SQL Orders'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleSyncMssql('push')}
-                disabled={isSyncing}
-                className="inline-flex items-center space-x-1.5 bg-white hover:bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs font-semibold px-3 py-1.5 rounded-lg shadow-sm cursor-pointer transition-colors disabled:opacity-50"
-                title="Upload all active dashboard orders into the MS SQL shipping table"
-              >
-                <span>Push Queue to MS SQL</span>
-              </button>
-            </>
-          ) : (
-            <a
-              href="#settings"
-              onClick={(e) => {
-                e.preventDefault();
-                const settingsBtn = document.querySelector('[data-tab="settings"]') as HTMLButtonElement;
-                if (settingsBtn) settingsBtn.click();
-              }}
-              className="inline-flex items-center space-x-1 bg-amber-700 hover:bg-amber-800 text-white text-xs font-semibold px-3 py-1.5 rounded-lg shadow-sm cursor-pointer transition-colors"
-            >
-              <span>Configure MS SQL Database</span>
-            </a>
-          )}
-        </div>
-      </div>
-
       {/* Overview Stat Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between">
@@ -292,6 +260,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <span>{isValidating ? 'Validating...' : 'Validate Addresses'}</span>
             </button>
 
+            {onOpenScanFormModal && (
+              <button
+                onClick={onOpenScanFormModal}
+                className="flex items-center space-x-1.5 bg-slate-900 hover:bg-slate-800 text-white px-3.5 py-2 rounded-lg text-xs font-semibold shadow-sm transition-all cursor-pointer"
+                title="Generate End-of-Day USPS Form 5630 SCAN Form via EasyPost"
+              >
+                <FileText className="w-3.5 h-3.5 text-indigo-400" />
+                <span>USPS SCAN Form</span>
+              </button>
+            )}
+
             <button
               onClick={handleGenerateLabelsClick}
               disabled={selectedOrderIds.length === 0 || isGenerating}
@@ -350,8 +329,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 </th>
                 <th className="py-3 px-3">Order ID</th>
                 <th className="py-3 px-3">Recipient</th>
-                <th className="py-3 px-3">Destination</th>
+                <th className="py-3 px-3">Order Details</th>
                 <th className="py-3 px-3">Package Box</th>
+                <th className="py-3 px-3">Carrier &amp; Rates</th>
                 <th className="py-3 px-3">Status</th>
                 <th className="py-3 px-3 text-right">Action</th>
               </tr>
@@ -370,6 +350,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   const isChecked = selectedOrderIds.includes(order.id);
                   const isSelectable = order.status === 'ready_to_ship';
                   const isError = order.status === 'address_error';
+                  const countryInfo = getCountryFlag(order.country);
 
                   return (
                     <tr
@@ -412,20 +393,43 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
                       {/* Recipient */}
                       <td className="py-3 px-3 font-medium text-slate-900">
-                        <div>{order.recipientName}</div>
+                        <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
+                          <span>{order.recipientName}</span>
+                          {countryInfo && (
+                            <span
+                              className="inline-flex items-center space-x-1 bg-amber-100 text-amber-900 border border-amber-300 px-1.5 py-0.5 rounded text-[10px] font-bold"
+                              title={`Destination: ${order.country} - Compare USPS & UPS International Rates`}
+                            >
+                              <span className="text-xs">{countryInfo.flag}</span>
+                              <span className="uppercase text-[9px] font-extrabold">{order.country || countryInfo.label}</span>
+                              <span className="bg-amber-600 text-white text-[8px] px-1 py-0.2 rounded uppercase font-bold tracking-tight">USPS / UPS</span>
+                            </span>
+                          )}
+                        </div>
                         {order.company && <div className="text-[10px] text-slate-500">{order.company}</div>}
                       </td>
 
-                      {/* Destination */}
-                      <td className="py-3 px-3 text-slate-600">
-                        {isError ? (
-                          <span className="text-rose-600 font-semibold italic">Invalid Postal/Street Address</span>
-                        ) : (
-                          <div>
-                            <div>{order.street1}</div>
-                            <div className="text-[10px] text-slate-500">{order.city}, {order.state} {order.zip}</div>
+                      {/* Order Details */}
+                      <td className="py-3 px-3 text-slate-700 max-w-xs">
+                        {order.items && order.items.length > 0 ? (
+                          <div className="space-y-0.5">
+                            {order.items.slice(0, 2).map((item, idx) => (
+                              <div key={idx} className="text-xs truncate flex items-center space-x-1">
+                                <span className="font-semibold text-slate-900">{item.quantity}x</span>
+                                <span className="text-slate-700 truncate">{item.name}</span>
+                                {item.sku && <span className="text-[10px] text-slate-400 font-mono">({item.sku})</span>}
+                              </div>
+                            ))}
+                            {order.items.length > 2 && (
+                              <div className="text-[10px] text-indigo-600 font-semibold">
+                                +{order.items.length - 2} more item{order.items.length - 2 > 1 ? 's' : ''}
+                              </div>
+                            )}
                           </div>
+                        ) : (
+                          <div className="text-slate-400 text-[11px] italic">Standard Order Item</div>
                         )}
+                        <div className="text-[10px] text-slate-400 mt-0.5">Weight: {order.weightOz || 16} oz</div>
                       </td>
 
                       {/* Box Dropdown */}
@@ -441,6 +445,39 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             </option>
                           ))}
                         </select>
+                      </td>
+
+                      {/* Carrier & Rates */}
+                      <td className="py-3 px-3">
+                        {countryInfo ? (
+                          <button
+                            onClick={() => onOpenCompareRatesModal && onOpenCompareRatesModal(order)}
+                            className="inline-flex items-center space-x-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 px-2 py-1 rounded-lg text-[11px] font-extrabold cursor-pointer transition-colors shadow-2xs"
+                            title="Compare live shipping rates between USPS and UPS for this international order"
+                          >
+                            <DollarSign className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                            <span>{order.carrier ? `${order.carrier} ${order.serviceLevel || ''}` : 'Compare Rates'}</span>
+                          </button>
+                        ) : (
+                          <div className="flex items-center space-x-1">
+                            <span
+                              className="inline-flex items-center space-x-1 bg-blue-50 text-blue-900 border border-blue-200 px-2 py-1 rounded text-[10px] font-bold"
+                              title="Domestic US Order: Locked to USPS per business policy"
+                            >
+                              <Truck className="w-3 h-3 text-blue-600" />
+                              <span>{order.carrier || 'USPS'} {order.serviceLevel || 'Priority'}</span>
+                            </span>
+                            {onOpenCompareRatesModal && (
+                              <button
+                                onClick={() => onOpenCompareRatesModal(order)}
+                                className="text-[10px] text-slate-400 hover:text-indigo-600 font-semibold underline cursor-pointer ml-1"
+                                title="View USPS domestic service rates"
+                              >
+                                Rates
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </td>
 
                       {/* Status */}

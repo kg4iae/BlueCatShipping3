@@ -103,33 +103,48 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({ orders, settin
         doc.setLineWidth(0.02);
         doc.rect(1.5, 1.0, 5.0, 7.0);
 
+        const isIntl = order.country && order.country.trim().toUpperCase() !== 'US' && order.country.trim().toUpperCase() !== 'USA' && order.country.trim().toUpperCase() !== 'UNITED STATES';
+        const displayCarrier = isIntl ? 'USPS INTERNATIONAL' : (order.carrier || 'USPS');
+        const displayService = isIntl ? 'PRIORITY MAIL INTERNATIONAL' : (order.serviceLevel || 'PRIORITY MAIL 2-DAY');
+
         doc.setFontSize(16);
         doc.setTextColor(0, 0, 0);
-        doc.text(`${order.carrier || 'USPS'} POSTAGE PAID`, 1.7, 1.5);
-        doc.setFontSize(12);
-        doc.text(order.serviceLevel || 'PRIORITY MAIL 2-DAY', 1.7, 1.8);
+        doc.text(`${displayCarrier} POSTAGE PAID`, 1.7, 1.5);
+        doc.setFontSize(11);
+        doc.text(displayService, 1.7, 1.8);
 
         doc.setFontSize(8);
         doc.text('SHIP FROM:', 1.7, 2.3);
         doc.text(settings.returnAddress.name, 1.7, 2.45);
         doc.text(settings.returnAddress.street1, 1.7, 2.6);
-        doc.text(`${settings.returnAddress.city}, ${settings.returnAddress.state} ${settings.returnAddress.zip}`, 1.7, 2.75);
+        doc.text(`${settings.returnAddress.city}, ${settings.returnAddress.state} ${settings.returnAddress.zip} ${settings.returnAddress.country || 'US'}`, 1.7, 2.75);
 
         doc.setFontSize(12);
-        doc.text('SHIP TO:', 1.7, 3.3);
+        doc.text('SHIP TO:', 1.7, 3.2);
         doc.setFontSize(14);
-        doc.text(order.recipientName, 1.7, 3.6);
-        if (order.company) doc.text(order.company, 1.7, 3.85);
-        doc.text(order.street1, 1.7, 4.1);
-        if (order.street2) doc.text(order.street2, 1.7, 4.35);
-        doc.text(`${order.city}, ${order.state} ${order.zip}`, 1.7, 4.6);
+        doc.text(order.recipientName, 1.7, 3.45);
+        if (order.company) doc.text(order.company, 1.7, 3.7);
+        doc.text(order.street1, 1.7, 3.95);
+        if (order.street2) doc.text(order.street2, 1.7, 4.2);
+        doc.text(`${order.city}, ${order.state} ${order.zip}`, 1.7, 4.45);
+        if (isIntl) {
+          doc.setFontSize(14);
+          doc.text(`DESTINATION: ${order.country.toUpperCase()}`, 1.7, 4.75);
+
+          // Customs Declaration Box
+          doc.setLineWidth(0.01);
+          doc.rect(1.7, 4.9, 4.6, 0.45);
+          doc.setFontSize(8);
+          doc.text('USPS CUSTOMS DECLARATION (CN22 / CP72) - NOEEI 30.37(a)', 1.8, 5.05);
+          doc.text(`Declared Value: $${order.declaredValue || 100.00} USD | Category: Commercial Goods`, 1.8, 5.23);
+        }
 
         // Simulated Barcode Box
         doc.setFillColor(0, 0, 0);
-        doc.rect(1.7, 5.2, 4.6, 0.8, 'F');
+        doc.rect(1.7, isIntl ? 5.5 : 5.2, 4.6, 0.8, 'F');
         doc.setFontSize(10);
         doc.setTextColor(0, 0, 0);
-        doc.text(`TRACKING #: ${order.trackingNumber || '9400111202482390123'}`, 1.7, 6.3);
+        doc.text(`TRACKING #: ${order.trackingNumber || (isIntl ? 'CP123456789US' : '9400111202482390123')}`, 1.7, isIntl ? 6.5 : 6.3);
       });
 
       doc.save(`Shipping_Batch_Labels_Slips_${Date.now()}.pdf`);
@@ -299,53 +314,84 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({ orders, settin
               )}
 
               {/* --- 2. 4x6 SHIPPING LABEL --- */}
-              {(viewMode === 'both' || viewMode === 'labels') && (
-                <div className="bg-white text-slate-900 rounded-xl p-6 shadow-xl max-w-md mx-auto border-2 border-slate-900 print:shadow-none print:max-w-none print:w-[4in] print:h-[6in] print:p-4 print:mx-0 page-break-after">
-                  {/* Label Header */}
-                  <div className="flex items-center justify-between border-b-2 border-slate-900 pb-3 mb-3">
-                    <div>
-                      <div className="font-extrabold text-2xl tracking-tight text-slate-900">
-                        {order.carrier || 'USPS'}
+              {(viewMode === 'both' || viewMode === 'labels') && (() => {
+                const isIntl = order.country && order.country.trim().toUpperCase() !== 'US' && order.country.trim().toUpperCase() !== 'USA' && order.country.trim().toUpperCase() !== 'UNITED STATES';
+                const carrierName = order.carrier || 'USPS';
+                const displayCarrier = carrierName === 'UPS' ? 'UPS WORLDWIDE' : isIntl ? 'USPS INTERNATIONAL' : carrierName;
+                const displayService = order.serviceLevel ? order.serviceLevel.toUpperCase() : (isIntl ? 'PRIORITY MAIL INTERNATIONAL' : 'PRIORITY MAIL 2-DAY');
+
+                return (
+                  <div className="bg-white text-slate-900 rounded-xl p-6 shadow-xl max-w-md mx-auto border-2 border-slate-900 print:shadow-none print:max-w-none print:w-[4in] print:h-[6in] print:p-4 print:mx-0 page-break-after">
+                    {/* Label Header */}
+                    <div className="flex items-center justify-between border-b-2 border-slate-900 pb-3 mb-3">
+                      <div>
+                        <div className="font-extrabold text-2xl tracking-tight text-slate-900 flex items-center space-x-1.5">
+                          <span>{displayCarrier}</span>
+                          {isIntl && (
+                            <span className="bg-blue-600 text-white text-[10px] font-bold px-1.5 py-0.5 rounded tracking-normal">
+                              INTL
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs font-bold text-slate-700 uppercase">
+                          {displayService}
+                        </div>
                       </div>
-                      <div className="text-xs font-bold text-slate-700 uppercase">
-                        {order.serviceLevel || 'PRIORITY MAIL 2-DAY'}
+                      <div className="text-right border-2 border-slate-900 px-2 py-1 font-bold text-xs uppercase">
+                        {carrierName === 'UPS' ? 'UPS POSTAGE PAID' : isIntl ? 'USPS INTL POSTAGE PAID' : 'US POSTAGE PAID'}
                       </div>
                     </div>
-                    <div className="text-right border-2 border-slate-900 px-2 py-1 font-bold text-xs uppercase">
-                      US POSTAGE PAID
-                    </div>
-                  </div>
 
-                  {/* Return Address */}
-                  <div className="text-[10px] text-slate-700 border-b border-slate-300 pb-2 mb-3">
-                    <div className="font-bold text-slate-900">{settings.returnAddress.name}</div>
-                    <div>{settings.returnAddress.street1}</div>
-                    <div>{settings.returnAddress.city}, {settings.returnAddress.state} {settings.returnAddress.zip}</div>
-                  </div>
+                    {/* Return Address */}
+                    <div className="text-[10px] text-slate-700 border-b border-slate-300 pb-2 mb-3">
+                      <div className="font-bold text-slate-900">{settings.returnAddress.name}</div>
+                      <div>{settings.returnAddress.street1}</div>
+                      <div>{settings.returnAddress.city}, {settings.returnAddress.state} {settings.returnAddress.zip} {settings.returnAddress.country || 'UNITED STATES'}</div>
+                    </div>
 
-                  {/* Recipient Ship-To Block */}
-                  <div className="my-4 pl-3 border-l-4 border-slate-900">
-                    <div className="text-[10px] font-bold text-slate-500 uppercase">SHIP TO:</div>
-                    <div className="text-base font-extrabold text-slate-900">{order.recipientName}</div>
-                    {order.company && <div className="text-xs font-bold text-slate-800">{order.company}</div>}
-                    <div className="text-sm font-semibold text-slate-900 mt-1">{order.street1}</div>
-                    {order.street2 && <div className="text-sm text-slate-800">{order.street2}</div>}
-                    <div className="text-base font-extrabold text-slate-900 mt-1">
-                      {order.city.toUpperCase()}, {order.state} {order.zip}
+                    {/* Recipient Ship-To Block */}
+                    <div className="my-3 pl-3 border-l-4 border-slate-900">
+                      <div className="text-[10px] font-bold text-slate-500 uppercase">SHIP TO:</div>
+                      <div className="text-base font-extrabold text-slate-900">{order.recipientName}</div>
+                      {order.company && <div className="text-xs font-bold text-slate-800">{order.company}</div>}
+                      <div className="text-sm font-semibold text-slate-900 mt-1">{order.street1}</div>
+                      {order.street2 && <div className="text-sm text-slate-800">{order.street2}</div>}
+                      <div className="text-base font-extrabold text-slate-900 mt-1">
+                        {order.city.toUpperCase()}, {order.state} {order.zip}
+                      </div>
+                      {isIntl && (
+                        <div className="mt-1.5 inline-block bg-slate-900 text-white text-xs font-extrabold px-2 py-0.5 rounded uppercase tracking-wider">
+                          DESTINATION: {order.country.toUpperCase()}
+                        </div>
+                      )}
                     </div>
-                  </div>
 
-                  {/* Barcode & Tracking Block */}
-                  <div className="pt-3 border-t-2 border-slate-900 text-center">
-                    <div className="bg-slate-900 text-white font-mono text-center py-5 text-sm tracking-widest font-extrabold mb-1.5 rounded">
-                      ||| | ||||| ||| |||| |||||| ||||| |||
-                    </div>
-                    <div className="text-[11px] font-mono font-bold text-slate-900">
-                      TRACKING #: {order.trackingNumber || '9400111202482390123'}
+                    {/* Customs Declaration Box for International Orders */}
+                    {isIntl && (
+                      <div className="bg-slate-50 border border-slate-300 rounded p-2 my-2.5 text-[10px] text-slate-800">
+                        <div className="font-bold flex justify-between uppercase text-[9px] text-slate-900 border-b border-slate-200 pb-1 mb-1">
+                          <span>USPS Customs Form CN22 / CP72</span>
+                          <span>NOEEI 30.37(a)</span>
+                        </div>
+                        <div className="flex justify-between text-[10px]">
+                          <span>Contents: <strong>Merchandise</strong></span>
+                          <span>Decl. Value: <strong>${order.declaredValue || 100.00} USD</strong></span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Barcode & Tracking Block */}
+                    <div className="pt-2 border-t-2 border-slate-900 text-center">
+                      <div className="bg-slate-900 text-white font-mono text-center py-4 text-sm tracking-widest font-extrabold mb-1.5 rounded">
+                        ||| | ||||| ||| |||| |||||| ||||| |||
+                      </div>
+                      <div className="text-[11px] font-mono font-bold text-slate-900">
+                        TRACKING #: {order.trackingNumber || (isIntl ? 'CP123456789US' : '9400111202482390123')}
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </div>
           ))}
         </div>

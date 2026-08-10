@@ -17,6 +17,8 @@ import {
   ShieldCheck,
   AlertCircle,
   Eye,
+  Building,
+  MapPin,
 } from 'lucide-react';
 
 interface SettingsPageProps {
@@ -34,7 +36,19 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   onCreatePackage,
   onDeletePackage,
 }) => {
-  const [activeSection, setActiveSection] = useState<'packingslip' | 'easypost' | 'packages' | 'mssql' | 'security'>('packingslip');
+  const [activeSection, setActiveSection] = useState<'returnAddress' | 'packingslip' | 'easypost' | 'packages' | 'mssql' | 'security'>('returnAddress');
+
+  // Business / FROM Address Form states
+  const [companyName, setCompanyName] = useState(settings.companyName || 'BlueCat Bobbins Shipping');
+  const [returnName, setReturnName] = useState(settings.returnAddress?.name || 'BlueCat Shipping Dept');
+  const [returnCompany, setReturnCompany] = useState(settings.returnAddress?.company || settings.companyName || 'BlueCat Bobbins Shipping');
+  const [returnStreet1, setReturnStreet1] = useState(settings.returnAddress?.street1 || '100 Bobbin Way');
+  const [returnStreet2, setReturnStreet2] = useState(settings.returnAddress?.street2 || 'Suite 100');
+  const [returnCity, setReturnCity] = useState(settings.returnAddress?.city || 'Chicago');
+  const [returnState, setReturnState] = useState(settings.returnAddress?.state || 'IL');
+  const [returnZip, setReturnZip] = useState(settings.returnAddress?.zip || '60601');
+  const [returnCountry, setReturnCountry] = useState(settings.returnAddress?.country || 'US');
+  const [returnPhone, setReturnPhone] = useState(settings.returnAddress?.phone || '312-555-0144');
 
   // Form states
   const [packingSlipContent, setPackingSlipContent] = useState(settings.packingSlipContent || '');
@@ -70,6 +84,27 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
       .then((res) => setDdlScript(res.ddlScript || ''))
       .catch((err) => console.error('Failed to load MSSQL schema:', err));
   }, []);
+
+  const handleSaveReturnAddress = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    await onUpdateSettings({
+      companyName,
+      returnAddress: {
+        name: returnName,
+        company: returnCompany || companyName,
+        street1: returnStreet1,
+        street2: returnStreet2,
+        city: returnCity,
+        state: returnState,
+        zip: returnZip,
+        country: returnCountry,
+        phone: returnPhone,
+      },
+    });
+    setSaving(false);
+    triggerSuccess();
+  };
 
   const handleSavePackingSlip = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -204,6 +239,18 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
         {/* Navigation Sidebar */}
         <div className="bg-white border border-slate-200 rounded-xl p-2.5 shadow-sm h-fit space-y-1">
           <button
+            onClick={() => setActiveSection('returnAddress')}
+            className={`w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+              activeSection === 'returnAddress'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <Building className="w-4 h-4" />
+            <span>Business &amp; Return Address (FROM Labels)</span>
+          </button>
+
+          <button
             onClick={() => setActiveSection('packingslip')}
             className={`w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
               activeSection === 'packingslip'
@@ -266,6 +313,185 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
 
         {/* Content Section Panels */}
         <div className="lg:col-span-3 space-y-6">
+          {/* SECTION 0: BUSINESS NAME & RETURN ADDRESS (FROM LABELS) */}
+          {activeSection === 'returnAddress' && (
+            <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-6">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 flex items-center space-x-2">
+                  <Building className="w-5 h-5 text-indigo-600" />
+                  <span>Business Name &amp; Return Address (FROM Section on Labels)</span>
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Configure your business name and ship-from address. This information prints in the <strong>FROM / RETURN ADDRESS</strong> block on all generated shipping labels and packing slips.
+                </p>
+              </div>
+
+              <form onSubmit={handleSaveReturnAddress} className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1">
+                      Business / Company Name *
+                    </label>
+                    <input
+                      type="text"
+                      value={companyName}
+                      onChange={(e) => {
+                        setCompanyName(e.target.value);
+                        setReturnCompany(e.target.value);
+                      }}
+                      placeholder="e.g. BlueCat Bobbins Shipping"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-xs text-slate-800 font-bold focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Contact Person / Department
+                    </label>
+                    <input
+                      type="text"
+                      value={returnName}
+                      onChange={(e) => setReturnName(e.target.value)}
+                      placeholder="e.g. Shipping Dept or Jane Doe"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Phone Number
+                    </label>
+                    <input
+                      type="text"
+                      value={returnPhone}
+                      onChange={(e) => setReturnPhone(e.target.value)}
+                      placeholder="e.g. (312) 555-0144"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Street Address Line 1 *
+                    </label>
+                    <input
+                      type="text"
+                      value={returnStreet1}
+                      onChange={(e) => setReturnStreet1(e.target.value)}
+                      placeholder="e.g. 100 Bobbin Way"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
+                      required
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Street Address Line 2 (Suite, Apt, Bldg)
+                    </label>
+                    <input
+                      type="text"
+                      value={returnStreet2}
+                      onChange={(e) => setReturnStreet2(e.target.value)}
+                      placeholder="e.g. Suite 100"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      City *
+                    </label>
+                    <input
+                      type="text"
+                      value={returnCity}
+                      onChange={(e) => setReturnCity(e.target.value)}
+                      placeholder="e.g. Chicago"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      State / Province *
+                    </label>
+                    <input
+                      type="text"
+                      value={returnState}
+                      onChange={(e) => setReturnState(e.target.value.toUpperCase())}
+                      placeholder="e.g. IL"
+                      maxLength={4}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-xs text-slate-800 uppercase focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      ZIP / Postal Code *
+                    </label>
+                    <input
+                      type="text"
+                      value={returnZip}
+                      onChange={(e) => setReturnZip(e.target.value)}
+                      placeholder="e.g. 60601"
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Country *
+                    </label>
+                    <input
+                      type="text"
+                      value={returnCountry}
+                      onChange={(e) => setReturnCountry(e.target.value.toUpperCase())}
+                      placeholder="e.g. US"
+                      maxLength={3}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-xs text-slate-800 uppercase font-bold focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
+                      required
+                    />
+                  </div>
+                </div>
+
+                {/* Live Preview Box */}
+                <div className="pt-2">
+                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-2 flex items-center space-x-1.5">
+                    <Eye className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>Live 4x6 Label "SHIP FROM" Block Preview:</span>
+                  </label>
+                  <div className="bg-slate-50 border-2 border-slate-900 p-4 rounded-xl max-w-sm">
+                    <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 border-b border-slate-200 pb-1">
+                      SHIP FROM (ORIGIN):
+                    </div>
+                    <div className="font-extrabold text-sm text-slate-900">{companyName || 'Business Name'}</div>
+                    {returnName && <div className="text-xs font-semibold text-slate-700">{returnName}</div>}
+                    <div className="text-xs text-slate-800 mt-1">{returnStreet1} {returnStreet2}</div>
+                    <div className="text-xs font-bold text-slate-900">
+                      {returnCity.toUpperCase()}, {returnState} {returnZip} {returnCountry.toUpperCase()}
+                    </div>
+                    {returnPhone && <div className="text-[11px] text-slate-500 mt-0.5">Ph: {returnPhone}</div>}
+                  </div>
+                </div>
+
+                <div className="pt-2 flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs px-5 py-2.5 rounded-lg shadow-sm flex items-center space-x-2 cursor-pointer disabled:opacity-50"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>{saving ? 'Saving...' : 'Save & Update Label Sender Address'}</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
           {/* SECTION 1: PACKING SLIP CUSTOM CONTENT */}
           {activeSection === 'packingslip' && (
             <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-6">

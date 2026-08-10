@@ -4,10 +4,12 @@ import { Navbar } from './components/Navbar';
 import { LoginModal } from './components/LoginModal';
 import { Dashboard } from './components/Dashboard';
 import { AddressFixModal } from './components/AddressFixModal';
+import { CompareRatesModal } from './components/CompareRatesModal';
 import { ManualOrderModal } from './components/ManualOrderModal';
 import { BatchPrintModal } from './components/BatchPrintModal';
 import { SearchShipped } from './components/SearchShipped';
 import { ReshipModal } from './components/ReshipModal';
+import { ScanFormModal } from './components/ScanFormModal';
 import { Reports } from './components/Reports';
 import { SettingsPage } from './components/SettingsPage';
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
@@ -25,7 +27,9 @@ export default function App() {
 
   // Modals state
   const [addressFixOrder, setAddressFixOrder] = useState<ShippingOrder | null>(null);
+  const [compareRatesOrder, setCompareRatesOrder] = useState<ShippingOrder | null>(null);
   const [showManualOrderModal, setShowManualOrderModal] = useState<boolean>(false);
+  const [showScanFormModal, setShowScanFormModal] = useState<boolean>(false);
   const [printOrders, setPrintOrders] = useState<ShippingOrder[] | null>(null);
   const [reshipTargetOrder, setReshipTargetOrder] = useState<ShippingOrder | null>(null);
 
@@ -133,6 +137,34 @@ export default function App() {
       showToast(`Address for ${updated.orderNumber} updated & re-validated!`, 'success');
     } catch (err) {
       showToast('Error updating address in database.', 'error');
+    }
+  };
+
+  // Rate Selection Handler
+  const handleSelectRate = async (
+    orderId: string,
+    carrier: 'USPS' | 'UPS',
+    serviceLevel: string,
+    rate: number
+  ) => {
+    try {
+      const res = await fetch(`/api/orders/${orderId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          carrier,
+          serviceLevel,
+          shippingCost: rate,
+        }),
+      });
+      const updated = await res.json();
+      setOrders((prev) => prev.map((o) => (o.id === orderId ? updated : o)));
+      showToast(
+        `Selected ${carrier} ${serviceLevel} ($${rate.toFixed(2)}) for #${updated.orderNumber}`,
+        'success'
+      );
+    } catch (err) {
+      showToast('Failed to save selected carrier rate.', 'error');
     }
   };
 
@@ -308,6 +340,7 @@ export default function App() {
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         openManualOrderModal={() => setShowManualOrderModal(true)}
+        openScanFormModal={() => setShowScanFormModal(true)}
         pendingValidationCount={pendingCount}
         addressErrorCount={errorCount}
         readyToShipCount={readyCount}
@@ -327,9 +360,11 @@ export default function App() {
             onUpdateOrderBox={handleUpdateOrderBox}
             onValidateAddresses={handleValidateAddresses}
             onOpenAddressFixModal={(order) => setAddressFixOrder(order)}
+            onOpenCompareRatesModal={(order) => setCompareRatesOrder(order)}
             onGenerateBatchLabels={handleGenerateBatchLabels}
             onRefreshData={refreshAllData}
             onSyncMssql={handleSyncMssql}
+            onOpenScanFormModal={() => setShowScanFormModal(true)}
             loading={loading}
           />
         )}
@@ -340,6 +375,7 @@ export default function App() {
             settings={settings || ({} as AppSetting)}
             onReshipOrder={(order) => setReshipTargetOrder(order)}
             onOpenPrintModal={(ordersToPrint) => setPrintOrders(ordersToPrint)}
+            onOpenScanFormModal={() => setShowScanFormModal(true)}
           />
         )}
 
@@ -370,11 +406,29 @@ export default function App() {
         />
       )}
 
+      {compareRatesOrder && (
+        <CompareRatesModal
+          order={compareRatesOrder}
+          packages={packages}
+          onClose={() => setCompareRatesOrder(null)}
+          onSelectRate={handleSelectRate}
+        />
+      )}
+
       {showManualOrderModal && (
         <ManualOrderModal
           packages={packages}
           onClose={() => setShowManualOrderModal(false)}
           onCreateOrder={handleCreateManualOrder}
+        />
+      )}
+
+      {showScanFormModal && settings && (
+        <ScanFormModal
+          shippedOrders={shippedOrders}
+          settings={settings}
+          onClose={() => setShowScanFormModal(false)}
+          onScanFormCreated={(sf) => showToast(`USPS SCAN Form (${sf.id}) generated successfully!`, 'success')}
         />
       )}
 

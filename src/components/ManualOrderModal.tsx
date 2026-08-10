@@ -162,13 +162,13 @@ export const ManualOrderModal: React.FC<ManualOrderModalProps> = ({ packages, on
                 onChange={(e) => setStreet2(e.target.value)}
                 className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
               />
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-4 gap-2">
                 <input
                   type="text"
                   placeholder="City *"
                   value={city}
                   onChange={(e) => setCity(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none col-span-1"
                   required
                 />
                 <input
@@ -176,8 +176,8 @@ export const ManualOrderModal: React.FC<ManualOrderModalProps> = ({ packages, on
                   placeholder="State * (CA)"
                   value={state}
                   onChange={(e) => setState(e.target.value.toUpperCase())}
-                  maxLength={2}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 uppercase focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  maxLength={4}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 uppercase focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none col-span-1"
                   required
                 />
                 <input
@@ -185,10 +185,33 @@ export const ManualOrderModal: React.FC<ManualOrderModalProps> = ({ packages, on
                   placeholder="ZIP Code *"
                   value={zip}
                   onChange={(e) => setZip(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none col-span-1"
                   required
                 />
+                <select
+                  value={country}
+                  onChange={(e) => setCountry(e.target.value.toUpperCase())}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 text-xs text-slate-800 font-semibold focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none cursor-pointer col-span-1"
+                >
+                  <option value="US">🇺🇸 US</option>
+                  <option value="CA">🇨🇦 CA (Canada)</option>
+                  <option value="GB">🇬🇧 GB (UK)</option>
+                  <option value="AU">🇦🇺 AU (Australia)</option>
+                  <option value="MX">🇲🇽 MX (Mexico)</option>
+                  <option value="DE">🇩🇪 DE (Germany)</option>
+                  <option value="FR">🇫🇷 FR (France)</option>
+                  <option value="JP">🇯🇵 JP (Japan)</option>
+                </select>
               </div>
+
+              {country !== 'US' && country !== 'USA' && (
+                <div className="bg-blue-50 border border-blue-200 text-blue-900 rounded-lg p-2.5 text-xs flex items-center space-x-2">
+                  <Truck className="w-4 h-4 text-blue-600 shrink-0" />
+                  <span>
+                    <strong>USPS International Label Required:</strong> Destination is outside the US. Order will be automatically routed with <strong>USPS Priority Mail International</strong> and CN22 customs forms.
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 

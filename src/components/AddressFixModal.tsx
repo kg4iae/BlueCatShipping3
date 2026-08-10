@@ -14,6 +14,7 @@ export const AddressFixModal: React.FC<AddressFixModalProps> = ({ order, onClose
   const [city, setCity] = useState(order.city);
   const [state, setState] = useState(order.state);
   const [zip, setZip] = useState(order.zip);
+  const [country, setCountry] = useState(order.country || 'US');
   const [saving, setSaving] = useState(false);
 
   const handleSave = async (e: React.FormEvent) => {
@@ -25,6 +26,7 @@ export const AddressFixModal: React.FC<AddressFixModalProps> = ({ order, onClose
       city,
       state,
       zip,
+      country,
     });
     setSaving(false);
     onClose();
@@ -105,7 +107,7 @@ export const AddressFixModal: React.FC<AddressFixModalProps> = ({ order, onClose
               />
             </div>
 
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-4 gap-2">
               <div>
                 <label className="block text-xs font-semibold text-slate-600 mb-1">City</label>
                 <input
@@ -123,7 +125,7 @@ export const AddressFixModal: React.FC<AddressFixModalProps> = ({ order, onClose
                   type="text"
                   value={state}
                   onChange={(e) => setState(e.target.value.toUpperCase())}
-                  maxLength={2}
+                  maxLength={4}
                   className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none uppercase"
                   required
                 />
@@ -131,15 +133,25 @@ export const AddressFixModal: React.FC<AddressFixModalProps> = ({ order, onClose
 
               <div>
                 <label className="block text-xs font-semibold text-slate-600 mb-1">ZIP Code</label>
-                <div className="relative">
-                  <input
-                    type="text"
-                    value={zip}
-                    onChange={(e) => setZip(e.target.value)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    required
-                  />
-                </div>
+                <input
+                  type="text"
+                  value={zip}
+                  onChange={(e) => setZip(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1">Country</label>
+                <input
+                  type="text"
+                  value={country}
+                  onChange={(e) => setCountry(e.target.value.toUpperCase())}
+                  maxLength={3}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 text-xs text-slate-800 font-bold focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none uppercase"
+                  required
+                />
               </div>
             </div>
 

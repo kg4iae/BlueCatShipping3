@@ -12,12 +12,14 @@ import {
   LogOut,
   Truck,
   Sparkles,
+  FileText,
 } from 'lucide-react';
 
 interface NavbarProps {
   activeTab: 'dashboard' | 'search' | 'reports' | 'settings';
   setActiveTab: (tab: 'dashboard' | 'search' | 'reports' | 'settings') => void;
   openManualOrderModal: () => void;
+  openScanFormModal?: () => void;
   pendingValidationCount: number;
   addressErrorCount: number;
   readyToShipCount: number;
@@ -31,6 +33,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   activeTab,
   setActiveTab,
   openManualOrderModal,
+  openScanFormModal,
   pendingValidationCount,
   addressErrorCount,
   readyToShipCount,
@@ -114,10 +117,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <span className="font-bold text-lg tracking-tight text-white">ShipFlow Pro</span>
-                <span className="bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-[10px] font-semibold px-2 py-0.5 rounded-full uppercase tracking-wider">
-                  MSSQL Sync
-                </span>
+                <span className="font-bold text-lg tracking-tight text-white">BlueCat Bobbins Shipping</span>
               </div>
               <p className="text-[11px] text-slate-400 hidden sm:block">EasyPost Labeling &amp; Logistics Engine</p>
             </div>
@@ -179,8 +179,18 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           </nav>
 
-          {/* Quick Manual Order Button */}
-          <div className="flex items-center">
+          {/* Quick Actions Buttons */}
+          <div className="flex items-center space-x-2">
+            {openScanFormModal && (
+              <button
+                onClick={openScanFormModal}
+                className="flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700 font-semibold text-xs sm:text-sm px-3 py-2 rounded-lg transition-all shadow-sm active:scale-95 cursor-pointer"
+                title="Create or print end-of-day USPS Form 5630 SCAN Form via EasyPost"
+              >
+                <FileText className="w-4 h-4 text-indigo-400" />
+                <span className="hidden md:inline">SCAN Form</span>
+              </button>
+            )}
             <button
               onClick={openManualOrderModal}
               className="flex items-center space-x-2 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs sm:text-sm px-4 py-2 rounded-lg transition-all shadow-sm active:scale-95 cursor-pointer"
