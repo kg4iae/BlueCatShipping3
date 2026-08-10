@@ -37,5 +37,5 @@ jobs:
           curl -X POST \
             -H "Authorization: Bearer ${{ secrets.TRUENAS_API_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d '{"name":"bluecatshippingapp"}' \
-            https://${{ secrets.TRUENAS_HOST }}/api/v2.0/container/id/bluecatshippingapp/restart
+            -d "bluecatshippingapp" \
+            https://${{ secrets.TRUENAS_HOST }}/api/v2.0/app/redeploy
