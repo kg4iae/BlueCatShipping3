@@ -1,9 +1,10 @@
 import express from 'express';
 import path from 'path';
+import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import sql from 'mssql';
 import { jsPDF } from 'jspdf';
-import { ShippingOrder, PackageType, AppSetting, MonthlyReportData, OrderStatus, CarrierType, ScanFormType } from './src/types.js';
+import { ShippingOrder, PackageType, AppSetting, MonthlyReportData, OrderStatus, CarrierType, ScanFormType, OrderItem } from './src/types.js';
 
 const app = express();
 const PORT = 3000;
@@ -183,7 +184,24 @@ async function ensureMssqlTables(pool: sql.ConnectionPool) {
               [TotalWeight] [float] NOT NULL DEFAULT 16,
               [box] [varchar](50) NULL,
               [easypostShipmentId] [nvarchar](64) NULL,
+              [LabelData] [varbinary](max) NULL,
               CONSTRAINT [PK_Shipping_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
+          );
+      END;
+
+      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'LabelData')
+      BEGIN
+          ALTER TABLE [dbo].[Shipping] ADD [LabelData] [varbinary](max) NULL;
+      END;
+    `);
+
+    // 3. Configuration / Settings Table
+    await pool.request().query(`
+      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Configuration')
+      BEGIN
+          CREATE TABLE [dbo].[Configuration](
+              [ConfigKey] [nvarchar](100) NOT NULL PRIMARY KEY,
+              [ConfigValue] [nvarchar](max) NULL
           );
       END;
     `);
@@ -197,8 +215,98 @@ async function ensureMssqlTables(pool: sql.ConnectionPool) {
         await saveOrderToMssqlPool(pool, order);
       }
     }
+
+    // Seed/sync settings to MS SQL Configuration table if empty
+    const cfgCountRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Configuration]');
+    const cfgCount = cfgCountRes.recordset[0]?.cnt || 0;
+    if (cfgCount === 0 && db.settings) {
+      console.log('[MSSQL] Table [dbo].[Configuration] empty. Writing initial settings into MS SQL database...');
+      await saveSettingsToMssqlPool(pool, db.settings);
+    }
   } catch (err) {
     console.error('[MSSQL] Error verifying/creating MS SQL tables:', err);
+  }
+}
+
+// Disk Persistence for Settings
+const SETTINGS_FILE_PATH = path.join(process.cwd(), 'data_settings.json');
+
+function saveSettingsToFile(settings: AppSetting) {
+  try {
+    fs.writeFileSync(SETTINGS_FILE_PATH, JSON.stringify(settings, null, 2), 'utf8');
+  } catch (err) {
+    console.error('[FILE] Error writing settings to data_settings.json:', err);
+  }
+}
+
+function loadSettingsFromFile(): Partial<AppSetting> | null {
+  try {
+    if (fs.existsSync(SETTINGS_FILE_PATH)) {
+      const content = fs.readFileSync(SETTINGS_FILE_PATH, 'utf8');
+      return JSON.parse(content);
+    }
+  } catch (err) {
+    console.error('[FILE] Error reading settings from data_settings.json:', err);
+  }
+  return null;
+}
+
+// Save or Update Configuration settings key-value entries in MS SQL Server [dbo].[Configuration]
+async function saveSettingsToMssqlPool(pool: sql.ConnectionPool, settings: AppSetting) {
+  try {
+    const keys = Object.keys(settings);
+    for (const key of keys) {
+      const rawVal = (settings as any)[key];
+      const valStr = typeof rawVal === 'object' ? JSON.stringify(rawVal) : String(rawVal ?? '');
+      
+      const req = pool.request();
+      req.input('key', sql.NVarChar(100), key);
+      req.input('val', sql.NVarChar(sql.MAX), valStr);
+      await req.query(`
+        IF EXISTS (SELECT 1 FROM [dbo].[Configuration] WHERE [ConfigKey] = @key)
+        BEGIN
+            UPDATE [dbo].[Configuration] SET [ConfigValue] = @val WHERE [ConfigKey] = @key;
+        END
+        ELSE
+        BEGIN
+            INSERT INTO [dbo].[Configuration] ([ConfigKey], [ConfigValue]) VALUES (@key, @val);
+        END
+      `);
+    }
+    console.log('[MSSQL] Successfully saved settings key-values to [dbo].[Configuration] table.');
+  } catch (err) {
+    console.error('[MSSQL] Error in saveSettingsToMssqlPool:', err);
+  }
+}
+
+// Fetch Configuration settings from MS SQL Server [dbo].[Configuration]
+async function fetchSettingsFromMssql(): Promise<Partial<AppSetting> | null> {
+  const pool = await getMssqlPool();
+  if (!pool) return null;
+
+  try {
+    const result = await pool.request().query('SELECT [ConfigKey], [ConfigValue] FROM [dbo].[Configuration]');
+    if (!result.recordset || result.recordset.length === 0) return null;
+
+    const loadedSettings: any = {};
+    for (const row of result.recordset) {
+      const key = row.ConfigKey;
+      let val: any = row.ConfigValue;
+
+      if (val === 'true') val = true;
+      else if (val === 'false') val = false;
+      else if (!isNaN(Number(val)) && val !== '' && key !== 'easyPostApiKey' && key !== 'appPassword') val = Number(val);
+      else if (val && (val.startsWith('{') || val.startsWith('['))) {
+        try {
+          val = JSON.parse(val);
+        } catch (e) {}
+      }
+      loadedSettings[key] = val;
+    }
+    return loadedSettings;
+  } catch (err) {
+    console.error('[MSSQL] Error fetching settings from [dbo].[Configuration]:', err);
+    return null;
   }
 }
 
@@ -318,7 +426,8 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
     req.input('platform', sql.NVarChar(sql.MAX), order.company || 'Web App');
     req.input('TotalWeight', sql.Float, order.weightOz || 16);
     req.input('box', sql.VarChar(50), order.boxId || 'pkg_medium');
-    req.input('easypostShipmentId', sql.NVarChar(64), order.labelUrl || null);
+    req.input('easypostShipmentId', sql.NVarChar(64), order.easypostShipmentId || null);
+    req.input('LabelData', sql.VarBinary(sql.MAX), order.labelBinary || null);
 
     await req.query(`
       IF (@id > 0 AND EXISTS (SELECT 1 FROM [dbo].[Shipping] WHERE [Id] = @id))
@@ -343,7 +452,8 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
               [platform] = @platform,
               [TotalWeight] = @TotalWeight,
               [box] = @box,
-              [easypostShipmentId] = @easypostShipmentId
+              [easypostShipmentId] = @easypostShipmentId,
+              [LabelData] = ISNULL(@LabelData, [LabelData])
           WHERE [Id] = @id;
       END
       ELSE IF (@receiptID IS NOT NULL AND EXISTS (SELECT 1 FROM [dbo].[Shipping] WHERE [receiptID] = @receiptID))
@@ -367,7 +477,8 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
               [platform] = @platform,
               [TotalWeight] = @TotalWeight,
               [box] = @box,
-              [easypostShipmentId] = @easypostShipmentId
+              [easypostShipmentId] = @easypostShipmentId,
+              [LabelData] = ISNULL(@LabelData, [LabelData])
           WHERE [receiptID] = @receiptID;
       END
       ELSE
@@ -376,18 +487,129 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
               [name], [address1], [address2], [city], [state], [postalCode], [country],
               [phone], [email], [createdAt], [OrderDetails], [receiptID], [shippingMethod],
               [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
-              [TotalWeight], [box], [easypostShipmentId]
+              [TotalWeight], [box], [easypostShipmentId], [LabelData]
           ) VALUES (
               @name, @address1, @address2, @city, @state, @postalCode, @country,
               @phone, @email, @createdAt, @OrderDetails, @receiptID, @shippingMethod,
               @trackingNumber, @status, @shippingCost, @shippingDate, @platform,
-              @TotalWeight, @box, @easypostShipmentId
+              @TotalWeight, @box, @easypostShipmentId, @LabelData
           );
       END
     `);
   } catch (err) {
     console.error('[MSSQL] Error in saveOrderToMssqlPool:', err);
   }
+}
+
+// Robust parser for OrderDetails string
+// Format: Item Name, Item Type, Color, Quantity
+// Each row delimited with |
+// Blank Item Type appears as ",," (e.g., "Item Name,, Color, 2")
+// Returns parsed items and flags parse issues
+function parseOrderDetailsString(rawDetails: string | null | undefined): { items: OrderItem[]; parseError?: string } {
+  if (!rawDetails || typeof rawDetails !== 'string' || !rawDetails.trim()) {
+    return {
+      items: [{ id: 'item-1', sku: 'SKU-STD', name: 'Standard Order Item', quantity: 1, price: 0, weightOz: 4 }],
+      parseError: 'OrderDetails column is empty or missing.',
+    };
+  }
+
+  const str = rawDetails.trim();
+
+  // Try JSON first if saved as JSON string
+  if (str.startsWith('[') || str.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(str);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return {
+          items: parsed.map((item: any, idx: number) => ({
+            id: item.id || `item-${idx + 1}`,
+            sku: item.sku || `SKU-${idx + 1}`,
+            name: item.name || item.description || 'Item',
+            itemType: item.itemType || item.type || undefined,
+            color: item.color || undefined,
+            quantity: Number(item.quantity) || 1,
+            price: Number(item.price) || 0,
+            weightOz: item.weightOz !== undefined ? Number(item.weightOz) : 4,
+          })),
+        };
+      }
+    } catch (e) {
+      // Fall through to pipe parsing
+    }
+  }
+
+  // Parse pipe delimited rows
+  const rows = str.split('|').map((r) => r.trim()).filter(Boolean);
+  if (rows.length === 0) {
+    return {
+      items: [{ id: 'item-1', sku: 'SKU-STD', name: str, quantity: 1, price: 0, weightOz: 4 }],
+      parseError: 'No items found in OrderDetails string.',
+    };
+  }
+
+  const items: OrderItem[] = [];
+  let parseError: string | undefined = undefined;
+
+  for (let idx = 0; idx < rows.length; idx++) {
+    const rowStr = rows[idx];
+    const parts = rowStr.split(',').map((p) => p.trim());
+
+    if (parts.length < 2) {
+      parseError = `Order details format issue on row ${idx + 1}: "${rowStr}". Expected format: Item Name, Item Type, Color, Quantity`;
+      items.push({
+        id: `item-${idx + 1}`,
+        sku: `ITEM-${idx + 1}`,
+        name: rowStr,
+        quantity: 1,
+        price: 0,
+        weightOz: 4,
+      });
+      continue;
+    }
+
+    const itemName = parts[0] || `Item ${idx + 1}`;
+    let itemType = '';
+    let color = '';
+    let qty = 1;
+
+    if (parts.length >= 4) {
+      itemType = parts[1]; // can be empty string for ",,"
+      color = parts[2];
+      const parsedQty = parseInt(parts[3], 10);
+      qty = !isNaN(parsedQty) && parsedQty > 0 ? parsedQty : 1;
+    } else if (parts.length === 3) {
+      itemType = parts[1];
+      const parsedQty = parseInt(parts[2], 10);
+      if (!isNaN(parsedQty)) {
+        qty = parsedQty;
+      } else {
+        color = parts[2];
+      }
+    } else {
+      const parsedQty = parseInt(parts[1], 10);
+      if (!isNaN(parsedQty)) {
+        qty = parsedQty;
+      } else {
+        itemType = parts[1];
+      }
+    }
+
+    const skuCode = (itemName.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 8) || 'SKU') + (color ? `-${color.toUpperCase()}` : '');
+
+    items.push({
+      id: `item-${idx + 1}`,
+      sku: skuCode,
+      name: itemName,
+      itemType: itemType || undefined,
+      color: color || undefined,
+      quantity: qty,
+      price: 0,
+      weightOz: 4 * qty,
+    });
+  }
+
+  return { items, parseError };
 }
 
 // Fetch Orders directly from MS SQL Server [dbo].[Shipping] table
@@ -404,32 +626,18 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
     `);
 
     const orders: ShippingOrder[] = result.recordset.map((row: any) => {
-      let items: any[] = [];
-      if (row.OrderDetails) {
-        try {
-          items = JSON.parse(row.OrderDetails);
-        } catch (e) {
-          items = [
-            {
-              sku: 'SKU-ITEM',
-              name: String(row.OrderDetails),
-              quantity: 1,
-              price: 0,
-              weightOz: Number(row.TotalWeight) || 16,
-            },
-          ];
-        }
+      const validationErrors: string[] = [];
+
+      // Check Total Weight
+      const rawWeight = row.TotalWeight !== null && row.TotalWeight !== undefined ? Number(row.TotalWeight) : 16;
+      if (rawWeight <= 0) {
+        validationErrors.push('Total Weight is set to 0 oz - Needs weight correction');
       }
-      if (!Array.isArray(items) || items.length === 0) {
-        items = [
-          {
-            sku: 'SKU-GENERAL',
-            name: 'Standard Order Item',
-            quantity: 1,
-            price: 0,
-            weightOz: Number(row.TotalWeight) || 16,
-          },
-        ];
+
+      // Parse OrderDetails
+      const { items, parseError } = parseOrderDetailsString(row.OrderDetails);
+      if (parseError) {
+        validationErrors.push(parseError);
       }
 
       const validStatuses: OrderStatus[] = ['pending_validation', 'address_error', 'ready_to_ship', 'shipped', 'cancelled'];
@@ -440,9 +648,30 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
         statusVal = 'shipped';
       }
 
-      const rawCarrierVal = row.shippingMethod ? String(row.shippingMethod).split(' ')[0] : undefined;
-      const validCarriers: CarrierType[] = ['USPS', 'FedEx', 'UPS', 'DHL'];
-      const carrier = rawCarrierVal && validCarriers.includes(rawCarrierVal as CarrierType) ? (rawCarrierVal as CarrierType) : undefined;
+      if (validationErrors.length > 0 && statusVal !== 'shipped') {
+        statusVal = 'address_error';
+      }
+
+      const rawCountry = (row.country ? String(row.country) : 'US').trim().toUpperCase();
+      const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
+
+      const defaultCarrierSetting = !isIntl ? (db.settings.defaultDomesticCarrier || 'USPS') : 'USPS';
+      const defaultServiceSetting = !isIntl ? (db.settings.defaultDomesticService || 'Priority') : 'Priority Mail International';
+
+      const rawShippingMethod = row.shippingMethod ? String(row.shippingMethod).trim() : '';
+      let carrierVal: CarrierType = defaultCarrierSetting;
+      let serviceLevelVal: string = defaultServiceSetting;
+
+      if (rawShippingMethod) {
+        const firstWord = rawShippingMethod.split(' ')[0].toUpperCase();
+        const validCarriers: CarrierType[] = ['USPS', 'FedEx', 'UPS', 'DHL'];
+        if (validCarriers.includes(firstWord as CarrierType)) {
+          carrierVal = firstWord as CarrierType;
+          serviceLevelVal = rawShippingMethod.substring(firstWord.length).trim() || defaultServiceSetting;
+        } else {
+          serviceLevelVal = rawShippingMethod;
+        }
+      }
 
       return {
         id: String(row.Id),
@@ -461,7 +690,7 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
         status: statusVal,
         boxId: row.box ? String(row.box) : 'pkg_medium',
         boxName: row.box ? String(row.box) : 'Medium Flat Rate Box',
-        weightOz: Number(row.TotalWeight) || 16,
+        weightOz: rawWeight,
         declaredValue: 0,
         addressValidated: Boolean(
           statusVal === 'address_error' ? false :
@@ -469,12 +698,17 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
           statusVal === 'shipped' ||
           row.trackingNumber
         ),
+        validationErrors: validationErrors.length > 0 ? validationErrors : undefined,
         trackingNumber: row.trackingNumber ? String(row.trackingNumber) : undefined,
-        carrier,
-        serviceLevel: row.shippingMethod ? String(row.shippingMethod) : undefined,
+        carrier: carrierVal,
+        serviceLevel: serviceLevelVal,
         shippingCost: row.shippingCost !== null && row.shippingCost !== undefined ? Number(row.shippingCost) : undefined,
         shippingDate: row.shippingDate ? new Date(row.shippingDate).toISOString() : undefined,
-        labelUrl: row.easypostShipmentId ? String(row.easypostShipmentId) : undefined,
+        easypostShipmentId: row.easypostShipmentId ? String(row.easypostShipmentId) : undefined,
+        labelUrl: `/api/orders/${String(row.Id)}/label.pdf`,
+        labelBinary: row.LabelData ? Buffer.from(row.LabelData) : undefined,
+        hasLabelData: Boolean(row.LabelData && (Buffer.isBuffer(row.LabelData) ? row.LabelData.length > 0 : true)),
+        LabelData: row.LabelData ? true : null,
         items,
       };
     });
@@ -598,12 +832,16 @@ const initialSettings: AppSetting = {
     phone: '312-555-0144',
   },
   appPassword: process.env.APP_PASSWORD || 'shipstation123',
+  defaultDomesticCarrier: 'USPS',
+  defaultDomesticService: 'Priority',
 };
 
 // Seed realistic order dataset spanning active queue and historical months
+const savedDiskSettings = loadSettingsFromFile();
+
 const db: DatabaseSchema = {
   packages: [...initialPackages],
-  settings: { ...initialSettings },
+  settings: { ...initialSettings, ...(savedDiskSettings || {}) },
   scanForms: [],
   orders: [
     {
@@ -1023,6 +1261,12 @@ app.post('/api/orders', async (req, res) => {
   // Perform address validation
   const validation = validateAddressWithEasyPost({ street1, street2, city, state, zip, country: country || 'US' });
 
+  const rawCountry = (country || 'US').trim().toUpperCase();
+  const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
+
+  const defaultCarrier = !isIntl ? (db.settings.defaultDomesticCarrier || 'USPS') : 'USPS';
+  const defaultService = !isIntl ? (db.settings.defaultDomesticService || 'Priority') : 'Priority Mail International';
+
   const newOrder: ShippingOrder = {
     id: `ord_${Date.now()}`,
     orderNumber: generatedNum,
@@ -1040,6 +1284,8 @@ app.post('/api/orders', async (req, res) => {
     status: validation.isValid ? 'ready_to_ship' : 'address_error',
     boxId: selectedBox.id,
     boxName: selectedBox.name,
+    carrier: req.body.carrier || defaultCarrier,
+    serviceLevel: req.body.serviceLevel || defaultService,
     items: [
       {
         sku: 'MANUAL-ITEM',
@@ -1164,7 +1410,54 @@ app.post('/api/orders/validate-addresses', async (req, res) => {
   });
 });
 
-// Create Postage Labels Batch Endpoint
+// Test EasyPost API Connection Endpoint
+app.post('/api/easypost/test-connection', async (req, res) => {
+  const apiKey = (req.body.apiKey || db.settings.easyPostApiKey || '').trim();
+  if (!apiKey || apiKey.length < 5) {
+    return res.status(400).json({
+      success: false,
+      message: 'Please enter an EasyPost API Key to test (starts with EZTK_ or EZAK_).',
+    });
+  }
+
+  try {
+    const authHeader = `Basic ${Buffer.from(apiKey + ':').toString('base64')}`;
+    const testRes = await fetch('https://api.easypost.com/v2/addresses', {
+      method: 'GET',
+      headers: {
+        'Authorization': authHeader,
+      },
+    });
+
+    if (testRes.status === 401 || testRes.status === 403) {
+      return res.status(401).json({
+        success: false,
+        message: 'EasyPost Authentication Failed: Invalid API key provided.',
+      });
+    }
+
+    if (!testRes.ok) {
+      const errData = await testRes.json().catch(() => ({}));
+      const msg = errData.error?.message || `HTTP ${testRes.status} ${testRes.statusText}`;
+      return res.status(400).json({
+        success: false,
+        message: `EasyPost API returned error: ${msg}`,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'EasyPost API Key is VALID! Connected successfully to EasyPost v2 REST API.',
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      message: `Failed to connect to EasyPost API servers: ${err?.message || String(err)}`,
+    });
+  }
+});
+
+// Create Postage Labels Batch Endpoint (using EasyPost API)
 app.post('/api/orders/create-labels-batch', async (req, res) => {
   const { orderIds } = req.body;
   if (!orderIds || !Array.isArray(orderIds) || orderIds.length === 0) {
@@ -1176,86 +1469,59 @@ app.post('/api/orders/create-labels-batch', async (req, res) => {
 
   if (invalidAddressOrders.length > 0) {
     return res.status(400).json({
-      error: `Cannot generate labels: ${invalidAddressOrders.length} order(s) have unverified addresses. Please review and validate addresses first.`,
+      error: `Cannot purchase labels: ${invalidAddressOrders.length} order(s) have unverified addresses. Please review and validate addresses first.`,
       problemOrders: invalidAddressOrders.map((o) => o.orderNumber),
     });
   }
 
-  const carriers: ('USPS' | 'FedEx' | 'UPS')[] = ['USPS', 'USPS', 'UPS', 'FedEx'];
   let batchTotalCost = 0;
   const processed: ShippingOrder[] = [];
+  const errors: string[] = [];
 
   const pool = await getMssqlPool();
 
-  for (let idx = 0; idx < selectedOrders.length; idx++) {
-    const order = selectedOrders[idx];
+  for (const order of selectedOrders) {
+    if (order.weightOz <= 0) {
+      errors.push(`Order #${order.orderNumber}: Weight is 0 oz.`);
+      continue;
+    }
+
     const box = db.packages.find((p) => p.id === order.boxId) || db.packages[0];
 
-    // Check if order destination is outside the United States
-    const rawCountry = (order.country || 'US').trim().toUpperCase();
-    const isInternational = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
+    try {
+      const result = await purchaseLabelWithEasyPost(order, db.settings);
 
-    let carrier: CarrierType = 'USPS';
-    let serviceLevel = 'Priority Mail 2-Day';
-    let cost = 0;
+      order.status = 'shipped';
+      order.trackingNumber = result.trackingNumber;
+      order.carrier = result.carrier;
+      order.serviceLevel = result.serviceLevel;
+      order.shippingCost = result.cost;
+      order.shippingDate = new Date().toISOString();
+      order.boxName = box ? box.name : order.boxName;
+      order.easyPostLabelUrl = result.easyPostLabelUrl;
+      order.labelPngBase64 = result.labelPngBuffer ? result.labelPngBuffer.toString('base64') : undefined;
+      order.labelPngData = result.labelPngBuffer ? `data:image/png;base64,${result.labelPngBuffer.toString('base64')}` : undefined;
+      order.labelUrl = `/api/orders/${order.id}/label.pdf`;
+      order.labelBinary = result.labelBinary;
+      order.hasLabelData = true;
+      order.LabelData = true;
+      order.easypostShipmentId = result.easypostShipmentId;
 
-    if (!isInternational) {
-      // Rule: For orders inside the US, ALWAYS send USPS
-      carrier = 'USPS';
-      serviceLevel = order.serviceLevel || 'Priority Mail 2-Day';
-      const weightLbs = Math.max(0.5, (order.weightOz || 16) / 16);
-      cost = order.shippingCost || Number((7.85 + weightLbs * 1.15).toFixed(2));
-    } else {
-      // Rule: International orders ship with UPS or USPS depending on shipping rate
-      if (order.carrier && order.serviceLevel) {
-        carrier = order.carrier;
-        serviceLevel = order.serviceLevel;
-        cost = order.shippingCost || (carrier === 'UPS' ? 32.50 : 38.50);
-      } else {
-        // Compare UPS vs USPS live rates and auto-select best/cheapest rate option
-        const weightLbs = Math.max(0.5, (order.weightOz || 16) / 16);
-        const uspsPriorityRate = Number((38.50 + weightLbs * 3.40).toFixed(2));
-        const uspsFirstClassRate = order.weightOz <= 64 ? Number((21.50 + weightLbs * 2.10).toFixed(2)) : 999;
-        const upsExpeditedRate = Number((32.50 + weightLbs * 2.85).toFixed(2));
-
-        if (uspsFirstClassRate < upsExpeditedRate && uspsFirstClassRate < uspsPriorityRate) {
-          carrier = 'USPS';
-          serviceLevel = 'First-Class Package International';
-          cost = uspsFirstClassRate;
-        } else if (upsExpeditedRate <= uspsPriorityRate) {
-          carrier = 'UPS';
-          serviceLevel = 'UPS Worldwide Expedited';
-          cost = upsExpeditedRate;
-        } else {
-          carrier = 'USPS';
-          serviceLevel = 'Priority Mail International';
-          cost = uspsPriorityRate;
-        }
+      if (pool) {
+        await saveOrderToMssqlPool(pool, order);
       }
+
+      batchTotalCost += result.cost;
+      processed.push(order);
+    } catch (err: any) {
+      errors.push(`Order #${order.orderNumber}: ${err.message || 'Failed to purchase label from EasyPost.'}`);
     }
+  }
 
-    // Generate EasyPost tracking number format
-    const randomSeq = Math.floor(100000000000 + Math.random() * 900000000000);
-    const tracking = carrier === 'UPS'
-      ? `1Z999999${randomSeq.toString().substring(0, 10)}`
-      : isInternational
-      ? `CP${randomSeq.toString().substring(0, 9)}US`
-      : `9400111202482${randomSeq}`;
-
-    order.status = 'shipped';
-    order.trackingNumber = tracking;
-    order.carrier = carrier;
-    order.serviceLevel = serviceLevel;
-    order.shippingCost = Number(cost.toFixed(2));
-    order.shippingDate = new Date().toISOString();
-    order.boxName = box.name;
-
-    if (pool) {
-      await saveOrderToMssqlPool(pool, order);
-    }
-
-    batchTotalCost += cost;
-    processed.push(order);
+  if (processed.length === 0) {
+    return res.status(400).json({
+      error: `EasyPost Label Purchase Failed:\n${errors.join('\n')}`,
+    });
   }
 
   res.json({
@@ -1264,7 +1530,758 @@ app.post('/api/orders/create-labels-batch', async (req, res) => {
     processedOrders: processed,
     totalCost: Number(batchTotalCost.toFixed(2)),
     createdAt: new Date().toISOString(),
+    warnings: errors.length > 0 ? errors : undefined,
   });
+});
+
+// Helper: Purchase Label using EasyPost API
+async function purchaseLabelWithEasyPost(
+  order: ShippingOrder,
+  settings: AppSetting,
+  carrierOverride?: CarrierType,
+  serviceOverride?: string
+): Promise<{
+  trackingNumber: string;
+  carrier: CarrierType;
+  serviceLevel: string;
+  cost: number;
+  labelBinary: Buffer;
+  easyPostLabelUrl: string;
+  easypostShipmentId: string;
+  labelPngBuffer?: Buffer;
+}> {
+  let apiKey = (settings.easyPostApiKey || '').trim();
+  if (!apiKey || apiKey.length < 5 || apiKey === 'EZTK_TEST_99824_KEY') {
+    apiKey = (process.env.EASYPOST_API_KEY || '').trim();
+  }
+
+  if (!apiKey || apiKey.length < 5) {
+    throw new Error('EasyPost API Key is missing or invalid. Please open Settings -> EasyPost API Integration and enter your valid EasyPost Secret API Key (starts with EZTK_ for Test mode or EZAK_ for Production mode).');
+  }
+
+  const box = db.packages.find((p) => p.id === order.boxId) || db.packages[0];
+  const rawCountry = (order.country || 'US').trim().toUpperCase();
+  const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
+
+  const defaultCarrier = !isIntl ? (settings.defaultDomesticCarrier || 'USPS') : 'USPS';
+  const defaultService = !isIntl ? (settings.defaultDomesticService || 'Priority') : 'Priority Mail International';
+
+  const targetCarrier = carrierOverride || order.carrier || defaultCarrier;
+  const targetService = serviceOverride || order.serviceLevel || defaultService;
+
+  const authHeader = `Basic ${Buffer.from(apiKey + ':').toString('base64')}`;
+
+  // Step 1: Create Shipment in EasyPost
+  const shipmentPayload: any = {
+    shipment: {
+      to_address: {
+        name: order.recipientName,
+        company: order.company || undefined,
+        street1: order.street1,
+        street2: order.street2 || undefined,
+        city: order.city,
+        state: order.state,
+        zip: order.zip,
+        country: order.country || 'US',
+        phone: order.phone || undefined,
+        email: order.email || undefined,
+      },
+      from_address: {
+        name: settings.returnAddress?.name || settings.companyName || 'Shipping Dept',
+        company: settings.returnAddress?.company || undefined,
+        street1: settings.returnAddress?.street1 || '123 Logistics Way',
+        street2: settings.returnAddress?.street2 || undefined,
+        city: settings.returnAddress?.city || 'Austin',
+        state: settings.returnAddress?.state || 'TX',
+        zip: settings.returnAddress?.zip || '78701',
+        country: settings.returnAddress?.country || 'US',
+        phone: settings.returnAddress?.phone || undefined,
+      },
+      parcel: {
+        length: box?.length || 10,
+        width: box?.width || 8,
+        height: box?.height || 4,
+        weight: Math.max(0.1, order.weightOz || 16),
+      },
+    },
+  };
+
+  if (isIntl) {
+    shipmentPayload.shipment.customs_info = {
+      customs_certify: true,
+      customs_signer: settings.returnAddress?.name || 'Shipping Manager',
+      contents_type: 'merchandise',
+      restriction_type: 'none',
+      eel_pfc: 'NOEEI 30.37(a)',
+      customs_items: (order.items && order.items.length > 0
+        ? order.items
+        : [{ sku: 'ITEM-1', name: 'Commercial Merchandise', quantity: 1, price: order.declaredValue || 20.0, weightOz: order.weightOz || 16 }]
+      ).map((item) => ({
+        description: (item.name || 'Commercial Merchandise').substring(0, 50),
+        quantity: item.quantity || 1,
+        value: item.price || 10.0,
+        weight: item.weightOz || 8,
+        origin_country: 'US',
+      })),
+    };
+  }
+
+  console.log(`[EasyPost API] Posting shipment creation to EasyPost v2 for Order #${order.orderNumber}...`);
+  const createRes = await fetch('https://api.easypost.com/v2/shipments', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': authHeader,
+    },
+    body: JSON.stringify(shipmentPayload),
+  });
+
+  const createData = await createRes.json();
+  if (!createRes.ok || !createData.id) {
+    const errorMsg = createData.error?.message || createData.error?.errors?.[0]?.message || (typeof createData.error === 'string' ? createData.error : `HTTP ${createRes.status}`);
+    throw new Error(`EasyPost Shipment Creation Failed: ${errorMsg}`);
+  }
+
+  console.log(`[EasyPost API] Shipment created ID: ${createData.id}. Returned ${createData.rates?.length || 0} rate option(s).`);
+
+  // Step 2: Select Rate
+  const rates = createData.rates || [];
+  if (!Array.isArray(rates) || rates.length === 0) {
+    throw new Error(`No shipping rates returned by EasyPost for Order #${order.orderNumber}. Please check address and package dimensions.`);
+  }
+
+  let selectedRate = rates.find((r: any) => {
+    if (r.carrier?.toUpperCase() !== targetCarrier.toUpperCase()) return false;
+    const rService = (r.service || '').toLowerCase();
+    const tService = targetService.toLowerCase();
+    if (rService === tService) return true;
+    if (tService === 'priority') return rService.includes('priority') && !rService.includes('express');
+    if (tService === 'ground advantage') return rService.includes('groundadvantage') || rService.includes('ground_advantage');
+    if (tService === 'express') return rService.includes('express');
+    if (tService === 'ground') return rService.includes('ground');
+    if (tService === '2day') return rService.includes('2nd') || rService.includes('2day');
+    if (tService === 'nextday' || tService === 'priority overnight') return rService.includes('nextday') || rService.includes('overnight');
+    return rService.includes(tService);
+  });
+
+  if (!selectedRate) {
+    selectedRate = rates.find((r: any) => r.carrier?.toUpperCase() === targetCarrier.toUpperCase());
+  }
+  if (!selectedRate) {
+    selectedRate = rates[0];
+  }
+
+  console.log(`[EasyPost API] Buying rate ID ${selectedRate.id} (${selectedRate.carrier} - ${selectedRate.service} @ $${selectedRate.rate})...`);
+
+  // Step 3: Buy Shipment
+  const buyRes = await fetch(`https://api.easypost.com/v2/shipments/${createData.id}/buy`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': authHeader,
+    },
+    body: JSON.stringify({
+      rate: {
+        id: selectedRate.id,
+      },
+    }),
+  });
+
+  const buyData = await buyRes.json();
+  if (!buyRes.ok || !buyData) {
+    const buyErr = buyData.error?.message || buyData.error?.errors?.[0]?.message || (typeof buyData.error === 'string' ? buyData.error : `HTTP ${buyRes.status}`);
+    throw new Error(`EasyPost Label Purchase Failed: ${buyErr}`);
+  }
+
+  // Extract label URL and tracking number
+  const trackingNumber = buyData.tracking_code || buyData.selected_rate?.tracking_code || selectedRate.tracking_code;
+  const rawLabelUrl =
+    buyData.postage_label?.label_url ||
+    buyData.postage_label?.label_pdf_url ||
+    buyData.postage_label?.label_png_url ||
+    buyData.Label_URL ||
+    buyData.label_url;
+
+  if (!trackingNumber) {
+    throw new Error(`EasyPost label purchase succeeded but did not return a valid tracking number for Order #${order.orderNumber}.`);
+  }
+
+  if (!rawLabelUrl || typeof rawLabelUrl !== 'string') {
+    throw new Error(`EasyPost label purchase succeeded but did not return a valid Label_URL for Order #${order.orderNumber}.`);
+  }
+
+  // Step 4: Download binary label file from Label_URL and format as 4x6 PDF
+  console.log(`[EasyPost API] Label purchased! Downloading binary label file from Label_URL: ${rawLabelUrl}`);
+  let labelBinary: Buffer | undefined;
+  let labelPngBuffer: Buffer | undefined;
+  try {
+    const dlRes = await fetch(rawLabelUrl);
+    if (dlRes.ok) {
+      const arrayBuffer = await dlRes.arrayBuffer();
+      const rawBuffer = Buffer.from(arrayBuffer);
+      const isPdf = rawBuffer.toString('utf8', 0, 4) === '%PDF';
+      if (!isPdf) {
+        labelPngBuffer = rawBuffer;
+        // Convert PNG label image into a 4x6 PDF page using jsPDF
+        const doc = new jsPDF({ unit: 'in', format: [4, 6], orientation: 'portrait' });
+        const base64Img = `data:image/png;base64,${rawBuffer.toString('base64')}`;
+        doc.addImage(base64Img, 'PNG', 0, 0, 4, 6);
+        labelBinary = Buffer.from(doc.output('arraybuffer'));
+      } else {
+        labelBinary = rawBuffer;
+      }
+    }
+  } catch (dlErr) {
+    console.warn('[EasyPost API] Notice downloading label image binary directly:', dlErr);
+  }
+
+  if (!labelBinary) {
+    labelBinary = generateSingleOrderLabelPdfBuffer(order, settings);
+  }
+
+  const purchasedCarrier: CarrierType = (selectedRate.carrier?.toUpperCase() === 'UPS' ? 'UPS' : 'USPS') as CarrierType;
+  const purchasedService = selectedRate.service || targetService;
+  const purchasedCost = parseFloat(selectedRate.rate) || 0;
+
+  return {
+    trackingNumber,
+    carrier: purchasedCarrier,
+    serviceLevel: purchasedService,
+    cost: purchasedCost,
+    labelBinary,
+    easyPostLabelUrl: rawLabelUrl,
+    easypostShipmentId: buyData.id || createData.id,
+    labelPngBuffer,
+  };
+}
+
+// Single Order EasyPost Label Purchase Endpoint
+app.post('/api/orders/:id/purchase-label', async (req, res) => {
+  const { id } = req.params;
+  const { carrier, serviceLevel } = req.body;
+
+  const order = db.orders.find((o) => o.id === id || o.orderNumber === id);
+  if (!order) {
+    return res.status(404).json({ error: 'Order not found.' });
+  }
+
+  if (order.weightOz <= 0) {
+    return res.status(400).json({
+      error: 'Cannot purchase label: Total weight is set to 0 oz. Please update total weight first.',
+    });
+  }
+
+  if (order.status === 'address_error' || !order.addressValidated) {
+    return res.status(400).json({
+      error: 'Cannot purchase label: Recipient address is unverified or has errors. Please validate address first.',
+    });
+  }
+
+  const box = db.packages.find((p) => p.id === order.boxId) || db.packages[0];
+
+  try {
+    const result = await purchaseLabelWithEasyPost(order, db.settings, carrier, serviceLevel);
+
+    order.status = 'shipped';
+    order.trackingNumber = result.trackingNumber;
+    order.carrier = result.carrier;
+    order.serviceLevel = result.serviceLevel;
+    order.shippingCost = result.cost;
+    order.shippingDate = new Date().toISOString();
+    order.boxName = box ? box.name : order.boxName;
+    order.easyPostLabelUrl = result.easyPostLabelUrl;
+    order.labelPngBase64 = result.labelPngBuffer ? result.labelPngBuffer.toString('base64') : undefined;
+    order.labelPngData = result.labelPngBuffer ? `data:image/png;base64,${result.labelPngBuffer.toString('base64')}` : undefined;
+    order.labelUrl = `/api/orders/${order.id}/label.pdf`;
+    order.labelBinary = result.labelBinary;
+    order.hasLabelData = true;
+    order.LabelData = true;
+    order.easypostShipmentId = result.easypostShipmentId;
+
+    // Store & sync updated order to MS SQL Server database table [dbo].[Shipping]
+    const pool = await getMssqlPool();
+    if (pool) {
+      await saveOrderToMssqlPool(pool, order);
+    }
+
+    res.json({
+      success: true,
+      message: `Successfully purchased EasyPost shipping label for Order #${order.orderNumber}! Saved binary label to database.`,
+      order,
+      labelUrl: order.labelUrl,
+      trackingNumber: order.trackingNumber,
+    });
+  } catch (err: any) {
+    console.error('[EasyPost Purchase Error]', err);
+    res.status(400).json({
+      error: err.message || 'Failed to purchase label from EasyPost.',
+    });
+  }
+});
+
+// Bulk Batch Purchase Labels Endpoint
+app.post('/api/orders/batch-purchase-labels', async (req, res) => {
+  const { orderIds } = req.body;
+  if (!orderIds || !Array.isArray(orderIds) || orderIds.length === 0) {
+    return res.status(400).json({ error: 'Please select at least one order to purchase labels.' });
+  }
+
+  const processedOrders: ShippingOrder[] = [];
+  let totalCost = 0;
+  const errors: string[] = [];
+
+  for (const orderId of orderIds) {
+    const order = db.orders.find((o) => o.id === orderId || o.orderNumber === orderId);
+    if (!order) continue;
+
+    if (order.weightOz <= 0) {
+      errors.push(`Order #${order.orderNumber}: Weight is 0 oz.`);
+      continue;
+    }
+
+    const box = db.packages.find((p) => p.id === order.boxId) || db.packages[0];
+
+    try {
+      const result = await purchaseLabelWithEasyPost(order, db.settings);
+
+      order.status = 'shipped';
+      order.trackingNumber = result.trackingNumber;
+      order.carrier = result.carrier;
+      order.serviceLevel = result.serviceLevel;
+      order.shippingCost = result.cost;
+      order.shippingDate = new Date().toISOString();
+      order.boxName = box ? box.name : order.boxName;
+      order.easyPostLabelUrl = result.easyPostLabelUrl;
+      order.labelPngBase64 = result.labelPngBuffer ? result.labelPngBuffer.toString('base64') : undefined;
+      order.labelPngData = result.labelPngBuffer ? `data:image/png;base64,${result.labelPngBuffer.toString('base64')}` : undefined;
+      order.labelUrl = `/api/orders/${order.id}/label.pdf`;
+      order.labelBinary = result.labelBinary;
+      order.easypostShipmentId = result.easypostShipmentId;
+
+      const pool = await getMssqlPool();
+      if (pool) {
+        await saveOrderToMssqlPool(pool, order);
+      }
+
+      totalCost += result.cost;
+      processedOrders.push(order);
+    } catch (err: any) {
+      errors.push(`Order #${order.orderNumber}: ${err.message || 'Failed to purchase label.'}`);
+    }
+  }
+
+  if (processedOrders.length === 0) {
+    return res.status(400).json({
+      error: `Could not purchase labels from EasyPost:\n${errors.join('\n')}`,
+    });
+  }
+
+  res.json({
+    success: true,
+    message: `Successfully purchased EasyPost labels for ${processedOrders.length} order(s). Saved binary data to database!`,
+    processedOrders,
+    totalCost: Number(totalCost.toFixed(2)),
+    warnings: errors.length > 0 ? errors : undefined,
+  });
+});
+
+// Helper: Generate 4x6 Thermal Label PDF Buffer using jsPDF
+function generateSingleOrderLabelPdfBuffer(order: ShippingOrder, settings: AppSetting): Buffer {
+  const doc = new jsPDF({
+    unit: 'in',
+    format: [4, 6],
+    orientation: 'portrait',
+  });
+
+  const rawCountry = (order.country || 'US').trim().toUpperCase();
+  const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
+  const displayCarrier = isIntl ? (order.carrier || 'USPS INTERNATIONAL') : (order.carrier || 'USPS');
+  const displayService = order.serviceLevel || (isIntl ? 'PRIORITY MAIL INTERNATIONAL' : 'PRIORITY MAIL 2-DAY');
+
+  // Outer Border
+  doc.setLineWidth(0.01);
+  doc.rect(0.1, 0.1, 3.8, 5.8);
+
+  // Header Box
+  doc.setFontSize(13);
+  doc.setTextColor(0, 0, 0);
+  doc.setFont('helvetica', 'bold');
+  doc.text(`${displayCarrier} POSTAGE PAID`, 0.2, 0.4);
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'normal');
+  doc.text(displayService, 0.2, 0.58);
+
+  doc.setLineWidth(0.01);
+  doc.line(0.1, 0.7, 3.9, 0.7);
+
+  // Ship From
+  doc.setFontSize(7);
+  doc.setFont('helvetica', 'bold');
+  doc.text('SHIP FROM:', 0.2, 0.88);
+  doc.setFont('helvetica', 'normal');
+  const retName = settings.returnAddress?.name || settings.companyName || 'Warehouse Operations';
+  const retStreet = settings.returnAddress?.street1 || '123 Logistics Way';
+  const retCityStateZip = `${settings.returnAddress?.city || 'Austin'}, ${settings.returnAddress?.state || 'TX'} ${settings.returnAddress?.zip || '78701'}`;
+  doc.text(retName, 0.2, 1.0);
+  doc.text(retStreet, 0.2, 1.12);
+  doc.text(retCityStateZip, 0.2, 1.24);
+
+  doc.line(0.1, 1.35, 3.9, 1.35);
+
+  // Ship To
+  doc.setFontSize(8);
+  doc.setFont('helvetica', 'bold');
+  doc.text('SHIP TO:', 0.2, 1.55);
+  doc.setFontSize(12);
+  doc.text(order.recipientName, 0.2, 1.78);
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'normal');
+  let currentY = 1.95;
+  if (order.company) {
+    doc.text(order.company, 0.2, currentY);
+    currentY += 0.18;
+  }
+  doc.text(order.street1, 0.2, currentY);
+  currentY += 0.18;
+  if (order.street2) {
+    doc.text(order.street2, 0.2, currentY);
+    currentY += 0.18;
+  }
+  doc.text(`${order.city}, ${order.state} ${order.zip}`, 0.2, currentY);
+  currentY += 0.18;
+
+  if (isIntl) {
+    doc.setFont('helvetica', 'bold');
+    doc.text(`DESTINATION: ${(order.country || 'USA').toUpperCase()}`, 0.2, currentY);
+    currentY += 0.22;
+
+    // Customs Block
+    doc.rect(0.2, currentY, 3.6, 0.55);
+    doc.setFontSize(7);
+    doc.text('USPS CUSTOMS DECLARATION (CN22 / CP72)', 0.25, currentY + 0.15);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Decl. Value: $${order.declaredValue || 100.0} USD | Commercial Merchandise`, 0.25, currentY + 0.32);
+    doc.text(`Weight: ${order.weightOz || 16} oz | EasyPost Verified`, 0.25, currentY + 0.47);
+    currentY += 0.7;
+  } else {
+    currentY += 0.1;
+  }
+
+  // Barcode Section
+  const barcodeY = Math.max(currentY, 3.5);
+  doc.line(0.1, barcodeY, 3.9, barcodeY);
+
+  doc.setFillColor(0, 0, 0);
+  doc.rect(0.2, barcodeY + 0.15, 3.6, 0.95, 'F');
+
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(0, 0, 0);
+  const trackNum = order.trackingNumber || 'NOT PURCHASED YET';
+  doc.text(`TRACKING #: ${trackNum}`, 0.2, barcodeY + 1.25);
+  doc.setFontSize(8);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`Order #: ${order.orderNumber}  |  Weight: ${order.weightOz || 16} oz  |  Box: ${order.boxName || 'Standard'}`, 0.2, barcodeY + 1.42);
+
+  return Buffer.from(doc.output('arraybuffer'));
+}
+
+// Download/View PDF Label for Order Stored in Database
+app.get('/api/orders/:id/label.pdf', (req, res) => {
+  const { id } = req.params;
+  const order = db.orders.find((o) => o.id === id || o.orderNumber === id);
+  if (!order) {
+    return res.status(404).send('Order not found');
+  }
+
+  if (!order.labelBinary && !order.trackingNumber) {
+    return res.status(400).send('Postage label has not been purchased from EasyPost for this order yet. Please purchase the label first.');
+  }
+
+  try {
+    let pdfBuffer = order.labelBinary;
+    if (!pdfBuffer) {
+      pdfBuffer = generateSingleOrderLabelPdfBuffer(order, db.settings);
+      order.labelBinary = pdfBuffer;
+    }
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="EasyPost_Label_${order.orderNumber}.pdf"`);
+    res.send(pdfBuffer);
+  } catch (err: any) {
+    res.status(500).send('Error generating PDF label');
+  }
+});
+
+// Helper: Generate Packing Slip PDF Buffer
+function generatePackingSlipPdfBuffer(orders: ShippingOrder[], settings: AppSetting): Buffer {
+  const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+  orders.forEach((order, index) => {
+    if (index > 0) doc.addPage('letter', 'portrait');
+
+    doc.setFillColor(30, 41, 59);
+    doc.rect(36, 36, 540, 50, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(18);
+    doc.text(settings.companyName || 'WAREHOUSE PACKING SLIP', 50, 68);
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Order #: ${order.orderNumber}  |  Date: ${new Date(order.orderDate).toLocaleDateString()}`, 350, 68);
+
+    doc.setTextColor(15, 23, 42);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.text('SHIP TO:', 50, 115);
+    doc.text('RETURN ADDRESS:', 330, 115);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.text(order.recipientName, 50, 132);
+    let yTo = 146;
+    if (order.company) { doc.text(order.company, 50, yTo); yTo += 14; }
+    doc.text(order.street1, 50, yTo); yTo += 14;
+    if (order.street2) { doc.text(order.street2, 50, yTo); yTo += 14; }
+    doc.text(`${order.city}, ${order.state} ${order.zip} ${order.country || 'US'}`, 50, yTo);
+
+    const ret = settings.returnAddress;
+    doc.text(ret?.name || settings.companyName || 'Fulfillment Center', 330, 132);
+    let yRet = 146;
+    if (ret?.company) { doc.text(ret.company, 330, yRet); yRet += 14; }
+    doc.text(ret?.street1 || '123 Logistics Way', 330, yRet); yRet += 14;
+    doc.text(`${ret?.city || 'Austin'}, ${ret?.state || 'TX'} ${ret?.zip || '78701'}`, 330, yRet);
+
+    const tableY = Math.max(yTo, yRet) + 30;
+    doc.setFillColor(241, 245, 249);
+    doc.rect(36, tableY, 540, 24, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.text('SKU', 50, tableY + 16);
+    doc.text('ITEM DESCRIPTION', 160, tableY + 16);
+    doc.text('QTY', 480, tableY + 16);
+
+    let itemY = tableY + 40;
+    doc.setFont('helvetica', 'normal');
+    (order.items || []).forEach((item) => {
+      doc.text(item.sku || 'N/A', 50, itemY);
+      doc.text(item.name || 'Order Item', 160, itemY);
+      doc.text(String(item.quantity || 1), 485, itemY);
+      itemY += 20;
+    });
+
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    doc.text(settings.packingSlipContent || 'Thank you for your order! Please inspect items upon arrival.', 50, itemY + 40);
+  });
+
+  return Buffer.from(doc.output('arraybuffer'));
+}
+
+// Single Order Packing Slip PDF Endpoint
+app.get('/api/orders/:id/packing-slip.pdf', (req, res) => {
+  const { id } = req.params;
+  const order = db.orders.find((o) => o.id === id || o.orderNumber === id);
+  if (!order) {
+    return res.status(404).send('Order not found');
+  }
+
+  try {
+    const pdfBuffer = generatePackingSlipPdfBuffer([order], db.settings);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="PackingSlip_${order.orderNumber}.pdf"`);
+    res.send(pdfBuffer);
+  } catch (err: any) {
+    res.status(500).send('Error generating packing slip PDF');
+  }
+});
+
+// Batch Packing Slips PDF Endpoint
+app.get('/api/orders/batch-packing-slips.pdf', (req, res) => {
+  const orderIdsParam = req.query.orderIds as string;
+  let targetOrders: ShippingOrder[] = db.orders;
+
+  if (orderIdsParam) {
+    const ids = orderIdsParam.split(',').map((s) => s.trim());
+    targetOrders = db.orders.filter((o) => ids.includes(o.id) || ids.includes(o.orderNumber));
+  }
+
+  if (targetOrders.length === 0) {
+    return res.status(400).send('No orders selected for batch packing slips.');
+  }
+
+  try {
+    const pdfBuffer = generatePackingSlipPdfBuffer(targetOrders, db.settings);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Batch_Packing_Slips_${Date.now()}.pdf"`);
+    res.send(pdfBuffer);
+  } catch (err: any) {
+    res.status(500).send('Error generating batch packing slips PDF');
+  }
+});
+
+// Download Combined Batch PDF Labels
+app.get('/api/orders/batch-labels.pdf', async (req, res) => {
+  const orderIdsParam = req.query.orderIds as string;
+  let targetOrders: ShippingOrder[] = db.orders.filter((o) => o.status === 'shipped' || o.trackingNumber);
+
+  if (orderIdsParam) {
+    const ids = orderIdsParam.split(',').map((s) => s.trim());
+    targetOrders = db.orders.filter((o) => ids.includes(o.id) || ids.includes(o.orderNumber));
+  }
+
+  if (targetOrders.length === 0) {
+    return res.status(400).send('No shipped orders found for batch PDF label export.');
+  }
+
+  try {
+    const doc = new jsPDF({ unit: 'in', format: [4, 6], orientation: 'portrait' });
+    
+    for (let index = 0; index < targetOrders.length; index++) {
+      const order = targetOrders[index];
+      if (index > 0) {
+        doc.addPage([4, 6], 'portrait');
+      }
+
+      // Check if order has real label image (PNG base64 or easyPostLabelUrl or labelBinary)
+      let renderedRealLabel = false;
+
+      const pngBase64 = order.labelPngBase64 || (order.labelPngData ? order.labelPngData.replace(/^data:image\/png;base64,/, '') : undefined);
+      if (pngBase64) {
+        try {
+          doc.addImage(`data:image/png;base64,${pngBase64}`, 'PNG', 0, 0, 4, 6);
+          renderedRealLabel = true;
+        } catch (e) {
+          console.warn(`[Batch Labels PDF] Failed embedding labelPngBase64 for Order #${order.orderNumber}:`, e);
+        }
+      }
+
+      if (!renderedRealLabel && order.labelBinary && Buffer.isBuffer(order.labelBinary)) {
+        const isPng = order.labelBinary.toString('utf8', 1, 4) === 'PNG' || order.labelBinary.slice(0, 8).includes(Buffer.from('PNG', 'ascii'));
+        if (isPng) {
+          try {
+            const base64Img = `data:image/png;base64,${order.labelBinary.toString('base64')}`;
+            doc.addImage(base64Img, 'PNG', 0, 0, 4, 6);
+            renderedRealLabel = true;
+          } catch (e) {
+            console.warn(`[Batch Labels PDF] Failed embedding labelBinary for Order #${order.orderNumber}:`, e);
+          }
+        }
+      }
+
+      const targetUrl = order.easyPostLabelUrl || (order.labelUrl && order.labelUrl.startsWith('http') ? order.labelUrl : null);
+      if (!renderedRealLabel && targetUrl) {
+        try {
+          const imgRes = await fetch(targetUrl);
+          if (imgRes.ok) {
+            const arrayBuffer = await imgRes.arrayBuffer();
+            const buf = Buffer.from(arrayBuffer);
+            const isPdf = buf.toString('utf8', 0, 4) === '%PDF';
+            if (!isPdf) {
+              const base64Img = `data:image/png;base64,${buf.toString('base64')}`;
+              doc.addImage(base64Img, 'PNG', 0, 0, 4, 6);
+              renderedRealLabel = true;
+            }
+          }
+        } catch (e) {
+          console.warn(`[Batch Labels PDF] Could not fetch external label URL for Order #${order.orderNumber}:`, e);
+        }
+      }
+
+      // Synthetic label fallback if no real image
+      if (!renderedRealLabel) {
+        const rawCountry = (order.country || 'US').trim().toUpperCase();
+        const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
+        const displayCarrier = isIntl ? (order.carrier || 'USPS INTERNATIONAL') : (order.carrier || 'USPS');
+        const displayService = order.serviceLevel || (isIntl ? 'PRIORITY MAIL INTERNATIONAL' : 'PRIORITY MAIL 2-DAY');
+
+        doc.setLineWidth(0.01);
+        doc.rect(0.1, 0.1, 3.8, 5.8);
+
+        doc.setFontSize(13);
+        doc.setTextColor(0, 0, 0);
+        doc.setFont('helvetica', 'bold');
+        doc.text(`${displayCarrier} POSTAGE PAID`, 0.2, 0.4);
+        doc.setFontSize(10);
+        doc.setFont('helvetica', 'normal');
+        doc.text(displayService, 0.2, 0.58);
+
+        doc.setLineWidth(0.01);
+        doc.line(0.1, 0.7, 3.9, 0.7);
+
+        doc.setFontSize(7);
+        doc.setFont('helvetica', 'bold');
+        doc.text('SHIP FROM:', 0.2, 0.88);
+        doc.setFont('helvetica', 'normal');
+        const retName = db.settings.returnAddress?.name || 'Warehouse Operations';
+        const retStreet = db.settings.returnAddress?.street1 || '123 Logistics Way';
+        const retCityStateZip = `${db.settings.returnAddress?.city || 'Austin'}, ${db.settings.returnAddress?.state || 'TX'} ${db.settings.returnAddress?.zip || '78701'}`;
+        doc.text(retName, 0.2, 1.0);
+        doc.text(retStreet, 0.2, 1.12);
+        doc.text(retCityStateZip, 0.2, 1.24);
+
+        doc.line(0.1, 1.35, 3.9, 1.35);
+
+        doc.setFontSize(8);
+        doc.setFont('helvetica', 'bold');
+        doc.text('SHIP TO:', 0.2, 1.55);
+        doc.setFontSize(12);
+        doc.text(order.recipientName, 0.2, 1.78);
+        doc.setFontSize(10);
+        doc.setFont('helvetica', 'normal');
+        let currentY = 1.95;
+        if (order.company) {
+          doc.text(order.company, 0.2, currentY);
+          currentY += 0.18;
+        }
+        doc.text(order.street1, 0.2, currentY);
+        currentY += 0.18;
+        if (order.street2) {
+          doc.text(order.street2, 0.2, currentY);
+          currentY += 0.18;
+        }
+        doc.text(`${order.city}, ${order.state} ${order.zip}`, 0.2, currentY);
+        currentY += 0.18;
+
+        if (isIntl) {
+          doc.setFont('helvetica', 'bold');
+          doc.text(`DESTINATION: ${(order.country || 'USA').toUpperCase()}`, 0.2, currentY);
+          currentY += 0.22;
+
+          doc.rect(0.2, currentY, 3.6, 0.55);
+          doc.setFontSize(7);
+          doc.text('USPS CUSTOMS DECLARATION (CN22 / CP72)', 0.25, currentY + 0.15);
+          doc.setFont('helvetica', 'normal');
+          doc.text(`Decl. Value: $${order.declaredValue || 100.0} USD | Commercial Goods`, 0.25, currentY + 0.32);
+          doc.text(`Weight: ${order.weightOz || 16} oz | EasyPost Verified`, 0.25, currentY + 0.47);
+          currentY += 0.7;
+        } else {
+          currentY += 0.1;
+        }
+
+        const barcodeY = Math.max(currentY, 3.5);
+        doc.line(0.1, barcodeY, 3.9, barcodeY);
+
+        doc.setFillColor(0, 0, 0);
+        doc.rect(0.2, barcodeY + 0.15, 3.6, 0.95, 'F');
+
+        doc.setFontSize(9);
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(0, 0, 0);
+        const trackNum = order.trackingNumber || (isIntl ? 'CP123456789US' : '9400111202482390123');
+        doc.text(`TRACKING #: ${trackNum}`, 0.2, barcodeY + 1.25);
+        doc.setFontSize(8);
+        doc.setFont('helvetica', 'normal');
+        doc.text(`Order #: ${order.orderNumber}  |  Weight: ${order.weightOz || 16} oz  |  Box: ${order.boxName || 'Standard'}`, 0.2, barcodeY + 1.42);
+      }
+    }
+
+    const pdfBuffer = Buffer.from(doc.output('arraybuffer'));
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="EasyPost_Batch_Labels_${Date.now()}.pdf"`);
+    res.send(pdfBuffer);
+  } catch (err: any) {
+    res.status(500).send('Error generating batch PDF labels');
+  }
 });
 
 // Re-Ship Order Handler Endpoint
@@ -1333,21 +2350,38 @@ app.post('/api/scan-forms/create', async (req, res) => {
     const { orderIds, date } = req.body;
     let targetOrders: ShippingOrder[] = [];
 
-    if (orderIds && Array.isArray(orderIds) && orderIds.length > 0) {
-      targetOrders = db.orders.filter((o) => orderIds.includes(o.id) && o.status === 'shipped');
-    } else {
-      targetOrders = db.orders.filter((o) => o.status === 'shipped');
-      if (date) {
-        const filteredByDate = targetOrders.filter((o) => o.shippingDate && o.shippingDate.startsWith(date));
-        if (filteredByDate.length > 0) {
-          targetOrders = filteredByDate;
-        }
+    const targetDate = date || new Date().toISOString().slice(0, 10);
+    const todayLocal = new Date().toLocaleDateString('en-CA');
+
+    const isMatchingDate = (shippingDate?: string) => {
+      if (!shippingDate) {
+        return targetDate === new Date().toISOString().slice(0, 10) || targetDate === todayLocal;
       }
+      if (shippingDate.startsWith(targetDate)) return true;
+      try {
+        const d = new Date(shippingDate);
+        if (!isNaN(d.getTime())) {
+          const localD = d.toLocaleDateString('en-CA');
+          const isoD = d.toISOString().slice(0, 10);
+          if (localD === targetDate || isoD === targetDate) return true;
+        }
+      } catch (e) {}
+      return false;
+    };
+
+    if (orderIds && Array.isArray(orderIds) && orderIds.length > 0) {
+      targetOrders = db.orders.filter(
+        (o) => orderIds.includes(o.id) && o.status === 'shipped' && Boolean(o.easypostShipmentId) && isMatchingDate(o.shippingDate)
+      );
+    } else {
+      targetOrders = db.orders.filter(
+        (o) => o.status === 'shipped' && Boolean(o.easypostShipmentId) && isMatchingDate(o.shippingDate)
+      );
     }
 
     if (targetOrders.length === 0) {
       return res.status(400).json({
-        error: 'No shipped packages found for today to include in the SCAN Form. Please print shipping labels for your orders first!',
+        error: 'No shipped packages with EasyPost shipment IDs found for the selected date to include in the SCAN Form. Please purchase postage labels via EasyPost first!',
       });
     }
 
@@ -1358,52 +2392,77 @@ app.post('/api/scan-forms/create', async (req, res) => {
       serviceBreakdown[service] = (serviceBreakdown[service] || 0) + 1;
     });
 
-    let easypostScanForm: any = null;
-    const apiKey = db.settings.easyPostApiKey;
+    let apiKey = (db.settings.easyPostApiKey || '').trim();
+    if (!apiKey || apiKey.length < 5 || apiKey === 'EZTK_TEST_99824_KEY') {
+      apiKey = (process.env.EASYPOST_API_KEY || '').trim();
+    }
 
-    if (apiKey && apiKey.trim().length > 5) {
-      try {
-        const epResponse = await fetch('https://api.easypost.com/v2/scan_forms', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Basic ${Buffer.from(apiKey + ':').toString('base64')}`,
-          },
-          body: JSON.stringify({
-            scan_form: {
-              tracking_codes: targetOrders.map((o) => o.trackingNumber).filter(Boolean),
-            },
-          }),
-        });
-        if (epResponse.ok) {
-          const epData = await epResponse.json();
-          if (epData.scan_form) {
-            easypostScanForm = epData.scan_form;
-          }
-        }
-      } catch (e) {
-        console.error('[EasyPost SCAN Form API] Fetch notice (using fallback generator):', e);
-      }
+    if (!apiKey || apiKey.length < 5) {
+      return res.status(400).json({
+        error: 'EasyPost API Key is missing or invalid. Please open Settings -> EasyPost API Integration and configure your Secret API Key.',
+      });
+    }
+
+    const shipmentObjects = targetOrders
+      .map((o) => (o.easypostShipmentId ? { id: o.easypostShipmentId } : null))
+      .filter((item): item is { id: string } => Boolean(item));
+
+    if (shipmentObjects.length === 0) {
+      return res.status(400).json({
+        error: `None of the selected ${targetOrders.length} shipped order(s) have an EasyPost Shipment ID. Please purchase postage labels via EasyPost first before generating a SCAN Form.`,
+      });
+    }
+
+    console.log(`[EasyPost SCAN Form API] Submitting ${shipmentObjects.length} shipment(s) to POST /v2/scan_forms...`);
+    const epResponse = await fetch('https://api.easypost.com/v2/scan_forms', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Basic ${Buffer.from(apiKey + ':').toString('base64')}`,
+      },
+      body: JSON.stringify({
+        scan_form: {
+          shipments: shipmentObjects,
+        },
+      }),
+    });
+
+    const epData = await epResponse.json();
+    console.log(`[EasyPost SCAN Form API] Response Status ${epResponse.status}:`, epData);
+
+    const easypostScanForm = epData.scan_form || (epData && (epData.id || epData.object === 'ScanForm') ? epData : null);
+
+    if (!epResponse.ok || !easypostScanForm) {
+      const errorMsg =
+        epData?.error?.message ||
+        epData?.error?.errors?.[0]?.message ||
+        (typeof epData?.error === 'string' ? epData.error : null) ||
+        epData?.message ||
+        `HTTP ${epResponse.status}`;
+      return res.status(400).json({
+        error: `EasyPost SCAN Form API error: ${errorMsg}`,
+      });
     }
 
     const todayStr = date || new Date().toISOString().slice(0, 10);
-    const scanFormId = easypostScanForm?.id || `sf_${Date.now().toString(36)}${Math.random().toString(36).substring(2, 6)}`;
+    const scanFormId = easypostScanForm.id || `sf_${Date.now()}`;
     const formUrl =
-      easypostScanForm?.form_url ||
+      easypostScanForm.form_url ||
       `https://easypost-files.s3.amazonaws.com/files/scan_form/${todayStr.replace(/-/g, '')}/${scanFormId}.pdf`;
 
     const newScanForm: ScanFormType = {
       id: scanFormId,
-      status: 'created',
-      formUrl,
-      createdAt: easypostScanForm?.created_at || new Date().toISOString(),
+      status: easypostScanForm.status || 'created',
+      formUrl: formUrl,
+      createdAt: easypostScanForm.created_at || new Date().toISOString(),
       formDate: todayStr,
       totalPackages: targetOrders.length,
-      trackingNumbers: targetOrders.map((o) => o.trackingNumber || `9400111202482${Math.floor(1000000000 + Math.random() * 9000000000)}`),
+      trackingNumbers:
+        easypostScanForm.tracking_codes || targetOrders.map((o) => o.trackingNumber).filter((t): t is string => Boolean(t)),
       orderNumbers: targetOrders.map((o) => o.orderNumber),
       carrier: 'USPS',
-      batchId: `BATCH-${Date.now()}`,
-      easypostId: easypostScanForm?.id,
+      batchId: easypostScanForm.batch_id || `BATCH-${Date.now()}`,
+      easypostId: easypostScanForm.id || scanFormId,
       serviceBreakdown,
       senderAddress: db.settings.returnAddress,
     };
@@ -1414,7 +2473,7 @@ app.post('/api/scan-forms/create', async (req, res) => {
       success: true,
       scanForm: newScanForm,
       ordersIncludedCount: targetOrders.length,
-      message: `Successfully generated USPS SCAN Form (${newScanForm.id}) for ${targetOrders.length} package(s) via EasyPost API!`,
+      message: `Successfully generated official EasyPost USPS SCAN Form (${newScanForm.id}) for ${targetOrders.length} package(s)!`,
     });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'Failed to generate EasyPost SCAN Form.' });
@@ -1556,12 +2615,14 @@ app.get('/api/scan-forms/:id/pdf', async (req, res) => {
   if (scanForm.formUrl && scanForm.formUrl.startsWith('http')) {
     try {
       const fetchRes = await fetch(scanForm.formUrl);
-      const contentType = fetchRes.headers.get('content-type') || '';
-      if (fetchRes.ok && (contentType.includes('pdf') || contentType.includes('octet-stream'))) {
+      if (fetchRes.ok) {
         const arrayBuffer = await fetchRes.arrayBuffer();
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `inline; filename="USPS_Form_5630_${id}.pdf"`);
-        return res.send(Buffer.from(arrayBuffer));
+        const buffer = Buffer.from(arrayBuffer);
+        if (buffer.length > 50) {
+          res.setHeader('Content-Type', 'application/pdf');
+          res.setHeader('Content-Disposition', `inline; filename="USPS_Form_5630_${id}.pdf"`);
+          return res.send(buffer);
+        }
       }
     } catch (e) {
       console.warn('[SCAN Form PDF Proxy] Remote EasyPost fetch notice (generating PDF buffer):', e);
@@ -1591,12 +2652,14 @@ app.get('/api/scan-forms/:id/download', async (req, res) => {
   if (scanForm.formUrl && scanForm.formUrl.startsWith('http')) {
     try {
       const fetchRes = await fetch(scanForm.formUrl);
-      const contentType = fetchRes.headers.get('content-type') || '';
-      if (fetchRes.ok && (contentType.includes('pdf') || contentType.includes('octet-stream'))) {
+      if (fetchRes.ok) {
         const arrayBuffer = await fetchRes.arrayBuffer();
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `attachment; filename="USPS_Form_5630_${id}.pdf"`);
-        return res.send(Buffer.from(arrayBuffer));
+        const buffer = Buffer.from(arrayBuffer);
+        if (buffer.length > 50) {
+          res.setHeader('Content-Type', 'application/pdf');
+          res.setHeader('Content-Disposition', `attachment; filename="USPS_Form_5630_${id}.pdf"`);
+          return res.send(buffer);
+        }
       }
     } catch (e) {
       console.warn('[SCAN Form PDF Download] Remote EasyPost fetch notice (generating download buffer):', e);
@@ -1697,7 +2760,15 @@ app.delete('/api/packages/:id', async (req, res) => {
 });
 
 // Settings API (including Packing Slip Content custom editor)
-app.get('/api/settings', (req, res) => {
+app.get('/api/settings', async (req, res) => {
+  // Try fetching live settings from MS SQL Configuration table if connected
+  if (db.settings.mssqlServer && db.settings.mssqlDatabase && db.settings.mssqlUser) {
+    const liveSettings = await fetchSettingsFromMssql();
+    if (liveSettings) {
+      db.settings = { ...db.settings, ...liveSettings };
+    }
+  }
+
   // Hide password hash/secret in clear response
   const { appPassword, mssqlPassword, ...safeSettings } = db.settings;
   res.json(safeSettings);
@@ -1706,7 +2777,16 @@ app.get('/api/settings', (req, res) => {
 app.put('/api/settings', async (req, res) => {
   db.settings = { ...db.settings, ...req.body };
 
-  // If MS SQL settings are updated, test connection
+  // 1. Write to local persistent JSON file so configuration survives app restarts
+  saveSettingsToFile(db.settings);
+
+  // 2. Write to MS SQL database [dbo].[Configuration] table
+  const pool = await getMssqlPool();
+  if (pool) {
+    await saveSettingsToMssqlPool(pool, db.settings);
+  }
+
+  // If MS SQL connection parameters are updated, test connection
   if (
     req.body.mssqlServer !== undefined ||
     req.body.mssqlDatabase !== undefined ||

@@ -6,6 +6,8 @@ export interface OrderItem {
   id?: string;
   sku: string;
   name: string;
+  itemType?: string;
+  color?: string;
   quantity: number;
   price: number;
   weightOz?: number;
@@ -40,7 +42,13 @@ export interface ShippingOrder {
   shippingCost?: number;
   shippingDate?: string;
   labelUrl?: string;
+  easyPostLabelUrl?: string;
+  easypostShipmentId?: string;
   labelPngData?: string;
+  labelPngBase64?: string;
+  labelBinary?: any;
+  hasLabelData?: boolean;
+  LabelData?: any;
   isReshipment?: boolean;
   reshippedFromOrderNumber?: string;
   reshipReason?: string;
@@ -88,6 +96,8 @@ export interface AppSetting {
   companyName: string;
   returnAddress: ReturnAddress;
   appPassword?: string;
+  defaultDomesticCarrier?: CarrierType;
+  defaultDomesticService?: string;
 }
 
 export interface BatchLabelResult {

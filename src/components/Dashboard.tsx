@@ -20,6 +20,8 @@ import {
   Database,
   FileText,
   DollarSign,
+  Tag,
+  Download,
 } from 'lucide-react';
 
 export function getCountryFlag(country?: string): { flag: string; label: string } | null {
@@ -63,7 +65,9 @@ interface DashboardProps {
   onValidateAddresses: (orderIds?: string[]) => Promise<void>;
   onOpenAddressFixModal: (order: ShippingOrder) => void;
   onOpenCompareRatesModal?: (order: ShippingOrder) => void;
+  onOpenOrderDetailModal?: (order: ShippingOrder) => void;
   onGenerateBatchLabels: (selectedOrderIds: string[]) => Promise<void>;
+  onPurchaseLabel?: (orderId: string, carrier?: any, serviceLevel?: string, rateCost?: number) => Promise<void>;
   onRefreshData: () => Promise<void>;
   onSyncMssql?: (action?: 'pull' | 'push') => Promise<void>;
   onOpenScanFormModal?: () => void;
@@ -78,7 +82,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onValidateAddresses,
   onOpenAddressFixModal,
   onOpenCompareRatesModal,
+  onOpenOrderDetailModal,
   onGenerateBatchLabels,
+  onPurchaseLabel,
   onRefreshData,
   onSyncMssql,
   onOpenScanFormModal,
@@ -125,7 +131,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     );
   };
 
-  const selectableOrders = filteredOrders.filter((o) => o.status === 'ready_to_ship');
+  const selectableOrders = filteredOrders;
 
   const toggleSelectAll = () => {
     if (selectedOrderIds.length === selectableOrders.length) {
@@ -274,11 +280,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <button
               onClick={handleGenerateLabelsClick}
               disabled={selectedOrderIds.length === 0 || isGenerating}
-              className="flex items-center space-x-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-xs font-semibold shadow-sm transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex items-center space-x-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Bulk purchase EasyPost shipping labels for selected orders and open print view"
             >
               <Printer className="w-3.5 h-3.5" />
               <span>
-                {isGenerating ? 'Generating Labels...' : `Bulk Label & Slips (${selectedOrderIds.length})`}
+                {isGenerating ? 'Purchasing Bulk Labels...' : `Bulk Purchase Labels (${selectedOrderIds.length})`}
               </span>
             </button>
           </div>
@@ -339,7 +346,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <tbody className="divide-y divide-slate-100 text-xs text-slate-800">
               {filteredOrders.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-12 text-center text-slate-500">
+                  <td colSpan={8} className="py-12 text-center text-slate-500">
                     <Package className="w-8 h-8 text-slate-400 mx-auto mb-2 opacity-50" />
                     <p className="font-medium">No shipping orders found in this view.</p>
                     <p className="text-[11px] text-slate-400 mt-0.5">Try clearing filter or add a manual order.</p>
@@ -348,7 +355,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
               ) : (
                 filteredOrders.map((order) => {
                   const isChecked = selectedOrderIds.includes(order.id);
-                  const isSelectable = order.status === 'ready_to_ship';
                   const isError = order.status === 'address_error';
                   const countryInfo = getCountryFlag(order.country);
 
@@ -366,9 +372,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       {/* Selection Checkbox */}
                       <td className="py-3 px-3 text-center">
                         <button
-                          disabled={!isSelectable}
                           onClick={() => toggleSelectOrder(order.id)}
-                          className={`cursor-pointer disabled:opacity-25 disabled:cursor-not-allowed ${
+                          className={`cursor-pointer ${
                             isChecked ? 'text-indigo-600' : 'text-slate-400 hover:text-slate-600'
                           }`}
                         >
@@ -379,7 +384,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       {/* Order Ref & Date */}
                       <td className="py-3 px-3 font-mono text-xs text-indigo-600 font-semibold">
                         <div className="flex items-center space-x-1.5">
-                          <span>#{order.orderNumber}</span>
+                          <button
+                            onClick={() => onOpenOrderDetailModal && onOpenOrderDetailModal(order)}
+                            className="text-indigo-600 hover:text-indigo-800 font-bold hover:underline cursor-pointer flex items-center space-x-1 text-left"
+                            title="Click to view full order details, update address, box type, weight or carrier"
+                          >
+                            <span>#{order.orderNumber}</span>
+                          </button>
                           {order.isReshipment && (
                             <span className="bg-amber-100 text-amber-800 text-[9px] px-1.5 py-0.2 rounded font-bold uppercase">
                               Re-Ship
@@ -429,7 +440,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         ) : (
                           <div className="text-slate-400 text-[11px] italic">Standard Order Item</div>
                         )}
-                        <div className="text-[10px] text-slate-400 mt-0.5">Weight: {order.weightOz || 16} oz</div>
+                        {order.weightOz === 0 ? (
+                          <div className="text-[10px] text-rose-600 font-bold flex items-center space-x-1 mt-0.5">
+                            <AlertTriangle className="w-3 h-3 text-rose-500 shrink-0" />
+                            <span>Weight: 0 oz (Needs Correction)</span>
+                          </div>
+                        ) : (
+                          <div className="text-[10px] text-slate-400 mt-0.5">Weight: {order.weightOz} oz</div>
+                        )}
                       </td>
 
                       {/* Box Dropdown */}
@@ -513,13 +531,35 @@ export const Dashboard: React.FC<DashboardProps> = ({
                           >
                             Fix Address
                           </button>
-                        ) : order.status === 'ready_to_ship' ? (
-                          <button
-                            onClick={() => onGenerateBatchLabels([order.id])}
-                            className="text-indigo-600 font-semibold text-xs hover:underline cursor-pointer"
+                        ) : order.status === 'shipped' || order.labelUrl ? (
+                          <a
+                            href={`/api/orders/${order.id}/label.pdf`}
+                            download={`EasyPost_Label_${order.orderNumber}.pdf`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center space-x-1 text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-1 rounded text-xs font-bold transition-colors cursor-pointer"
+                            title="Download PDF label stored in database"
                           >
-                            Print Label
-                          </button>
+                            <Download className="w-3.5 h-3.5" />
+                            <span>PDF Label</span>
+                          </a>
+                        ) : order.status === 'ready_to_ship' ? (
+                          <div className="flex items-center justify-end space-x-2">
+                            <button
+                              onClick={() => {
+                                if (onPurchaseLabel) {
+                                  onPurchaseLabel(order.id);
+                                } else {
+                                  onGenerateBatchLabels([order.id]);
+                                }
+                              }}
+                              className="inline-flex items-center space-x-1 bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 py-1 rounded text-xs font-bold shadow-2xs transition-all cursor-pointer"
+                              title="Purchase postage label from EasyPost and save PDF label to database"
+                            >
+                              <Tag className="w-3 h-3" />
+                              <span>Purchase Label</span>
+                            </button>
+                          </div>
                         ) : (
                           <button
                             onClick={() => onValidateAddresses([order.id])}

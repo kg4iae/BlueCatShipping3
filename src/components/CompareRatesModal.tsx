@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShippingOrder, PackageType } from '../types';
+import { ShippingOrder, PackageType, CarrierType, AppSetting } from '../types';
 import { getCountryFlag } from './Dashboard';
 import {
   X,
@@ -12,10 +12,11 @@ import {
   ArrowRight,
   DollarSign,
   Package,
+  Tag,
 } from 'lucide-react';
 
 export interface RateOption {
-  carrier: 'USPS' | 'UPS';
+  carrier: CarrierType;
   serviceLevel: string;
   rate: number;
   deliveryDays: string;
@@ -29,11 +30,13 @@ export interface RateOption {
 interface CompareRatesModalProps {
   order: ShippingOrder;
   packages: PackageType[];
+  settings?: AppSetting;
   onClose: () => void;
-  onSelectRate: (orderId: string, carrier: 'USPS' | 'UPS', serviceLevel: string, rate: number) => Promise<void>;
+  onSelectRate: (orderId: string, carrier: CarrierType, serviceLevel: string, rate: number) => Promise<void>;
+  onPurchaseLabel?: (orderId: string, carrier?: CarrierType, serviceLevel?: string, rateCost?: number) => Promise<void>;
 }
 
-export function getCalculatedRatesForOrder(order: ShippingOrder): RateOption[] {
+export function getCalculatedRatesForOrder(order: ShippingOrder, defaultCarrier?: CarrierType, defaultService?: string): RateOption[] {
   const rawCountry = (order.country || 'US').trim().toUpperCase();
   const isInternational =
     rawCountry !== 'US' &&
@@ -44,12 +47,21 @@ export function getCalculatedRatesForOrder(order: ShippingOrder): RateOption[] {
   const weightLbs = Math.max(0.5, (order.weightOz || 16) / 16);
 
   if (!isInternational) {
-    // Domestic US Shipment Rates
+    // Domestic US Shipment Rates across carriers
     const uspsGroundRate = Number((5.25 + weightLbs * 0.75).toFixed(2));
     const uspsPriorityRate = Number((7.85 + weightLbs * 1.15).toFixed(2));
     const uspsExpressRate = Number((24.95 + weightLbs * 1.85).toFixed(2));
 
-    return [
+    const upsGroundRate = Number((8.50 + weightLbs * 1.10).toFixed(2));
+    const ups2DayRate = Number((18.50 + weightLbs * 1.60).toFixed(2));
+
+    const fedexGroundRate = Number((8.75 + weightLbs * 1.15).toFixed(2));
+    const fedex2DayRate = Number((19.00 + weightLbs * 1.65).toFixed(2));
+
+    const targetCarrier = defaultCarrier || 'USPS';
+    const targetService = defaultService || 'Priority';
+
+    const options: RateOption[] = [
       {
         carrier: 'USPS',
         serviceLevel: 'Priority Mail 2-Day',
@@ -57,8 +69,8 @@ export function getCalculatedRatesForOrder(order: ShippingOrder): RateOption[] {
         deliveryDays: '2 Business Days',
         isCheapest: false,
         isFastest: false,
-        isRecommended: true,
-        notes: 'Standard US domestic business default',
+        isRecommended: false,
+        notes: 'USPS standard 2-day delivery with commercial discount',
       },
       {
         carrier: 'USPS',
@@ -68,7 +80,7 @@ export function getCalculatedRatesForOrder(order: ShippingOrder): RateOption[] {
         isCheapest: true,
         isFastest: false,
         isRecommended: false,
-        notes: 'Lowest cost domestic option',
+        notes: 'Lowest cost economy domestic option',
       },
       {
         carrier: 'USPS',
@@ -83,15 +95,79 @@ export function getCalculatedRatesForOrder(order: ShippingOrder): RateOption[] {
       {
         carrier: 'UPS',
         serviceLevel: 'UPS Ground',
-        rate: Number((9.80 + weightLbs * 1.25).toFixed(2)),
+        rate: upsGroundRate,
         deliveryDays: '1-5 Business Days',
         isCheapest: false,
         isFastest: false,
         isRecommended: false,
-        disabled: true,
-        notes: 'Policy Rule: Domestic US shipments are strictly assigned to USPS',
+        notes: 'Reliable ground shipping for heavier packages',
+      },
+      {
+        carrier: 'UPS',
+        serviceLevel: 'UPS 2nd Day Air',
+        rate: ups2DayRate,
+        deliveryDays: '2 Business Days',
+        isCheapest: false,
+        isFastest: false,
+        isRecommended: false,
+        notes: 'Guaranteed 2-day delivery across 50 US states',
+      },
+      {
+        carrier: 'FedEx',
+        serviceLevel: 'FedEx Ground',
+        rate: fedexGroundRate,
+        deliveryDays: '1-5 Business Days',
+        isCheapest: false,
+        isFastest: false,
+        isRecommended: false,
+        notes: 'Commercial ground network coverage',
+      },
+      {
+        carrier: 'FedEx',
+        serviceLevel: 'FedEx 2Day',
+        rate: fedex2DayRate,
+        deliveryDays: '2 Business Days',
+        isCheapest: false,
+        isFastest: false,
+        isRecommended: false,
+        notes: 'Express 2-day business delivery',
       },
     ];
+
+    // Set recommended based on default carrier settings
+    let foundMatch = false;
+    options.forEach((opt) => {
+      const isCarrierMatch = opt.carrier.toUpperCase() === targetCarrier.toUpperCase();
+      const sLower = opt.serviceLevel.toLowerCase();
+      const tLower = targetService.toLowerCase();
+
+      let isServiceMatch = sLower.includes(tLower);
+      if (tLower === 'priority') {
+        isServiceMatch = sLower.includes('priority') && !sLower.includes('express');
+      } else if (tLower === 'ground advantage') {
+        isServiceMatch = sLower.includes('ground advantage') || sLower.includes('groundadvantage');
+      } else if (tLower === 'express') {
+        isServiceMatch = sLower.includes('express');
+      } else if (tLower === 'ground') {
+        isServiceMatch = sLower.includes('ground');
+      } else if (tLower === '2day') {
+        isServiceMatch = sLower.includes('2nd day') || sLower.includes('2day');
+      } else if (tLower === 'nextday' || tLower === 'priority overnight') {
+        isServiceMatch = sLower.includes('next day') || sLower.includes('overnight');
+      }
+
+      if (isCarrierMatch && isServiceMatch) {
+        opt.isRecommended = true;
+        foundMatch = true;
+      }
+    });
+    if (!foundMatch) {
+      const carrierMatch = options.find((opt) => opt.carrier.toUpperCase() === targetCarrier.toUpperCase());
+      if (carrierMatch) carrierMatch.isRecommended = true;
+      else options[0].isRecommended = true;
+    }
+
+    return options;
   } else {
     // International Shipment Rates (USPS vs UPS Rate Comparison)
     const uspsPriorityIntl = Number((38.50 + weightLbs * 3.40).toFixed(2));
@@ -161,10 +237,12 @@ export function getCalculatedRatesForOrder(order: ShippingOrder): RateOption[] {
 export const CompareRatesModal: React.FC<CompareRatesModalProps> = ({
   order,
   packages,
+  settings,
   onClose,
   onSelectRate,
+  onPurchaseLabel,
 }) => {
-  const rates = getCalculatedRatesForOrder(order);
+  const rates = getCalculatedRatesForOrder(order, settings?.defaultDomesticCarrier, settings?.defaultDomesticService);
   const countryFlag = getCountryFlag(order.country);
   const rawCountry = (order.country || 'US').trim().toUpperCase();
   const isInternational =
@@ -173,9 +251,10 @@ export const CompareRatesModal: React.FC<CompareRatesModalProps> = ({
     rawCountry !== 'UNITED STATES' &&
     rawCountry !== 'UNITED STATES OF AMERICA';
 
-  // Find initial selected or cheapest
+  // Find initial selected, recommended default, or cheapest
   const initialOption =
     rates.find((r) => r.carrier === order.carrier && r.serviceLevel === order.serviceLevel) ||
+    rates.find((r) => r.isRecommended && !r.disabled) ||
     rates.find((r) => r.isCheapest && !r.disabled) ||
     rates[0];
 
@@ -193,6 +272,28 @@ export const CompareRatesModal: React.FC<CompareRatesModalProps> = ({
       selectedRate.serviceLevel,
       selectedRate.rate
     );
+    setSaving(false);
+    onClose();
+  };
+
+  const handlePurchaseLabel = async () => {
+    if (selectedRate.disabled) return;
+    setSaving(true);
+    if (onPurchaseLabel) {
+      await onPurchaseLabel(
+        order.id,
+        selectedRate.carrier,
+        selectedRate.serviceLevel,
+        selectedRate.rate
+      );
+    } else {
+      await onSelectRate(
+        order.id,
+        selectedRate.carrier,
+        selectedRate.serviceLevel,
+        selectedRate.rate
+      );
+    }
     setSaving(false);
     onClose();
   };
@@ -255,12 +356,12 @@ export const CompareRatesModal: React.FC<CompareRatesModalProps> = ({
 
         {/* Business Policy Banner */}
         {!isInternational ? (
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 text-xs text-amber-900 flex items-start space-x-2.5">
-            <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+          <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3.5 text-xs text-indigo-900 flex items-start space-x-2.5">
+            <Truck className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
             <div>
-              <div className="font-bold">🇺🇸 Domestic Shipping Rule Active</div>
-              <p className="text-amber-800 text-[11px] mt-0.5">
-                All US domestic orders are strictly routed through <strong>USPS</strong> per your business shipping rules. UPS is disabled for domestic destinations.
+              <div className="font-bold">🇺🇸 Domestic Shipping Rate Comparison</div>
+              <p className="text-indigo-800 text-[11px] mt-0.5">
+                Default domestic carrier: <strong>{settings?.defaultDomesticCarrier || 'USPS'}</strong> ({settings?.defaultDomesticService || 'Priority'}). You can compare rates across USPS, UPS, and FedEx and select your preferred carrier option below.
               </p>
             </div>
           </div>
@@ -381,10 +482,20 @@ export const CompareRatesModal: React.FC<CompareRatesModalProps> = ({
             <button
               onClick={handleApplyRate}
               disabled={saving || selectedRate.disabled}
-              className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs px-5 py-2 rounded-lg shadow-sm flex items-center space-x-1.5 transition-all cursor-pointer disabled:opacity-50"
+              className="bg-slate-700 hover:bg-slate-800 text-white font-semibold text-xs px-4 py-2 rounded-lg shadow-sm flex items-center space-x-1.5 transition-all cursor-pointer disabled:opacity-50"
             >
               <CheckCircle2 className="w-4 h-4" />
-              <span>{saving ? 'Applying Rate...' : 'Set Rate & Carrier'}</span>
+              <span>{saving ? 'Applying...' : 'Set Rate Only'}</span>
+            </button>
+
+            <button
+              onClick={handlePurchaseLabel}
+              disabled={saving || selectedRate.disabled}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-5 py-2 rounded-lg shadow-sm flex items-center space-x-1.5 transition-all cursor-pointer disabled:opacity-50"
+              title="Purchase shipping label from EasyPost and save label PDF to database"
+            >
+              <Tag className="w-4 h-4" />
+              <span>{saving ? 'Purchasing...' : 'Purchase Label (EasyPost)'}</span>
             </button>
           </div>
         </div>

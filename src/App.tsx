@@ -1,12 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import { ShippingOrder, PackageType, AppSetting } from './types';
+import { ShippingOrder, PackageType, AppSetting, CarrierType } from './types';
 import { Navbar } from './components/Navbar';
 import { LoginModal } from './components/LoginModal';
 import { Dashboard } from './components/Dashboard';
 import { AddressFixModal } from './components/AddressFixModal';
 import { CompareRatesModal } from './components/CompareRatesModal';
+import { OrderDetailModal } from './components/OrderDetailModal';
 import { ManualOrderModal } from './components/ManualOrderModal';
 import { BatchPrintModal } from './components/BatchPrintModal';
+import { LabelPrintDialog } from './components/LabelPrintDialog';
 import { SearchShipped } from './components/SearchShipped';
 import { ReshipModal } from './components/ReshipModal';
 import { ScanFormModal } from './components/ScanFormModal';
@@ -28,9 +30,11 @@ export default function App() {
   // Modals state
   const [addressFixOrder, setAddressFixOrder] = useState<ShippingOrder | null>(null);
   const [compareRatesOrder, setCompareRatesOrder] = useState<ShippingOrder | null>(null);
+  const [orderDetailOrder, setOrderDetailOrder] = useState<ShippingOrder | null>(null);
   const [showManualOrderModal, setShowManualOrderModal] = useState<boolean>(false);
   const [showScanFormModal, setShowScanFormModal] = useState<boolean>(false);
   const [printOrders, setPrintOrders] = useState<ShippingOrder[] | null>(null);
+  const [purchasedLabelOrder, setPurchasedLabelOrder] = useState<ShippingOrder | null>(null);
   const [reshipTargetOrder, setReshipTargetOrder] = useState<ShippingOrder | null>(null);
 
   // Notification Toast state
@@ -140,6 +144,22 @@ export default function App() {
     }
   };
 
+  // Save Order Details (Address, Box, Weight, Carrier, etc.)
+  const handleSaveOrderDetails = async (orderId: string, updates: Partial<ShippingOrder>) => {
+    try {
+      const res = await fetch(`/api/orders/${orderId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      const updated = await res.json();
+      setOrders((prev) => prev.map((o) => (o.id === orderId ? updated : o)));
+      showToast(`Order #${updated.orderNumber} updated & saved to database!`, 'success');
+    } catch (err) {
+      showToast('Error saving order updates to database.', 'error');
+    }
+  };
+
   // Rate Selection Handler
   const handleSelectRate = async (
     orderId: string,
@@ -199,21 +219,82 @@ export default function App() {
         return;
       }
 
-      if (data.success && data.processedOrders) {
+      const updated = data.processedOrders || data.orders;
+      if (data.success && updated && updated.length > 0) {
         // Update local orders state
         setOrders((prev) =>
           prev.map((o) => {
-            const match = data.processedOrders.find((p: ShippingOrder) => p.id === o.id);
+            const match = updated.find((p: ShippingOrder) => p.id === o.id || p.orderNumber === o.orderNumber);
             return match || o;
           })
         );
 
         // Open PDF batch printer modal
-        setPrintOrders(data.processedOrders);
-        showToast(`Generated ${data.processedOrders.length} labels & packing slips ($${data.totalCost} written to DB)`, 'success');
+        setPrintOrders(updated);
+        showToast(`Purchased ${updated.length} EasyPost label(s) & packing slip(s) ($${data.totalCost || 0} written to DB)!`, 'success');
       }
     } catch (err) {
       showToast('Failed to connect to EasyPost label creation service.', 'error');
+    }
+  };
+
+  // Single EasyPost Label Purchase Handler
+  const handlePurchaseSingleLabel = async (
+    orderId: string,
+    carrier?: CarrierType,
+    serviceLevel?: string,
+    rateCost?: number
+  ) => {
+    try {
+      const res = await fetch(`/api/orders/${orderId}/purchase-label`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ carrier, serviceLevel, rateCost }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast(data.error || 'Failed to purchase EasyPost label.', 'error');
+        return;
+      }
+      if (data.order) {
+        setOrders((prev) => prev.map((o) => (o.id === orderId || o.orderNumber === orderId ? data.order : o)));
+        if (orderDetailOrder?.id === orderId) {
+          setOrderDetailOrder(data.order);
+        }
+        setPurchasedLabelOrder(data.order);
+        showToast(data.message || `Purchased EasyPost label for Order #${data.order.orderNumber}!`, 'success');
+      }
+    } catch (err) {
+      showToast('Failed to purchase label from EasyPost.', 'error');
+    }
+  };
+
+  // Batch EasyPost Label Purchase Handler
+  const handlePurchaseBatchLabels = async (orderIds: string[]) => {
+    try {
+      const res = await fetch('/api/orders/batch-purchase-labels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderIds }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast(data.error || 'Failed to purchase batch labels.', 'error');
+        return;
+      }
+      const updated = data.processedOrders || data.orders;
+      if (updated && updated.length > 0) {
+        setOrders((prev) =>
+          prev.map((o) => {
+            const match = updated.find((p: ShippingOrder) => p.id === o.id || p.orderNumber === o.orderNumber);
+            return match || o;
+          })
+        );
+        setPrintOrders(updated);
+        showToast(data.message || `Purchased EasyPost labels for ${updated.length} order(s)!`, 'success');
+      }
+    } catch (err) {
+      showToast('Failed to purchase batch labels from EasyPost.', 'error');
     }
   };
 
@@ -361,7 +442,9 @@ export default function App() {
             onValidateAddresses={handleValidateAddresses}
             onOpenAddressFixModal={(order) => setAddressFixOrder(order)}
             onOpenCompareRatesModal={(order) => setCompareRatesOrder(order)}
+            onOpenOrderDetailModal={(order) => setOrderDetailOrder(order)}
             onGenerateBatchLabels={handleGenerateBatchLabels}
+            onPurchaseLabel={handlePurchaseSingleLabel}
             onRefreshData={refreshAllData}
             onSyncMssql={handleSyncMssql}
             onOpenScanFormModal={() => setShowScanFormModal(true)}
@@ -376,6 +459,7 @@ export default function App() {
             onReshipOrder={(order) => setReshipTargetOrder(order)}
             onOpenPrintModal={(ordersToPrint) => setPrintOrders(ordersToPrint)}
             onOpenScanFormModal={() => setShowScanFormModal(true)}
+            onOpenOrderDetailModal={(order) => setOrderDetailOrder(order)}
           />
         )}
 
@@ -410,8 +494,25 @@ export default function App() {
         <CompareRatesModal
           order={compareRatesOrder}
           packages={packages}
+          settings={settings || ({} as AppSetting)}
           onClose={() => setCompareRatesOrder(null)}
           onSelectRate={handleSelectRate}
+          onPurchaseLabel={handlePurchaseSingleLabel}
+        />
+      )}
+
+      {orderDetailOrder && (
+        <OrderDetailModal
+          order={orderDetailOrder}
+          packages={packages}
+          settings={settings || ({} as AppSetting)}
+          onClose={() => setOrderDetailOrder(null)}
+          onSaveOrder={handleSaveOrderDetails}
+          onPurchaseLabel={handlePurchaseSingleLabel}
+          onOpenCompareRatesModal={(order) => {
+            setOrderDetailOrder(null);
+            setCompareRatesOrder(order);
+          }}
         />
       )}
 
@@ -437,6 +538,14 @@ export default function App() {
           orders={printOrders}
           settings={settings}
           onClose={() => setPrintOrders(null)}
+          onPurchaseBatchLabels={handlePurchaseBatchLabels}
+        />
+      )}
+
+      {purchasedLabelOrder && (
+        <LabelPrintDialog
+          order={purchasedLabelOrder}
+          onClose={() => setPurchasedLabelOrder(null)}
         />
       )}
 

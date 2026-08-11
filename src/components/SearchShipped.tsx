@@ -15,6 +15,7 @@ import {
   FileText,
   Copy,
   Sparkles,
+  Download,
 } from 'lucide-react';
 
 interface SearchShippedProps {
@@ -23,6 +24,7 @@ interface SearchShippedProps {
   onReshipOrder: (order: ShippingOrder) => void;
   onOpenPrintModal: (orders: ShippingOrder[]) => void;
   onOpenScanFormModal?: () => void;
+  onOpenOrderDetailModal?: (order: ShippingOrder) => void;
 }
 
 export const SearchShipped: React.FC<SearchShippedProps> = ({
@@ -31,6 +33,7 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
   onReshipOrder,
   onOpenPrintModal,
   onOpenScanFormModal,
+  onOpenOrderDetailModal,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [carrierFilter, setCarrierFilter] = useState('all');
@@ -153,7 +156,13 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
                     {/* Order # & Ship Date */}
                     <td className="py-3 px-3">
                       <div className="font-bold text-indigo-600 font-mono flex items-center space-x-1.5">
-                        <span>#{order.orderNumber}</span>
+                        <button
+                          onClick={() => onOpenOrderDetailModal && onOpenOrderDetailModal(order)}
+                          className="text-indigo-600 hover:text-indigo-800 font-bold hover:underline cursor-pointer text-left"
+                          title="Click to view order details & settings"
+                        >
+                          <span>#{order.orderNumber}</span>
+                        </button>
                         {order.isReshipment && (
                           <span className="bg-amber-100 text-amber-800 text-[9px] px-1.5 py-0.2 rounded font-bold uppercase">
                             Re-Shipment
@@ -230,16 +239,32 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
                       ${(order.shippingCost || 12.50).toFixed(2)}
                     </td>
 
-                    {/* Re-Ship Action Button */}
+                    {/* Action Buttons */}
                     <td className="py-3 px-3 text-right">
                       <div className="flex items-center justify-end space-x-2">
-                        <button
-                          onClick={() => onOpenPrintModal([order])}
-                          className="p-1.5 text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg border border-slate-200 transition-colors cursor-pointer"
-                          title="View & Print Label / Packing Slip"
+                        <a
+                          href={`/api/orders/${order.id}/label.pdf`}
+                          download={`EasyPost_Label_${order.orderNumber}.pdf`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center space-x-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                          title="Download EasyPost shipping label PDF stored in database"
                         >
-                          <FileText className="w-3.5 h-3.5" />
-                        </button>
+                          <Download className="w-3.5 h-3.5 text-indigo-600" />
+                          <span>PDF Label</span>
+                        </a>
+
+                        <a
+                          href={`/api/orders/${order.id}/packing-slip.pdf`}
+                          download={`PackingSlip_${order.orderNumber}.pdf`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center space-x-1 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                          title="Download or view Packing Slip PDF"
+                        >
+                          <FileText className="w-3.5 h-3.5 text-slate-600" />
+                          <span>Packing Slip</span>
+                        </a>
 
                         <button
                           onClick={() => onReshipOrder(order)}

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { AppSetting, PackageType } from '../types';
+import { AppSetting, PackageType, CarrierType } from '../types';
 import {
   FileText,
   Save,
@@ -16,6 +16,7 @@ import {
   Server,
   ShieldCheck,
   AlertCircle,
+  AlertTriangle,
   Eye,
   Building,
   MapPin,
@@ -36,7 +37,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   onCreatePackage,
   onDeletePackage,
 }) => {
-  const [activeSection, setActiveSection] = useState<'returnAddress' | 'packingslip' | 'easypost' | 'packages' | 'mssql' | 'security'>('returnAddress');
+  const [activeSection, setActiveSection] = useState<'returnAddress' | 'carrierDefaults' | 'packingslip' | 'easypost' | 'packages' | 'mssql' | 'security'>('returnAddress');
 
   // Business / FROM Address Form states
   const [companyName, setCompanyName] = useState(settings.companyName || 'BlueCat Bobbins Shipping');
@@ -49,6 +50,10 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   const [returnZip, setReturnZip] = useState(settings.returnAddress?.zip || '60601');
   const [returnCountry, setReturnCountry] = useState(settings.returnAddress?.country || 'US');
   const [returnPhone, setReturnPhone] = useState(settings.returnAddress?.phone || '312-555-0144');
+
+  // Carrier & Rates defaults state
+  const [defaultDomesticCarrier, setDefaultDomesticCarrier] = useState<CarrierType>(settings.defaultDomesticCarrier || 'USPS');
+  const [defaultDomesticService, setDefaultDomesticService] = useState<string>(settings.defaultDomesticService || 'Priority');
 
   // Form states
   const [packingSlipContent, setPackingSlipContent] = useState(settings.packingSlipContent || '');
@@ -78,6 +83,34 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   const [testingMssql, setTestingMssql] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; version?: string } | null>(null);
 
+  // EasyPost Connection test state
+  const [testingEasyPost, setTestingEasyPost] = useState(false);
+  const [easyPostTestResult, setEasyPostTestResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const handleTestEasyPost = async () => {
+    setTestingEasyPost(true);
+    setEasyPostTestResult(null);
+    try {
+      const res = await fetch('/api/easypost/test-connection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: easyPostApiKey }),
+      });
+      const data = await res.json();
+      setEasyPostTestResult({
+        success: res.ok && data.success,
+        message: data.message || (res.ok ? 'EasyPost API Key is valid!' : 'EasyPost connection failed.'),
+      });
+    } catch (err: any) {
+      setEasyPostTestResult({
+        success: false,
+        message: `Network error testing EasyPost API: ${err?.message || err}`,
+      });
+    } finally {
+      setTestingEasyPost(false);
+    }
+  };
+
   useEffect(() => {
     fetch('/api/mssql/schema')
       .then((res) => res.json())
@@ -101,6 +134,17 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
         country: returnCountry,
         phone: returnPhone,
       },
+    });
+    setSaving(false);
+    triggerSuccess();
+  };
+
+  const handleSaveCarrierDefaults = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    await onUpdateSettings({
+      defaultDomesticCarrier,
+      defaultDomesticService,
     });
     setSaving(false);
     triggerSuccess();
@@ -248,6 +292,18 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
           >
             <Building className="w-4 h-4" />
             <span>Business &amp; Return Address (FROM Labels)</span>
+          </button>
+
+          <button
+            onClick={() => setActiveSection('carrierDefaults')}
+            className={`w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+              activeSection === 'carrierDefaults'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <Truck className="w-4 h-4" />
+            <span>Domestic Carrier &amp; Rates</span>
           </button>
 
           <button
@@ -492,6 +548,112 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
             </div>
           )}
 
+          {/* SECTION: DOMESTIC CARRIER & RATES DEFAULTS */}
+          {activeSection === 'carrierDefaults' && (
+            <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-6">
+              <div className="border-b border-slate-100 pb-4">
+                <h3 className="text-base font-bold text-slate-900 flex items-center space-x-2">
+                  <Truck className="w-5 h-5 text-indigo-600" />
+                  <span>Domestic Carrier &amp; Rates Configuration</span>
+                </h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Configure your default domestic carrier and rate/service tier for US shipments. International orders continue to compare USPS vs. UPS dynamically.
+                </p>
+              </div>
+
+              <form onSubmit={handleSaveCarrierDefaults} className="space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+                      Default Domestic Carrier
+                    </label>
+                    <select
+                      value={defaultDomesticCarrier}
+                      onChange={(e) => {
+                        const val = e.target.value as CarrierType;
+                        setDefaultDomesticCarrier(val);
+                        if (val === 'USPS') setDefaultDomesticService('Priority');
+                        else if (val === 'UPS') setDefaultDomesticService('Ground');
+                        else if (val === 'FedEx') setDefaultDomesticService('Ground');
+                      }}
+                      className="w-full bg-slate-50 border border-slate-300 text-slate-900 rounded-xl px-3.5 py-2.5 text-xs font-semibold focus:ring-2 focus:ring-indigo-500 focus:bg-white"
+                    >
+                      <option value="USPS">USPS (United States Postal Service)</option>
+                      <option value="UPS">UPS (United Parcel Service)</option>
+                      <option value="FedEx">FedEx (Federal Express)</option>
+                      <option value="DHL">DHL Express</option>
+                    </select>
+                    <p className="text-[11px] text-slate-500 mt-1.5">
+                      Primary carrier assigned to new domestic US orders automatically.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+                      Default Service Tier / Rate Level
+                    </label>
+                    <select
+                      value={defaultDomesticService}
+                      onChange={(e) => setDefaultDomesticService(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-300 text-slate-900 rounded-xl px-3.5 py-2.5 text-xs font-semibold focus:ring-2 focus:ring-indigo-500 focus:bg-white"
+                    >
+                      {defaultDomesticCarrier === 'USPS' && (
+                        <>
+                          <option value="Priority">USPS Priority Mail (2-Day)</option>
+                          <option value="Ground Advantage">USPS Ground Advantage (3-5 Days)</option>
+                          <option value="Express">USPS Priority Mail Express (Overnight)</option>
+                        </>
+                      )}
+                      {defaultDomesticCarrier === 'UPS' && (
+                        <>
+                          <option value="Ground">UPS Ground (1-5 Days)</option>
+                          <option value="2Day">UPS 2nd Day Air</option>
+                          <option value="NextDay">UPS Next Day Air</option>
+                        </>
+                      )}
+                      {defaultDomesticCarrier === 'FedEx' && (
+                        <>
+                          <option value="Ground">FedEx Ground (1-5 Days)</option>
+                          <option value="2Day">FedEx 2Day</option>
+                          <option value="Priority Overnight">FedEx Priority Overnight</option>
+                        </>
+                      )}
+                      {defaultDomesticCarrier === 'DHL' && (
+                        <>
+                          <option value="Express">DHL Express Domestic</option>
+                        </>
+                      )}
+                    </select>
+                    <p className="text-[11px] text-slate-500 mt-1.5">
+                      Default service rate level applied to batch print and rate calculations.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex items-start space-x-3 text-xs text-indigo-900">
+                  <Sparkles className="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="font-bold">Scope &amp; Custom Overrides</div>
+                    <p className="text-indigo-800 text-[11px] mt-0.5">
+                      This setting updates default rates and label purchasing for domestic orders. You can still compare live rates or manually pick a different carrier on any order at any time.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex justify-end pt-2">
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-5 py-2.5 rounded-xl shadow-sm flex items-center space-x-2 transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>{saving ? 'Saving...' : 'Save Carrier & Rate Defaults'}</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
           {/* SECTION 1: PACKING SLIP CUSTOM CONTENT */}
           {activeSection === 'packingslip' && (
             <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-6">
@@ -702,7 +864,39 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   </select>
                 </div>
 
-                <div className="pt-2 flex justify-end">
+                {easyPostTestResult && (
+                  <div
+                    className={`p-3.5 rounded-lg text-xs font-semibold flex items-start space-x-2.5 ${
+                      easyPostTestResult.success
+                        ? 'bg-emerald-50 text-emerald-900 border border-emerald-200'
+                        : 'bg-rose-50 text-rose-900 border border-rose-200'
+                    }`}
+                  >
+                    <div className="shrink-0 mt-0.5">
+                      {easyPostTestResult.success ? (
+                        <Check className="w-4 h-4 text-emerald-600" />
+                      ) : (
+                        <AlertTriangle className="w-4 h-4 text-rose-600" />
+                      )}
+                    </div>
+                    <div>
+                      <p className="font-bold">{easyPostTestResult.success ? 'EasyPost Connected Successfully!' : 'EasyPost Connection Failed'}</p>
+                      <p className="font-normal text-[11px] mt-0.5 whitespace-pre-wrap">{easyPostTestResult.message}</p>
+                    </div>
+                  </div>
+                )}
+
+                <div className="pt-2 flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={handleTestEasyPost}
+                    disabled={testingEasyPost}
+                    className="bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-xs px-4 py-2.5 rounded-lg border border-slate-300 flex items-center space-x-2 cursor-pointer disabled:opacity-50"
+                  >
+                    <Truck className="w-4 h-4 text-indigo-600" />
+                    <span>{testingEasyPost ? 'Testing API Key...' : 'Test EasyPost Connection'}</span>
+                  </button>
+
                   <button
                     type="submit"
                     disabled={saving}

@@ -1,25 +1,161 @@
 import React, { useState } from 'react';
 import { ShippingOrder, AppSetting } from '../types';
 import { jsPDF } from 'jspdf';
-import { Printer, Download, X, FileText, PackageCheck, Sparkles, Eye } from 'lucide-react';
+import { Printer, Download, X, FileText, PackageCheck, Sparkles, Tag, ExternalLink, RefreshCw } from 'lucide-react';
 
 interface BatchPrintModalProps {
   orders: ShippingOrder[];
   settings: AppSetting;
   onClose: () => void;
+  onPurchaseBatchLabels?: (orderIds: string[]) => Promise<void>;
 }
 
-export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({ orders, settings, onClose }) => {
+export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
+  orders,
+  settings,
+  onClose,
+  onPurchaseBatchLabels,
+}) => {
   const [viewMode, setViewMode] = useState<'both' | 'labels' | 'slips'>('both');
   const [isExporting, setIsExporting] = useState(false);
+  const [isPurchasing, setIsPurchasing] = useState(false);
+
+  const orderIdsStr = orders.map((o) => o.id).join(',');
+
+  const handlePurchaseBatch = async () => {
+    if (onPurchaseBatchLabels) {
+      setIsPurchasing(true);
+      await onPurchaseBatchLabels(orders.map((o) => o.id));
+      setIsPurchasing(false);
+    } else {
+      try {
+        setIsPurchasing(true);
+        const res = await fetch('/api/orders/batch-purchase-labels', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orderIds: orders.map((o) => o.id) }),
+        });
+        if (res.ok) {
+          window.location.reload();
+        }
+      } catch (e) {
+        console.error('Batch purchase error:', e);
+      } finally {
+        setIsPurchasing(false);
+      }
+    }
+  };
+
+  const handlePrintServerLabels = () => {
+    window.open(`/api/orders/batch-labels.pdf?orderIds=${orderIdsStr}`, '_blank');
+  };
+
+  const handlePrintServerPackingSlips = () => {
+    window.open(`/api/orders/batch-packing-slips.pdf?orderIds=${orderIdsStr}`, '_blank');
+  };
+
+  const handlePrintBothServer = () => {
+    window.open(`/api/orders/batch-labels.pdf?orderIds=${orderIdsStr}`, '_blank');
+    window.open(`/api/orders/batch-packing-slips.pdf?orderIds=${orderIdsStr}`, '_blank');
+  };
 
   const handlePrint = () => {
     window.print();
   };
 
-  const handleExportPDF = () => {
+  const handleExportLabelsOnlyPDF = () => {
     setIsExporting(true);
     try {
+      // Create 4x6 thermal label printer PDF format
+      const doc = new jsPDF({
+        unit: 'in',
+        format: [4, 6],
+        orientation: 'portrait',
+      });
+
+      orders.forEach((order, index) => {
+        if (index > 0) {
+          doc.addPage([4, 6], 'portrait');
+        }
+
+        const isIntl =
+          order.country &&
+          order.country.trim().toUpperCase() !== 'US' &&
+          order.country.trim().toUpperCase() !== 'USA' &&
+          order.country.trim().toUpperCase() !== 'UNITED STATES';
+        const displayCarrier = isIntl ? 'USPS INTERNATIONAL' : order.carrier || 'USPS';
+        const displayService = isIntl ? 'PRIORITY MAIL INTERNATIONAL' : order.serviceLevel || 'PRIORITY MAIL 2-DAY';
+
+        // Border frame
+        doc.setLineWidth(0.01);
+        doc.rect(0.1, 0.1, 3.8, 5.8);
+
+        // Header
+        doc.setFontSize(14);
+        doc.setTextColor(0, 0, 0);
+        doc.text(`${displayCarrier} POSTAGE PAID`, 0.2, 0.4);
+        doc.setFontSize(10);
+        doc.text(displayService, 0.2, 0.6);
+
+        // Ship From
+        doc.setFontSize(7);
+        doc.text('SHIP FROM:', 0.2, 0.9);
+        doc.text(settings.returnAddress.name, 0.2, 1.02);
+        doc.text(settings.returnAddress.street1, 0.2, 1.14);
+        doc.text(
+          `${settings.returnAddress.city}, ${settings.returnAddress.state} ${settings.returnAddress.zip} ${
+            settings.returnAddress.country || 'US'
+          }`,
+          0.2,
+          1.26
+        );
+
+        // Ship To
+        doc.setFontSize(9);
+        doc.text('SHIP TO:', 0.2, 1.6);
+        doc.setFontSize(12);
+        doc.text(order.recipientName, 0.2, 1.8);
+        if (order.company) doc.text(order.company, 0.2, 2.0);
+        doc.text(order.street1, 0.2, 2.2);
+        if (order.street2) doc.text(order.street2, 0.2, 2.4);
+        doc.text(`${order.city}, ${order.state} ${order.zip}`, 0.2, 2.6);
+        if (isIntl) {
+          doc.setFontSize(11);
+          doc.text(`DESTINATION: ${order.country.toUpperCase()}`, 0.2, 2.85);
+
+          // Customs Box
+          doc.rect(0.2, 3.0, 3.6, 0.5);
+          doc.setFontSize(7);
+          doc.text('USPS CUSTOMS DECLARATION (CN22 / CP72)', 0.25, 3.15);
+          doc.text(`Decl. Value: $${order.declaredValue || 100.0} USD | Merch`, 0.25, 3.32);
+        }
+
+        // Barcode section
+        const barcodeY = isIntl ? 3.7 : 3.2;
+        doc.setFillColor(0, 0, 0);
+        doc.rect(0.2, barcodeY, 3.6, 0.9, 'F');
+
+        doc.setFontSize(9);
+        doc.setTextColor(0, 0, 0);
+        doc.text(
+          `TRACKING #: ${order.trackingNumber || 'NOT PURCHASED YET'}`,
+          0.2,
+          barcodeY + 1.1
+        );
+      });
+
+      doc.save(`EasyPost_Labels_4x6_LabelPrinter_${Date.now()}.pdf`);
+    } catch (err) {
+      console.error('Labels PDF export error:', err);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleExportPackingSlipsOnlyPDF = () => {
+    setIsExporting(true);
+    try {
+      // Create Letter-sized Packing Slip PDF for Color Laser Printer
       const doc = new jsPDF({
         unit: 'in',
         format: 'letter',
@@ -30,7 +166,6 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({ orders, settin
           doc.addPage();
         }
 
-        // --- PACKING SLIP PAGE ---
         doc.setFontSize(20);
         doc.setTextColor(30, 41, 59);
         doc.text(settings.companyName || 'Acme Shipping Corp', 0.5, 0.75);
@@ -66,7 +201,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({ orders, settin
         doc.setFontSize(10);
         doc.setTextColor(15, 23, 42);
         doc.text('SKU / ITEM CODE', 0.6, y + 0.2);
-        doc.text('DESCRIPTION', 2.2, y + 0.2);
+        doc.text('DESCRIPTION / TYPE / COLOR', 2.2, y + 0.2);
         doc.text('QTY', 6.2, y + 0.2);
         doc.text('WEIGHT', 7.0, y + 0.2);
 
@@ -75,9 +210,13 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({ orders, settin
         order.items.forEach((item) => {
           doc.setFontSize(9);
           doc.text(item.sku || 'ITEM', 0.6, y);
-          doc.text(item.name, 2.2, y);
+          let desc = item.name;
+          if (item.itemType || item.color) {
+            desc += ` (${item.itemType ? item.itemType : ''}${item.itemType && item.color ? ' - ' : ''}${item.color ? item.color : ''})`;
+          }
+          doc.text(desc, 2.2, y);
           doc.text(String(item.quantity), 6.3, y);
-          doc.text(`${item.weightOz || 12} oz`, 7.0, y);
+          doc.text(`${item.weightOz || 4 * item.quantity} oz`, 7.0, y);
           y += 0.25;
         });
 
@@ -93,63 +232,13 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({ orders, settin
 
         doc.setFontSize(8.5);
         doc.setTextColor(51, 65, 85);
-
-        // Split text cleanly for PDF rendering
         const splitContent = doc.splitTextToSize(settings.packingSlipContent || 'Thank you for your order!', 7.1);
         doc.text(splitContent, 0.7, y + 0.45);
-
-        // --- SHIPPING LABEL PAGE (4x6 format) ---
-        doc.addPage('letter', 'portrait');
-        doc.setLineWidth(0.02);
-        doc.rect(1.5, 1.0, 5.0, 7.0);
-
-        const isIntl = order.country && order.country.trim().toUpperCase() !== 'US' && order.country.trim().toUpperCase() !== 'USA' && order.country.trim().toUpperCase() !== 'UNITED STATES';
-        const displayCarrier = isIntl ? 'USPS INTERNATIONAL' : (order.carrier || 'USPS');
-        const displayService = isIntl ? 'PRIORITY MAIL INTERNATIONAL' : (order.serviceLevel || 'PRIORITY MAIL 2-DAY');
-
-        doc.setFontSize(16);
-        doc.setTextColor(0, 0, 0);
-        doc.text(`${displayCarrier} POSTAGE PAID`, 1.7, 1.5);
-        doc.setFontSize(11);
-        doc.text(displayService, 1.7, 1.8);
-
-        doc.setFontSize(8);
-        doc.text('SHIP FROM:', 1.7, 2.3);
-        doc.text(settings.returnAddress.name, 1.7, 2.45);
-        doc.text(settings.returnAddress.street1, 1.7, 2.6);
-        doc.text(`${settings.returnAddress.city}, ${settings.returnAddress.state} ${settings.returnAddress.zip} ${settings.returnAddress.country || 'US'}`, 1.7, 2.75);
-
-        doc.setFontSize(12);
-        doc.text('SHIP TO:', 1.7, 3.2);
-        doc.setFontSize(14);
-        doc.text(order.recipientName, 1.7, 3.45);
-        if (order.company) doc.text(order.company, 1.7, 3.7);
-        doc.text(order.street1, 1.7, 3.95);
-        if (order.street2) doc.text(order.street2, 1.7, 4.2);
-        doc.text(`${order.city}, ${order.state} ${order.zip}`, 1.7, 4.45);
-        if (isIntl) {
-          doc.setFontSize(14);
-          doc.text(`DESTINATION: ${order.country.toUpperCase()}`, 1.7, 4.75);
-
-          // Customs Declaration Box
-          doc.setLineWidth(0.01);
-          doc.rect(1.7, 4.9, 4.6, 0.45);
-          doc.setFontSize(8);
-          doc.text('USPS CUSTOMS DECLARATION (CN22 / CP72) - NOEEI 30.37(a)', 1.8, 5.05);
-          doc.text(`Declared Value: $${order.declaredValue || 100.00} USD | Category: Commercial Goods`, 1.8, 5.23);
-        }
-
-        // Simulated Barcode Box
-        doc.setFillColor(0, 0, 0);
-        doc.rect(1.7, isIntl ? 5.5 : 5.2, 4.6, 0.8, 'F');
-        doc.setFontSize(10);
-        doc.setTextColor(0, 0, 0);
-        doc.text(`TRACKING #: ${order.trackingNumber || (isIntl ? 'CP123456789US' : '9400111202482390123')}`, 1.7, isIntl ? 6.5 : 6.3);
       });
 
-      doc.save(`Shipping_Batch_Labels_Slips_${Date.now()}.pdf`);
+      doc.save(`Packing_Slips_Letter_ColorLaser_${Date.now()}.pdf`);
     } catch (err) {
-      console.error('PDF export error:', err);
+      console.error('Packing slips PDF export error:', err);
     } finally {
       setIsExporting(false);
     }
@@ -203,27 +292,37 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({ orders, settin
             </button>
           </div>
 
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center space-x-2 flex-wrap gap-y-1">
             <button
-              onClick={handleExportPDF}
-              disabled={isExporting}
-              className="flex items-center space-x-1.5 bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 px-3.5 py-2 rounded-lg text-xs font-semibold shadow-sm transition-all cursor-pointer"
+              onClick={handlePrintServerLabels}
+              className="flex items-center space-x-1.5 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 px-3 py-1.5 rounded-lg text-xs font-bold shadow-2xs transition-all cursor-pointer"
+              title="Print/Download combined PDF labels for selected batch"
             >
-              <Download className="w-4 h-4 text-indigo-600" />
-              <span>{isExporting ? 'Exporting PDF...' : 'Download PDF Batch'}</span>
+              <Printer className="w-3.5 h-3.5 text-indigo-600" />
+              <span>Print Labels (PDF)</span>
             </button>
 
             <button
-              onClick={handlePrint}
-              className="flex items-center space-x-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-xs font-semibold shadow-sm transition-all cursor-pointer"
+              onClick={handlePrintServerPackingSlips}
+              className="flex items-center space-x-1.5 bg-slate-100 border border-slate-300 text-slate-800 hover:bg-slate-200 px-3 py-1.5 rounded-lg text-xs font-bold shadow-2xs transition-all cursor-pointer"
+              title="Print/Download combined PDF packing slips for selected batch"
             >
-              <Printer className="w-4 h-4" />
-              <span>Print Batch</span>
+              <FileText className="w-3.5 h-3.5 text-slate-600" />
+              <span>Print Packing Slips (PDF)</span>
+            </button>
+
+            <button
+              onClick={handlePrintBothServer}
+              className="flex items-center space-x-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-3.5 py-1.5 rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer"
+              title="Print both Labels and Packing Slips for selected batch"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              <span>Print Both</span>
             </button>
 
             <button
               onClick={onClose}
-              className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+              className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
@@ -270,9 +369,15 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({ orders, settin
                       <span className="font-bold text-slate-700 uppercase tracking-wider block mb-1">Shipping Details:</span>
                       <p>Carrier: <strong className="text-blue-700">{order.carrier || 'USPS'}</strong> ({order.serviceLevel || 'Priority'})</p>
                       <p className="mt-1">Tracking Number:</p>
-                      <p className="font-mono bg-white px-2 py-1 rounded border border-slate-300 font-bold text-slate-800 inline-block mt-0.5">
-                        {order.trackingNumber || '9400111202482390123'}
-                      </p>
+                      {order.trackingNumber ? (
+                        <p className="font-mono bg-white px-2 py-1 rounded border border-slate-300 font-bold text-slate-800 inline-block mt-0.5">
+                          {order.trackingNumber}
+                        </p>
+                      ) : (
+                        <span className="inline-block bg-amber-50 text-amber-800 border border-amber-300 px-2 py-0.5 rounded text-xs font-semibold mt-0.5">
+                          Not Purchased Yet (Postage Needed)
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -304,7 +409,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({ orders, settin
                   <div className="bg-blue-50/80 border border-blue-200 rounded-xl p-4 text-xs text-slate-700">
                     <div className="flex items-center space-x-1.5 font-bold text-blue-900 uppercase tracking-wide mb-1.5">
                       <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-                      <span>Important Notice & Customer Service Policy</span>
+                      <span>Important Notice &amp; Customer Service Policy</span>
                     </div>
                     <p className="leading-relaxed whitespace-pre-wrap text-slate-800">
                       {settings.packingSlipContent || 'Thank you for your business! Please keep this packing slip for your records.'}
@@ -315,6 +420,27 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({ orders, settin
 
               {/* --- 2. 4x6 SHIPPING LABEL --- */}
               {(viewMode === 'both' || viewMode === 'labels') && (() => {
+                const realLabelSrc =
+                  order.easyPostLabelUrl ||
+                  order.labelPngData ||
+                  (order.labelPngBase64 ? `data:image/png;base64,${order.labelPngBase64}` : null);
+
+                if (realLabelSrc) {
+                  return (
+                    <div className="bg-white rounded-xl p-4 shadow-xl max-w-md mx-auto border-2 border-slate-900 overflow-hidden print:shadow-none print:max-w-none print:w-[4in] print:h-[6in] print:p-0 page-break-after">
+                      <div className="text-[10px] font-bold text-slate-500 uppercase mb-2 flex justify-between items-center print:hidden">
+                        <span>Official EasyPost Postage Label - Order #{order.orderNumber}</span>
+                        <span className="font-mono text-emerald-700 font-bold">{order.trackingNumber}</span>
+                      </div>
+                      <img
+                        src={realLabelSrc}
+                        alt={`Official EasyPost Postage Label for Order #${order.orderNumber}`}
+                        className="w-full h-auto object-contain rounded border border-slate-200"
+                      />
+                    </div>
+                  );
+                }
+
                 const isIntl = order.country && order.country.trim().toUpperCase() !== 'US' && order.country.trim().toUpperCase() !== 'USA' && order.country.trim().toUpperCase() !== 'UNITED STATES';
                 const carrierName = order.carrier || 'USPS';
                 const displayCarrier = carrierName === 'UPS' ? 'UPS WORLDWIDE' : isIntl ? 'USPS INTERNATIONAL' : carrierName;
@@ -382,12 +508,23 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({ orders, settin
 
                     {/* Barcode & Tracking Block */}
                     <div className="pt-2 border-t-2 border-slate-900 text-center">
-                      <div className="bg-slate-900 text-white font-mono text-center py-4 text-sm tracking-widest font-extrabold mb-1.5 rounded">
-                        ||| | ||||| ||| |||| |||||| ||||| |||
-                      </div>
-                      <div className="text-[11px] font-mono font-bold text-slate-900">
-                        TRACKING #: {order.trackingNumber || (isIntl ? 'CP123456789US' : '9400111202482390123')}
-                      </div>
+                      {order.trackingNumber ? (
+                        <>
+                          <div className="bg-slate-900 text-white font-mono text-center py-4 text-sm tracking-widest font-extrabold mb-1.5 rounded">
+                            ||| | ||||| ||| |||| |||||| ||||| |||
+                          </div>
+                          <div className="text-[11px] font-mono font-bold text-slate-900">
+                            TRACKING #: {order.trackingNumber}
+                          </div>
+                        </>
+                      ) : (
+                        <div className="bg-amber-50 border-2 border-dashed border-amber-400 text-amber-900 font-bold p-3 text-xs rounded my-2">
+                          <div>POSTAGE NOT PURCHASED</div>
+                          <div className="text-[10px] font-normal text-amber-800 mt-0.5">
+                            Postage must be purchased before printing.
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
                 );

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShippingOrder, PackageType, CarrierType } from '../types';
+import { ShippingOrder, PackageType, CarrierType, AppSetting } from '../types';
 import { getCountryFlag } from './Dashboard';
 import { getCalculatedRatesForOrder } from './CompareRatesModal';
 import {
@@ -24,22 +24,28 @@ import {
   Save,
   ChevronRight,
   Scale,
+  Tag,
+  Download,
 } from 'lucide-react';
 
 interface OrderDetailModalProps {
   order: ShippingOrder;
   packages: PackageType[];
+  settings?: AppSetting;
   onClose: () => void;
   onSaveOrder: (orderId: string, updates: Partial<ShippingOrder>) => Promise<void>;
   onOpenCompareRatesModal?: (order: ShippingOrder) => void;
+  onPurchaseLabel?: (orderId: string, carrier?: CarrierType, serviceLevel?: string, rateCost?: number) => Promise<void>;
 }
 
 export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
   order,
   packages,
+  settings,
   onClose,
   onSaveOrder,
   onOpenCompareRatesModal,
+  onPurchaseLabel,
 }) => {
   // Address Form States
   const [recipientName, setRecipientName] = useState(order.recipientName || '');
@@ -65,11 +71,14 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
     rawCountry !== 'UNITED STATES' &&
     rawCountry !== 'UNITED STATES OF AMERICA';
 
+  const defaultCarrierSetting = settings?.defaultDomesticCarrier || 'USPS';
+  const defaultServiceSetting = settings?.defaultDomesticService || 'Priority';
+
   const [carrier, setCarrier] = useState<CarrierType>(
-    order.carrier || (isInternational ? 'UPS' : 'USPS')
+    order.carrier || (isInternational ? 'UPS' : defaultCarrierSetting)
   );
   const [serviceLevel, setServiceLevel] = useState<string>(
-    order.serviceLevel || (carrier === 'UPS' ? 'UPS Worldwide Expedited' : 'Priority Mail 2-Day')
+    order.serviceLevel || (isInternational ? 'UPS Worldwide Expedited' : defaultServiceSetting)
   );
   const [shippingCost, setShippingCost] = useState<number>(order.shippingCost || 7.85);
 
@@ -80,33 +89,43 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
   const countryFlag = getCountryFlag(country);
 
   // Live calculated rate preview
-  const calculatedRates = getCalculatedRatesForOrder({
-    ...order,
-    street1,
-    city,
-    state,
-    zip,
-    country,
-    weightOz,
-    boxId,
-  });
+  const calculatedRates = getCalculatedRatesForOrder(
+    {
+      ...order,
+      street1,
+      city,
+      state,
+      zip,
+      country,
+      weightOz,
+      boxId,
+    },
+    settings?.defaultDomesticCarrier,
+    settings?.defaultDomesticService
+  );
 
   const handleCarrierChange = (newCarrier: CarrierType) => {
     setCarrier(newCarrier);
-    if (!isInternational && newCarrier === 'UPS') {
-      // Rule: US domestic is locked to USPS
-      setCarrier('USPS');
+    if (!isInternational && newCarrier === defaultCarrierSetting) {
+      setServiceLevel(defaultServiceSetting);
+      const match = calculatedRates.find((r) => r.carrier === newCarrier && r.isRecommended);
+      if (match) setShippingCost(match.rate);
       return;
     }
     if (newCarrier === 'USPS') {
       const defaultService = isInternational ? 'Priority Mail International' : 'Priority Mail 2-Day';
       setServiceLevel(defaultService);
-      const match = calculatedRates.find((r) => r.carrier === 'USPS' && r.serviceLevel.includes('Priority'));
+      const match = calculatedRates.find((r) => r.carrier === 'USPS');
       if (match) setShippingCost(match.rate);
     } else if (newCarrier === 'UPS') {
-      const defaultService = 'UPS Worldwide Expedited';
+      const defaultService = isInternational ? 'UPS Worldwide Expedited' : 'UPS Ground';
       setServiceLevel(defaultService);
       const match = calculatedRates.find((r) => r.carrier === 'UPS');
+      if (match) setShippingCost(match.rate);
+    } else if (newCarrier === 'FedEx') {
+      const defaultService = 'FedEx Ground';
+      setServiceLevel(defaultService);
+      const match = calculatedRates.find((r) => r.carrier === 'FedEx');
       if (match) setShippingCost(match.rate);
     }
   };
@@ -143,6 +162,14 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
     };
 
     await onSaveOrder(order.id, updates);
+    setSaving(false);
+    onClose();
+  };
+
+  const handlePurchase = async () => {
+    if (!onPurchaseLabel) return;
+    setSaving(true);
+    await onPurchaseLabel(order.id, carrier, serviceLevel, shippingCost);
     setSaving(false);
     onClose();
   };
@@ -262,6 +289,21 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
         {/* TAB 1: ORDER DETAILS & ITEMS */}
         {activeTab === 'details' && (
           <div className="space-y-4">
+            {((order.validationErrors && order.validationErrors.length > 0) || weightOz <= 0) && (
+              <div className="bg-rose-50 border border-rose-200 rounded-xl p-3.5 text-xs text-rose-900 space-y-1">
+                <div className="font-bold flex items-center space-x-1.5 text-rose-700">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>Order Issue Flagged — Requires Attention:</span>
+                </div>
+                <ul className="list-disc list-inside space-y-1 text-rose-800 text-[11px] font-medium pl-1">
+                  {weightOz <= 0 && <li>Total Weight is currently set to 0 oz — Please update to a valid weight.</li>}
+                  {order.validationErrors?.map((err, i) => (
+                    <li key={i}>{err}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600 flex items-center space-x-1.5">
                 <ShoppingBag className="w-4 h-4 text-indigo-600" />
@@ -279,13 +321,29 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-slate-800">
-                    {order.items.map((item) => (
-                      <tr key={item.id}>
+                    {order.items.map((item, index) => (
+                      <tr key={item.id || item.sku || `item-${index}`}>
                         <td className="py-2.5 px-3 font-mono font-bold text-slate-900">{item.sku}</td>
-                        <td className="py-2.5 px-3 font-medium">{item.description}</td>
+                        <td className="py-2.5 px-3 font-medium">
+                          <div className="text-slate-900 font-semibold">{item.name || (item as any).description || 'Item'}</div>
+                          {(item.itemType || item.color) && (
+                            <div className="text-[10px] text-slate-500 font-normal space-x-2 mt-0.5">
+                              {item.itemType && (
+                                <span className="bg-slate-100 border border-slate-200 text-slate-700 px-1.5 py-0.2 rounded">
+                                  Type: <strong className="text-slate-900">{item.itemType}</strong>
+                                </span>
+                              )}
+                              {item.color && (
+                                <span className="bg-slate-100 border border-slate-200 text-slate-700 px-1.5 py-0.2 rounded">
+                                  Color: <strong className="text-slate-900">{item.color}</strong>
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </td>
                         <td className="py-2.5 px-3 text-center font-bold">{item.quantity}</td>
                         <td className="py-2.5 px-3 text-right font-bold text-slate-900">
-                          ${(item.unitPrice * item.quantity).toFixed(2)}
+                          ${((item.price || (item as any).unitPrice || 0) * item.quantity).toFixed(2)}
                         </td>
                       </tr>
                     ))}
@@ -619,7 +677,7 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                 <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-900 flex items-center space-x-2">
                   <Info className="w-4 h-4 text-blue-600 shrink-0" />
                   <span>
-                    <strong>Domestic US Rule:</strong> US domestic orders are assigned to <strong>USPS</strong> per your business policy.
+                    <strong>Domestic Order Default:</strong> Configured to default to <strong>{settings?.defaultDomesticCarrier || 'USPS'}</strong> ({settings?.defaultDomesticService || 'Priority'}). You can override the carrier below.
                   </span>
                 </div>
               ) : (
@@ -632,7 +690,7 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
               )}
 
               {/* Carrier Choice Toggle Buttons */}
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
                 <button
                   type="button"
                   onClick={() => handleCarrierChange('USPS')}
@@ -644,31 +702,46 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                 >
                   <div className="font-black text-sm flex items-center space-x-2">
                     <span className="bg-blue-900 text-white text-xs px-1.5 py-0.5 rounded">USPS</span>
-                    <span>United States Postal Service</span>
+                    <span>Postal</span>
                   </div>
                   <div className="text-[11px] text-slate-500 mt-1">
-                    Ideal for standard domestic priority and postal delivery
+                    Standard domestic priority &amp; ground
                   </div>
                 </button>
 
                 <button
                   type="button"
                   onClick={() => handleCarrierChange('UPS')}
-                  disabled={!isInternational}
-                  className={`p-3 rounded-xl border-2 text-left transition-all ${
-                    !isInternational
-                      ? 'bg-slate-100 border-slate-200 text-slate-400 opacity-60 cursor-not-allowed'
-                      : carrier === 'UPS'
-                      ? 'bg-amber-50 border-amber-600 text-amber-900 shadow-sm cursor-pointer'
-                      : 'bg-white border-slate-200 hover:border-slate-300 text-slate-700 cursor-pointer'
+                  className={`p-3 rounded-xl border-2 text-left transition-all cursor-pointer ${
+                    carrier === 'UPS'
+                      ? 'bg-amber-50 border-amber-600 text-amber-900 shadow-sm'
+                      : 'bg-white border-slate-200 hover:border-slate-300 text-slate-700'
                   }`}
                 >
                   <div className="font-black text-sm flex items-center space-x-2">
                     <span className="bg-amber-800 text-amber-200 text-xs px-1.5 py-0.5 rounded">UPS</span>
-                    <span>UPS Express &amp; Expedited</span>
+                    <span>UPS Ground &amp; Express</span>
                   </div>
                   <div className="text-[11px] text-slate-500 mt-1">
-                    {!isInternational ? 'Disabled for US domestic orders' : 'Fast international door-to-door courier'}
+                    Reliable ground &amp; international courier
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleCarrierChange('FedEx')}
+                  className={`p-3 rounded-xl border-2 text-left transition-all cursor-pointer ${
+                    carrier === 'FedEx'
+                      ? 'bg-purple-50 border-purple-600 text-purple-900 shadow-sm'
+                      : 'bg-white border-slate-200 hover:border-slate-300 text-slate-700'
+                  }`}
+                >
+                  <div className="font-black text-sm flex items-center space-x-2">
+                    <span className="bg-purple-900 text-white text-xs px-1.5 py-0.5 rounded">FedEx</span>
+                    <span>FedEx Ground &amp; Express</span>
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    Fast commercial courier services
                   </div>
                 </button>
               </div>
@@ -685,7 +758,7 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                       const isSelected = serviceLevel === r.serviceLevel;
                       return (
                         <div
-                          key={idx}
+                          key={`${r.carrier}-${r.serviceLevel}-${idx}`}
                           onClick={() => {
                             if (!r.disabled) {
                               setServiceLevel(r.serviceLevel);
@@ -719,7 +792,7 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
         )}
 
         {/* Modal Actions Footer */}
-        <div className="flex items-center justify-between pt-3 border-t border-slate-100">
+        <div className="flex items-center justify-between pt-3 border-t border-slate-100 flex-wrap gap-2">
           <button
             onClick={onClose}
             className="px-4 py-2 rounded-lg text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer"
@@ -727,14 +800,42 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
             Cancel
           </button>
 
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs px-6 py-2.5 rounded-lg shadow-sm flex items-center space-x-2 transition-all cursor-pointer disabled:opacity-50"
-          >
-            <Save className="w-4 h-4" />
-            <span>{saving ? 'Saving Order...' : 'Save Order Changes'}</span>
-          </button>
+          <div className="flex items-center space-x-2">
+            {(order.status === 'shipped' || order.labelUrl) && (
+              <a
+                href={`/api/orders/${order.id}/label.pdf`}
+                download={`EasyPost_Label_${order.orderNumber}.pdf`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 font-bold text-xs px-4 py-2.5 rounded-lg flex items-center space-x-1.5 transition-all cursor-pointer"
+                title="Download thermal label PDF stored in database"
+              >
+                <Download className="w-4 h-4 text-indigo-600" />
+                <span>Download Label PDF</span>
+              </a>
+            )}
+
+            {order.status !== 'shipped' && onPurchaseLabel && (
+              <button
+                onClick={handlePurchase}
+                disabled={saving || order.status === 'address_error' || weightOz <= 0}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-5 py-2.5 rounded-lg shadow-sm flex items-center space-x-2 transition-all cursor-pointer disabled:opacity-50"
+                title="Purchase shipping label from EasyPost and save label PDF to database"
+              >
+                <Tag className="w-4 h-4" />
+                <span>{saving ? 'Purchasing...' : 'Purchase Label (EasyPost)'}</span>
+              </button>
+            )}
+
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs px-5 py-2.5 rounded-lg shadow-sm flex items-center space-x-2 transition-all cursor-pointer disabled:opacity-50"
+            >
+              <Save className="w-4 h-4" />
+              <span>{saving ? 'Saving...' : 'Save Changes'}</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

@@ -35,7 +35,6 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
   const [manifestDate, setManifestDate] = useState<string>(new Date().toISOString().slice(0, 10));
   const [historyList, setHistoryList] = useState<ScanFormType[]>([]);
   const [activeScanForm, setActiveScanForm] = useState<ScanFormType | null>(null);
-  const [viewMode, setViewMode] = useState<'pdf' | 'html'>('pdf');
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copiedBarcode, setCopiedBarcode] = useState<boolean>(false);
@@ -57,11 +56,31 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
     fetchHistory();
   }, []);
 
-  // Filter shipped orders eligible for today / chosen manifest date
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayLocal = new Date().toLocaleDateString('en-CA');
+
+  const isMatchingDate = (shippingDate?: string, targetDate?: string) => {
+    if (!targetDate) return true;
+    if (!shippingDate) {
+      return targetDate === todayIso || targetDate === todayLocal;
+    }
+    if (shippingDate.startsWith(targetDate)) return true;
+    try {
+      const d = new Date(shippingDate);
+      if (!isNaN(d.getTime())) {
+        const localD = d.toLocaleDateString('en-CA');
+        const isoD = d.toISOString().slice(0, 10);
+        if (localD === targetDate || isoD === targetDate) return true;
+      }
+    } catch (e) {}
+    return false;
+  };
+
+  // Filter shipped orders eligible for today / chosen manifest date (must have an EasyPost shipment ID)
   const eligibleOrders = shippedOrders.filter((o) => {
     if (o.status !== 'shipped') return false;
-    if (!manifestDate) return true;
-    return o.shippingDate ? o.shippingDate.startsWith(manifestDate) : true;
+    if (!o.easypostShipmentId) return false;
+    return isMatchingDate(o.shippingDate, manifestDate);
   });
 
   const handleGenerateScanForm = async () => {
@@ -83,12 +102,12 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
         return;
       }
 
-      setActiveScanForm(data.scanForm);
-      setViewMode('pdf');
       if (onScanFormCreated) {
         onScanFormCreated(data.scanForm);
       }
-      fetchHistory();
+      await fetchHistory();
+      setActiveScanForm(null);
+      setActiveTab('history');
     } catch (err: any) {
       setErrorMsg('Network error connecting to EasyPost SCAN Form service.');
     } finally {
@@ -251,26 +270,14 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  <div className="bg-white border border-slate-300 rounded-lg p-0.5 flex items-center text-xs shadow-xs">
-                    <button
-                      onClick={() => setViewMode('pdf')}
-                      className={`px-3 py-1 rounded-md font-semibold flex items-center space-x-1.5 transition-all cursor-pointer ${
-                        viewMode === 'pdf' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      <FileText className="w-3.5 h-3.5" />
-                      <span>EasyPost PDF</span>
-                    </button>
-                    <button
-                      onClick={() => setViewMode('html')}
-                      className={`px-3 py-1 rounded-md font-semibold flex items-center space-x-1.5 transition-all cursor-pointer ${
-                        viewMode === 'html' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      <Eye className="w-3.5 h-3.5" />
-                      <span>Form 5630 View</span>
-                    </button>
-                  </div>
+                  <button
+                    onClick={handlePrint}
+                    className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold flex items-center space-x-1.5 shadow-sm transition-all cursor-pointer"
+                    title="Print the official Form 5630 SCAN Form"
+                  >
+                    <Printer className="w-4 h-4" />
+                    <span>Print Form</span>
+                  </button>
 
                   <button
                     onClick={() => handleDownloadPdf(activeScanForm)}
@@ -283,11 +290,11 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
 
                   <button
                     onClick={() => handleOpenPdfNewTab(activeScanForm)}
-                    className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold flex items-center space-x-1.5 shadow-sm transition-all cursor-pointer"
-                    title="Open EasyPost PDF in a new window to print"
+                    className="px-3.5 py-1.5 bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 rounded-lg text-xs font-semibold flex items-center space-x-1.5 cursor-pointer"
+                    title="Open EasyPost PDF in a new window"
                   >
-                    <ExternalLink className="w-4 h-4" />
-                    <span>Open / Print PDF</span>
+                    <ExternalLink className="w-4 h-4 text-slate-500" />
+                    <span>Open PDF</span>
                   </button>
 
                   <button
@@ -307,46 +314,11 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
                 </div>
               </div>
 
-              {/* PDF VIEWER MODE */}
-              {viewMode === 'pdf' ? (
-                <div className="bg-white border border-slate-300 rounded-xl p-3 shadow-sm space-y-3">
-                  <div className="flex flex-wrap items-center justify-between bg-slate-100 p-2.5 rounded-lg text-xs gap-2">
-                    <div className="flex items-center space-x-2 text-slate-800 font-semibold">
-                      <FileText className="w-4 h-4 text-indigo-600" />
-                      <span>EasyPost SCAN Form PDF Document ({activeScanForm.id}.pdf)</span>
-                    </div>
-                    <div className="flex items-center space-x-2">
-                      <button
-                        onClick={() => handleDownloadPdf(activeScanForm)}
-                        className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded text-xs flex items-center space-x-1 shadow-xs cursor-pointer"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        <span>Save PDF File</span>
-                      </button>
-                      <button
-                        onClick={() => handleOpenPdfNewTab(activeScanForm)}
-                        className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded text-xs flex items-center space-x-1 shadow-xs cursor-pointer"
-                      >
-                        <Printer className="w-3.5 h-3.5" />
-                        <span>Print in New Tab</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="relative rounded-lg overflow-hidden border border-slate-200 bg-slate-100 min-h-[580px]">
-                    <iframe
-                      src={`/api/scan-forms/${activeScanForm.id}/pdf`}
-                      className="w-full h-[620px] border-0 rounded-lg shadow-inner bg-white"
-                      title={`EasyPost SCAN Form PDF - ${activeScanForm.id}`}
-                    />
-                  </div>
-                </div>
-              ) : (
-                /* OFFICIAL USPS FORM 5630 PRINTABLE LAYOUT */
-                <div
-                  id="usps-form-5630"
-                  className="bg-white border-2 border-slate-900 p-6 sm:p-8 rounded-xl shadow-sm text-slate-900 font-sans space-y-6 max-w-3xl mx-auto"
-                >
+              {/* OFFICIAL USPS FORM 5630 PRINTABLE LAYOUT */}
+              <div
+                id="usps-form-5630"
+                className="bg-white border-2 border-slate-900 p-6 sm:p-8 rounded-xl shadow-sm text-slate-900 font-sans space-y-6 max-w-3xl mx-auto"
+              >
                   {/* Official USPS Header Block */}
                   <div className="border-b-2 border-slate-900 pb-4 flex items-start justify-between">
                     <div className="space-y-1">
@@ -504,7 +476,6 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
                   </p>
                 </div>
               </div>
-            )}
             </div>
           ) : activeTab === 'create' ? (
             /* VIEW MODE 2: CREATE SCAN FORM GENERATOR */
@@ -566,9 +537,9 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
                 ) : (
                   <div className="text-center py-8 bg-slate-50 rounded-xl border border-dashed border-slate-300 space-y-2">
                     <AlertCircle className="w-8 h-8 text-slate-400 mx-auto" />
-                    <p className="text-xs font-semibold text-slate-700">No shipped packages found for {manifestDate}</p>
+                    <p className="text-xs font-semibold text-slate-700">No shipped packages with EasyPost Shipment IDs found for {manifestDate}</p>
                     <p className="text-[11px] text-slate-500 max-w-md mx-auto">
-                      Generate shipping labels on the Dashboard first. Once packages are in "Shipped" status, they will automatically populate here to generate your end-of-day EasyPost SCAN Form!
+                      Generate shipping labels via EasyPost on the Dashboard first. Once packages are shipped with EasyPost shipment IDs, they will automatically populate here to generate your end-of-day SCAN Form!
                     </p>
                   </div>
                 )}
@@ -639,10 +610,7 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
                             <span>Print PDF</span>
                           </button>
                           <button
-                            onClick={() => {
-                              setActiveScanForm(sf);
-                              setViewMode('pdf');
-                            }}
+                            onClick={() => setActiveScanForm(sf)}
                             className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold flex items-center space-x-1 cursor-pointer"
                           >
                             <Eye className="w-3.5 h-3.5" />
