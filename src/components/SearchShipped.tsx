@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShippingOrder, AppSetting } from '../types';
+import { ShippingOrder, AppSetting, formatOrderId } from '../types';
 import { getCountryFlag } from './Dashboard';
 import {
   Search,
@@ -161,7 +161,7 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
                           className="text-indigo-600 hover:text-indigo-800 font-bold hover:underline cursor-pointer text-left"
                           title="Click to view order details & settings"
                         >
-                          <span>#{order.orderNumber}</span>
+                          <span title={`Full Order ID: ${order.orderNumber}`}>#{formatOrderId(order.orderNumber)}</span>
                         </button>
                         {order.isReshipment && (
                           <span className="bg-amber-100 text-amber-800 text-[9px] px-1.5 py-0.2 rounded font-bold uppercase">
@@ -177,24 +177,26 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
 
                     {/* Recipient Address */}
                     <td className="py-3 px-3 font-medium text-slate-900">
-                      <div className="flex items-center space-x-1.5 flex-wrap gap-y-0.5">
+                      <div className="text-xs font-bold text-slate-900 truncate max-w-[220px]" title={order.company ? `${order.recipientName} (${order.company})` : order.recipientName}>
                         <span>{order.recipientName}</span>
-                        {order.company && <span className="text-slate-500 font-normal">({order.company})</span>}
+                        {order.company && <span className="text-slate-400 font-normal text-[11px] ml-1">({order.company})</span>}
+                      </div>
+                      <div className="flex items-center space-x-1.5 text-xs mt-0.5">
                         {(() => {
                           const countryInfo = getCountryFlag(order.country);
                           if (!countryInfo) return null;
                           return (
                             <span
-                              className="inline-flex items-center space-x-1 bg-amber-100 text-amber-900 border border-amber-300 px-1.5 py-0.2 rounded text-[10px] font-bold"
-                              title={`Country: ${order.country}`}
+                              className="inline-flex items-center justify-center shrink-0"
+                              title={`Country: ${order.country || countryInfo.label}`}
                             >
-                              <span className="text-xs">{countryInfo.flag}</span>
-                              <span className="uppercase text-[9px]">{order.country || countryInfo.label}</span>
+                              {countryInfo.flag}
                             </span>
                           );
                         })()}
+                        <span className="font-semibold text-slate-600 text-[11px]">{order.marketplace || 'Etsy'}</span>
                       </div>
-                      <div className="text-slate-500 text-[10px]">
+                      <div className="text-slate-500 text-[10px] mt-0.5">
                         {order.street1}, {order.city}, {order.state} {order.zip}
                       </div>
                     </td>

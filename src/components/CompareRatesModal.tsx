@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShippingOrder, PackageType, CarrierType, AppSetting } from '../types';
+import { ShippingOrder, PackageType, CarrierType, AppSetting, formatOrderId } from '../types';
 import { getCountryFlag } from './Dashboard';
 import {
   X,
@@ -318,7 +318,7 @@ export const CompareRatesModal: React.FC<CompareRatesModalProps> = ({
             <div className="flex items-center space-x-2">
               <h2 className="text-lg font-extrabold text-slate-900">Carrier Rate Comparison</h2>
               <span className="bg-slate-100 text-slate-700 font-mono text-xs font-bold px-2 py-0.5 rounded border border-slate-200">
-                #{order.orderNumber}
+                #{formatOrderId(order.orderNumber)}
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
@@ -334,9 +334,8 @@ export const CompareRatesModal: React.FC<CompareRatesModalProps> = ({
             <strong className="text-slate-900">{order.recipientName}</strong> &bull; {order.city},{' '}
             {order.state} {order.zip}{' '}
             {countryFlag ? (
-              <span className="inline-flex items-center space-x-1 font-bold text-slate-900 bg-white border border-slate-200 px-1.5 py-0.5 rounded ml-1">
+              <span className="inline-flex items-center justify-center font-bold text-slate-900 ml-1 text-sm shrink-0" title={`Country: ${order.country}`}>
                 <span>{countryFlag.flag}</span>
-                <span>{order.country}</span>
               </span>
             ) : (
               <span className="font-bold text-slate-800">({order.country || 'US'})</span>

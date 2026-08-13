@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ShippingOrder, AppSetting, ScanFormType } from '../types';
+import { ShippingOrder, AppSetting, ScanFormType, formatOrderId } from '../types';
 import {
   FileText,
   Printer,
@@ -516,7 +516,7 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
                       <tbody className="divide-y divide-slate-100 font-medium">
                         {eligibleOrders.map((o) => (
                           <tr key={o.id} className="hover:bg-slate-50">
-                            <td className="py-2.5 px-3 font-bold text-indigo-600 font-mono">{o.orderNumber}</td>
+                            <td className="py-2.5 px-3 font-bold text-indigo-600 font-mono" title={`Full Order ID: ${o.orderNumber}`}>{formatOrderId(o.orderNumber)}</td>
                             <td className="py-2.5 px-3 text-slate-900">{o.recipientName}</td>
                             <td className="py-2.5 px-3">
                               <span className="inline-flex items-center space-x-1 bg-blue-50 text-blue-800 border border-blue-200 px-2 py-0.5 rounded font-bold text-[11px]">

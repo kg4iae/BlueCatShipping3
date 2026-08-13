@@ -1,3 +1,9 @@
+export function formatOrderId(id: string | undefined | null): string {
+  if (!id) return '';
+  const str = String(id).trim();
+  return str.length > 10 ? str.slice(-10) : str;
+}
+
 export type OrderStatus = 'pending_validation' | 'address_error' | 'ready_to_ship' | 'shipped' | 'cancelled';
 
 export type CarrierType = 'USPS' | 'FedEx' | 'UPS' | 'DHL';
@@ -52,6 +58,7 @@ export interface ShippingOrder {
   isReshipment?: boolean;
   reshippedFromOrderNumber?: string;
   reshipReason?: string;
+  marketplace?: string;
   createdAt?: string;
   updatedAt?: string;
 }

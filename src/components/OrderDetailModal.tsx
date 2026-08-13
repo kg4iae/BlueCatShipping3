@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShippingOrder, PackageType, CarrierType, AppSetting } from '../types';
+import { ShippingOrder, PackageType, CarrierType, AppSetting, formatOrderId } from '../types';
 import { getCountryFlag } from './Dashboard';
 import { getCalculatedRatesForOrder } from './CompareRatesModal';
 import {
@@ -197,7 +197,7 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
 
           <div>
             <div className="flex items-center space-x-2 flex-wrap gap-y-1">
-              <h2 className="text-xl font-extrabold text-slate-900">Order #{order.orderNumber}</h2>
+              <h2 className="text-xl font-extrabold text-slate-900">Order #{formatOrderId(order.orderNumber)}</h2>
 
               {order.status === 'ready_to_ship' && (
                 <span className="bg-emerald-100 text-emerald-800 border border-emerald-300 px-2.5 py-0.5 rounded-full text-xs font-bold flex items-center space-x-1">
@@ -307,41 +307,27 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-600 flex items-center space-x-1.5">
                 <ShoppingBag className="w-4 h-4 text-indigo-600" />
-                <span>Line Items in Order #{order.orderNumber}</span>
+                <span>Line Items in Order #{formatOrderId(order.orderNumber)}</span>
               </h3>
 
               <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
                 <table className="w-full text-left border-collapse text-xs">
                   <thead className="bg-slate-100 text-slate-600 uppercase text-[10px] font-bold border-b border-slate-200">
                     <tr>
-                      <th className="py-2.5 px-3">SKU</th>
-                      <th className="py-2.5 px-3">Item Description</th>
                       <th className="py-2.5 px-3 text-center">Qty</th>
+                      <th className="py-2.5 px-3">Item Name</th>
+                      <th className="py-2.5 px-3">Type</th>
+                      <th className="py-2.5 px-3">Color</th>
                       <th className="py-2.5 px-3 text-right">Price</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-slate-800">
                     {order.items.map((item, index) => (
-                      <tr key={item.id || item.sku || `item-${index}`}>
-                        <td className="py-2.5 px-3 font-mono font-bold text-slate-900">{item.sku}</td>
-                        <td className="py-2.5 px-3 font-medium">
-                          <div className="text-slate-900 font-semibold">{item.name || (item as any).description || 'Item'}</div>
-                          {(item.itemType || item.color) && (
-                            <div className="text-[10px] text-slate-500 font-normal space-x-2 mt-0.5">
-                              {item.itemType && (
-                                <span className="bg-slate-100 border border-slate-200 text-slate-700 px-1.5 py-0.2 rounded">
-                                  Type: <strong className="text-slate-900">{item.itemType}</strong>
-                                </span>
-                              )}
-                              {item.color && (
-                                <span className="bg-slate-100 border border-slate-200 text-slate-700 px-1.5 py-0.2 rounded">
-                                  Color: <strong className="text-slate-900">{item.color}</strong>
-                                </span>
-                              )}
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-2.5 px-3 text-center font-bold">{item.quantity}</td>
+                      <tr key={item.id || `item-${index}`}>
+                        <td className="py-2.5 px-3 text-center font-bold text-slate-900 bg-slate-50/50">{item.quantity}</td>
+                        <td className="py-2.5 px-3 font-semibold text-slate-900">{item.name || (item as any).description || 'Item'}</td>
+                        <td className="py-2.5 px-3 text-slate-600 font-medium">{item.itemType || '—'}</td>
+                        <td className="py-2.5 px-3 text-slate-600 font-medium">{item.color || '—'}</td>
                         <td className="py-2.5 px-3 text-right font-bold text-slate-900">
                           ${((item.price || (item as any).unitPrice || 0) * item.quantity).toFixed(2)}
                         </td>
@@ -361,9 +347,8 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                 <div className="font-extrabold text-sm text-slate-900 mt-0.5">{recipientName}</div>
                 <div className="text-xs text-slate-600 truncate">{city}, {state} {zip}</div>
                 {countryFlag && (
-                  <div className="text-[10px] font-bold text-indigo-900 mt-1 flex items-center space-x-1">
-                    <span>{countryFlag.flag}</span>
-                    <span>{country}</span>
+                  <div className="text-xs font-bold text-indigo-900 mt-1 flex items-center space-x-1" title={`Country: ${country}`}>
+                    <span className="text-sm">{countryFlag.flag}</span>
                   </div>
                 )}
               </div>

@@ -193,14 +193,14 @@ export const ManualOrderModal: React.FC<ManualOrderModalProps> = ({ packages, on
                   onChange={(e) => setCountry(e.target.value.toUpperCase())}
                   className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 text-xs text-slate-800 font-semibold focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none cursor-pointer col-span-1"
                 >
-                  <option value="US">🇺🇸 US</option>
-                  <option value="CA">🇨🇦 CA (Canada)</option>
-                  <option value="GB">🇬🇧 GB (UK)</option>
-                  <option value="AU">🇦🇺 AU (Australia)</option>
-                  <option value="MX">🇲🇽 MX (Mexico)</option>
-                  <option value="DE">🇩🇪 DE (Germany)</option>
-                  <option value="FR">🇫🇷 FR (France)</option>
-                  <option value="JP">🇯🇵 JP (Japan)</option>
+                  <option value="US">United States (US)</option>
+                  <option value="CA">Canada (CA)</option>
+                  <option value="GB">United Kingdom (GB / UK)</option>
+                  <option value="AU">Australia (AU)</option>
+                  <option value="MX">Mexico (MX)</option>
+                  <option value="DE">Germany (DE)</option>
+                  <option value="FR">France (FR)</option>
+                  <option value="JP">Japan (JP)</option>
                 </select>
               </div>
 

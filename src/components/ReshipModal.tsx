@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShippingOrder } from '../types';
+import { ShippingOrder, formatOrderId } from '../types';
 import { RotateCcw, X, AlertCircle, ArrowRight, Package, Truck, CheckCircle2 } from 'lucide-react';
 
 interface ReshipModalProps {
@@ -26,7 +26,7 @@ export const ReshipModal: React.FC<ReshipModalProps> = ({ order, onClose, onConf
         <div className="flex items-center justify-between pb-4 border-b border-slate-200">
           <div className="flex items-center space-x-2 text-amber-600">
             <RotateCcw className="w-5 h-5" />
-            <h3 className="text-lg font-bold text-slate-900">Re-Ship Order: #{order.orderNumber}</h3>
+            <h3 className="text-lg font-bold text-slate-900">Re-Ship Order: #{formatOrderId(order.orderNumber)}</h3>
           </div>
           <button
             onClick={onClose}
@@ -38,7 +38,7 @@ export const ReshipModal: React.FC<ReshipModalProps> = ({ order, onClose, onConf
 
         <p className="text-xs text-slate-500 mt-3">
           This action will clone recipient address and package settings into a new replacement shipping record (e.g.{' '}
-          <code className="text-amber-700 bg-amber-50 px-1 py-0.5 rounded border border-amber-200 font-mono">{order.orderNumber}-RS</code>) in the active queue.
+          <code className="text-amber-700 bg-amber-50 px-1 py-0.5 rounded border border-amber-200 font-mono">{formatOrderId(order.orderNumber)}-RS</code>) in the active queue.
         </p>
 
         {/* Original Shipment Card */}

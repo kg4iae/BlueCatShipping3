@@ -412,7 +412,10 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
     req.input('phone', sql.NVarChar(sql.MAX), order.phone || '');
     req.input('email', sql.NVarChar(sql.MAX), order.email || '');
     req.input('createdAt', sql.DateTime2(7), new Date(order.orderDate));
-    req.input('OrderDetails', sql.NVarChar(sql.MAX), JSON.stringify(order.items || []));
+    const orderDetailsString = (order.items && order.items.length > 0)
+      ? order.items.map(i => `${i.quantity}, ${i.name}, ${i.itemType || ''}, ${i.color || ''}`).join(' | ')
+      : null;
+    req.input('OrderDetails', sql.NVarChar(sql.MAX), orderDetailsString);
     req.input('receiptID', sql.NVarChar(sql.MAX), order.orderNumber);
     req.input(
       'shippingMethod',
@@ -502,14 +505,14 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
 }
 
 // Robust parser for OrderDetails string
-// Format: Item Name, Item Type, Color, Quantity
+// Format: Quantity, Item Name, Item Type, Color
 // Each row delimited with |
-// Blank Item Type appears as ",," (e.g., "Item Name,, Color, 2")
+// Blank Item Type appears as ",," (e.g., "1, Item Name,, Color")
 // Returns parsed items and flags parse issues
 function parseOrderDetailsString(rawDetails: string | null | undefined): { items: OrderItem[]; parseError?: string } {
   if (!rawDetails || typeof rawDetails !== 'string' || !rawDetails.trim()) {
     return {
-      items: [{ id: 'item-1', sku: 'SKU-STD', name: 'Standard Order Item', quantity: 1, price: 0, weightOz: 4 }],
+      items: [{ id: 'item-1', sku: 'ITEM-1', name: 'Standard Order Item', quantity: 1, price: 0, weightOz: 4 }],
       parseError: 'OrderDetails column is empty or missing.',
     };
   }
@@ -524,7 +527,7 @@ function parseOrderDetailsString(rawDetails: string | null | undefined): { items
         return {
           items: parsed.map((item: any, idx: number) => ({
             id: item.id || `item-${idx + 1}`,
-            sku: item.sku || `SKU-${idx + 1}`,
+            sku: item.sku || `ITEM-${idx + 1}`,
             name: item.name || item.description || 'Item',
             itemType: item.itemType || item.type || undefined,
             color: item.color || undefined,
@@ -543,7 +546,7 @@ function parseOrderDetailsString(rawDetails: string | null | undefined): { items
   const rows = str.split('|').map((r) => r.trim()).filter(Boolean);
   if (rows.length === 0) {
     return {
-      items: [{ id: 'item-1', sku: 'SKU-STD', name: str, quantity: 1, price: 0, weightOz: 4 }],
+      items: [{ id: 'item-1', sku: 'ITEM-1', name: str, quantity: 1, price: 0, weightOz: 4 }],
       parseError: 'No items found in OrderDetails string.',
     };
   }
@@ -555,47 +558,48 @@ function parseOrderDetailsString(rawDetails: string | null | undefined): { items
     const rowStr = rows[idx];
     const parts = rowStr.split(',').map((p) => p.trim());
 
-    if (parts.length < 2) {
-      parseError = `Order details format issue on row ${idx + 1}: "${rowStr}". Expected format: Item Name, Item Type, Color, Quantity`;
-      items.push({
-        id: `item-${idx + 1}`,
-        sku: `ITEM-${idx + 1}`,
-        name: rowStr,
-        quantity: 1,
-        price: 0,
-        weightOz: 4,
-      });
-      continue;
-    }
+    if (parts.length === 0) continue;
 
-    const itemName = parts[0] || `Item ${idx + 1}`;
+    let qty = 1;
+    let itemName = `Item ${idx + 1}`;
     let itemType = '';
     let color = '';
-    let qty = 1;
 
-    if (parts.length >= 4) {
-      itemType = parts[1]; // can be empty string for ",,"
-      color = parts[2];
-      const parsedQty = parseInt(parts[3], 10);
-      qty = !isNaN(parsedQty) && parsedQty > 0 ? parsedQty : 1;
-    } else if (parts.length === 3) {
-      itemType = parts[1];
-      const parsedQty = parseInt(parts[2], 10);
-      if (!isNaN(parsedQty)) {
-        qty = parsedQty;
-      } else {
-        color = parts[2];
-      }
+    // Check if parts[0] starts with a quantity number (e.g., "2" or "2x")
+    const firstNumMatch = parts[0].match(/^(\d+)/);
+    if (firstNumMatch) {
+      // Format: Quantity, Item Name, Item Type, Color
+      qty = parseInt(firstNumMatch[1], 10) || 1;
+      itemName = parts[1] || `Item ${idx + 1}`;
+      itemType = parts[2] || '';
+      color = parts[3] || '';
     } else {
-      const parsedQty = parseInt(parts[1], 10);
-      if (!isNaN(parsedQty)) {
-        qty = parsedQty;
-      } else {
+      // Fallback for legacy format: Item Name, Item Type, Color, Quantity
+      itemName = parts[0];
+      if (parts.length >= 4) {
         itemType = parts[1];
+        color = parts[2];
+        const lastNum = parseInt(parts[3], 10);
+        if (!isNaN(lastNum)) qty = lastNum;
+      } else if (parts.length === 3) {
+        itemType = parts[1];
+        const lastNum = parseInt(parts[2], 10);
+        if (!isNaN(lastNum)) {
+          qty = lastNum;
+        } else {
+          color = parts[2];
+        }
+      } else if (parts.length === 2) {
+        const lastNum = parseInt(parts[1], 10);
+        if (!isNaN(lastNum)) {
+          qty = lastNum;
+        } else {
+          itemType = parts[1];
+        }
       }
     }
 
-    const skuCode = (itemName.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 8) || 'SKU') + (color ? `-${color.toUpperCase()}` : '');
+    const skuCode = (itemName.replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 8) || 'ITEM') + (color ? `-${color.toUpperCase()}` : '');
 
     items.push({
       id: `item-${idx + 1}`,
@@ -1043,6 +1047,8 @@ const db: DatabaseSchema = {
       shippingCost: 14.35,
       shippingDate: '2026-07-15T14:30:00Z',
       labelUrl: 'https://easypost-files.s3.amazonaws.com/labels/usps_priority_sample1.pdf',
+      hasLabelData: true,
+      LabelData: true,
     },
     {
       id: 'ord_1002',
@@ -1071,6 +1077,8 @@ const db: DatabaseSchema = {
       shippingCost: 9.80,
       shippingDate: '2026-07-18T16:00:00Z',
       labelUrl: 'https://easypost-files.s3.amazonaws.com/labels/ups_ground_sample1.pdf',
+      hasLabelData: true,
+      LabelData: true,
     },
     {
       id: 'ord_1003',
@@ -2055,16 +2063,18 @@ function generatePackingSlipPdfBuffer(orders: ShippingOrder[], settings: AppSett
     doc.rect(36, tableY, 540, 24, 'F');
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(10);
-    doc.text('SKU', 50, tableY + 16);
-    doc.text('ITEM DESCRIPTION', 160, tableY + 16);
-    doc.text('QTY', 480, tableY + 16);
+    doc.text('QTY', 50, tableY + 16);
+    doc.text('ITEM NAME', 110, tableY + 16);
+    doc.text('TYPE', 360, tableY + 16);
+    doc.text('COLOR', 480, tableY + 16);
 
     let itemY = tableY + 40;
     doc.setFont('helvetica', 'normal');
     (order.items || []).forEach((item) => {
-      doc.text(item.sku || 'N/A', 50, itemY);
-      doc.text(item.name || 'Order Item', 160, itemY);
-      doc.text(String(item.quantity || 1), 485, itemY);
+      doc.text(String(item.quantity || 1), 50, itemY);
+      doc.text(item.name || 'Order Item', 110, itemY);
+      doc.text(item.itemType || '—', 360, itemY);
+      doc.text(item.color || '—', 480, itemY);
       itemY += 20;
     });
 

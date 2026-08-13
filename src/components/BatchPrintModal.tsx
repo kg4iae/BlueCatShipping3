@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShippingOrder, AppSetting } from '../types';
+import { ShippingOrder, AppSetting, formatOrderId } from '../types';
 import { jsPDF } from 'jspdf';
 import { Printer, Download, X, FileText, PackageCheck, Sparkles, Tag, ExternalLink, RefreshCw } from 'lucide-react';
 
@@ -175,7 +175,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
         doc.text('PACKING SLIP / INVOICE', 6.0, 0.75);
 
         doc.setFontSize(10);
-        doc.text(`Order #: ${order.orderNumber}`, 6.0, 1.0);
+        doc.text(`Order #: ${formatOrderId(order.orderNumber)}`, 6.0, 1.0);
         doc.text(`Ship Date: ${new Date().toLocaleDateString()}`, 6.0, 1.2);
         doc.text(`Package Box: ${order.boxName || 'Standard Package'}`, 6.0, 1.4);
 
@@ -200,22 +200,20 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
         doc.rect(0.5, y, 7.5, 0.3, 'F');
         doc.setFontSize(10);
         doc.setTextColor(15, 23, 42);
-        doc.text('SKU / ITEM CODE', 0.6, y + 0.2);
-        doc.text('DESCRIPTION / TYPE / COLOR', 2.2, y + 0.2);
-        doc.text('QTY', 6.2, y + 0.2);
+        doc.text('QTY', 0.6, y + 0.2);
+        doc.text('ITEM NAME', 1.2, y + 0.2);
+        doc.text('TYPE', 4.5, y + 0.2);
+        doc.text('COLOR', 5.8, y + 0.2);
         doc.text('WEIGHT', 7.0, y + 0.2);
 
         y += 0.4;
 
         order.items.forEach((item) => {
           doc.setFontSize(9);
-          doc.text(item.sku || 'ITEM', 0.6, y);
-          let desc = item.name;
-          if (item.itemType || item.color) {
-            desc += ` (${item.itemType ? item.itemType : ''}${item.itemType && item.color ? ' - ' : ''}${item.color ? item.color : ''})`;
-          }
-          doc.text(desc, 2.2, y);
-          doc.text(String(item.quantity), 6.3, y);
+          doc.text(String(item.quantity), 0.6, y);
+          doc.text(item.name || 'Item', 1.2, y);
+          doc.text(item.itemType || '—', 4.5, y);
+          doc.text(item.color || '—', 5.8, y);
           doc.text(`${item.weightOz || 4 * item.quantity} oz`, 7.0, y);
           y += 0.25;
         });
@@ -347,7 +345,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
                       <span className="inline-block bg-slate-900 text-white text-xs font-bold uppercase tracking-wider px-3 py-1 rounded">
                         Packing Slip
                       </span>
-                      <div className="text-sm font-bold text-slate-800 mt-2">Order #: {order.orderNumber}</div>
+                      <div className="text-sm font-bold text-slate-800 mt-2">Order #: {formatOrderId(order.orderNumber)}</div>
                       <div className="text-xs text-slate-500">Date: {new Date(order.orderDate).toLocaleDateString()}</div>
                       <div className="text-xs text-slate-600 font-medium">Box Used: {order.boxName || 'Standard Package'}</div>
                     </div>
@@ -386,18 +384,20 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
                     <table className="w-full text-xs text-left border-collapse">
                       <thead>
                         <tr className="bg-slate-100 text-slate-700 border-b border-slate-300 font-bold uppercase tracking-wider">
-                          <th className="py-2.5 px-3">SKU</th>
-                          <th className="py-2.5 px-3">Item Description</th>
                           <th className="py-2.5 px-3 text-center">Qty</th>
+                          <th className="py-2.5 px-3">Item Name</th>
+                          <th className="py-2.5 px-3">Type</th>
+                          <th className="py-2.5 px-3">Color</th>
                           <th className="py-2.5 px-3 text-right">Weight</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-200">
                         {order.items.map((item, idx) => (
                           <tr key={idx} className="hover:bg-slate-50">
-                            <td className="py-2.5 px-3 font-mono font-semibold text-slate-800">{item.sku}</td>
-                            <td className="py-2.5 px-3 text-slate-800 font-medium">{item.name}</td>
-                            <td className="py-2.5 px-3 text-center font-bold text-slate-900">{item.quantity}</td>
+                            <td className="py-2.5 px-3 text-center font-bold text-slate-900 bg-slate-50">{item.quantity}</td>
+                            <td className="py-2.5 px-3 text-slate-900 font-semibold">{item.name}</td>
+                            <td className="py-2.5 px-3 text-slate-600">{item.itemType || '—'}</td>
+                            <td className="py-2.5 px-3 text-slate-600">{item.color || '—'}</td>
                             <td className="py-2.5 px-3 text-right text-slate-600">{item.weightOz || 12} oz</td>
                           </tr>
                         ))}
@@ -429,12 +429,12 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
                   return (
                     <div className="bg-white rounded-xl p-4 shadow-xl max-w-md mx-auto border-2 border-slate-900 overflow-hidden print:shadow-none print:max-w-none print:w-[4in] print:h-[6in] print:p-0 page-break-after">
                       <div className="text-[10px] font-bold text-slate-500 uppercase mb-2 flex justify-between items-center print:hidden">
-                        <span>Official EasyPost Postage Label - Order #{order.orderNumber}</span>
+                        <span>Official EasyPost Postage Label - Order #{formatOrderId(order.orderNumber)}</span>
                         <span className="font-mono text-emerald-700 font-bold">{order.trackingNumber}</span>
                       </div>
                       <img
                         src={realLabelSrc}
-                        alt={`Official EasyPost Postage Label for Order #${order.orderNumber}`}
+                        alt={`Official EasyPost Postage Label for Order #${formatOrderId(order.orderNumber)}`}
                         className="w-full h-auto object-contain rounded border border-slate-200"
                       />
                     </div>

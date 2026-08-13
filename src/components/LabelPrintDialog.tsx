@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShippingOrder } from '../types';
+import { ShippingOrder, formatOrderId } from '../types';
 import { X, Printer, FileText, CheckCircle2, Download, ExternalLink, Package } from 'lucide-react';
 
 interface LabelPrintDialogProps {
@@ -49,7 +49,7 @@ export const LabelPrintDialog: React.FC<LabelPrintDialogProps> = ({ order, onClo
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-2 text-xs">
             <div className="flex items-center justify-between text-slate-500 pb-2 border-b border-slate-200">
               <span className="font-semibold uppercase tracking-wider text-[10px]">Order Details</span>
-              <span className="font-mono font-bold text-slate-900">Order #{order.orderNumber}</span>
+              <span className="font-mono font-bold text-slate-900">Order #{formatOrderId(order.orderNumber)}</span>
             </div>
             <div className="grid grid-cols-2 gap-3 pt-1">
               <div>
