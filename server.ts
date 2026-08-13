@@ -2026,62 +2026,87 @@ function generatePackingSlipPdfBuffer(orders: ShippingOrder[], settings: AppSett
   orders.forEach((order, index) => {
     if (index > 0) doc.addPage('letter', 'portrait');
 
-    doc.setFillColor(30, 41, 59);
-    doc.rect(36, 36, 540, 50, 'F');
-    doc.setTextColor(255, 255, 255);
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(18);
-    doc.text(settings.companyName || 'WAREHOUSE PACKING SLIP', 50, 68);
-    doc.setFontSize(10);
-    doc.setFont('helvetica', 'normal');
-    doc.text(`Order #: ${order.orderNumber}  |  Date: ${new Date(order.orderDate).toLocaleDateString()}`, 350, 68);
+    // Header box: crisp light gray fill with black border and black text
+    doc.setFillColor(245, 245, 245);
+    doc.setDrawColor(0, 0, 0);
+    doc.rect(36, 36, 540, 52, 'FD');
 
-    doc.setTextColor(15, 23, 42);
+    doc.setTextColor(0, 0, 0);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(11);
+    doc.setFontSize(16);
+    doc.text(settings.companyName || 'WAREHOUSE PACKING SLIP', 50, 68);
+
+    doc.setFontSize(12);
+    doc.setFont('helvetica', 'normal');
+    doc.text(`Order #: ${order.orderNumber}  |  Date: ${new Date(order.orderDate).toLocaleDateString()}`, 310, 68);
+
+    // Addresses Section
+    doc.setTextColor(0, 0, 0);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
     doc.text('SHIP TO:', 50, 115);
     doc.text('RETURN ADDRESS:', 330, 115);
 
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(10);
-    doc.text(order.recipientName, 50, 132);
-    let yTo = 146;
-    if (order.company) { doc.text(order.company, 50, yTo); yTo += 14; }
-    doc.text(order.street1, 50, yTo); yTo += 14;
-    if (order.street2) { doc.text(order.street2, 50, yTo); yTo += 14; }
+    doc.setFontSize(12);
+    doc.text(order.recipientName, 50, 134);
+    let yTo = 152;
+    if (order.company) { doc.text(order.company, 50, yTo); yTo += 18; }
+    doc.text(order.street1, 50, yTo); yTo += 18;
+    if (order.street2) { doc.text(order.street2, 50, yTo); yTo += 18; }
     doc.text(`${order.city}, ${order.state} ${order.zip} ${order.country || 'US'}`, 50, yTo);
 
     const ret = settings.returnAddress;
-    doc.text(ret?.name || settings.companyName || 'Fulfillment Center', 330, 132);
-    let yRet = 146;
-    if (ret?.company) { doc.text(ret.company, 330, yRet); yRet += 14; }
-    doc.text(ret?.street1 || '123 Logistics Way', 330, yRet); yRet += 14;
+    doc.text(ret?.name || settings.companyName || 'Fulfillment Center', 330, 134);
+    let yRet = 152;
+    if (ret?.company) { doc.text(ret.company, 330, yRet); yRet += 18; }
+    doc.text(ret?.street1 || '123 Logistics Way', 330, yRet); yRet += 18;
     doc.text(`${ret?.city || 'Austin'}, ${ret?.state || 'TX'} ${ret?.zip || '78701'}`, 330, yRet);
 
-    const tableY = Math.max(yTo, yRet) + 30;
-    doc.setFillColor(241, 245, 249);
-    doc.rect(36, tableY, 540, 24, 'F');
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10);
-    doc.text('QTY', 50, tableY + 16);
-    doc.text('ITEM NAME', 110, tableY + 16);
-    doc.text('TYPE', 360, tableY + 16);
-    doc.text('COLOR', 480, tableY + 16);
+    // Items Table Header
+    const tableY = Math.max(yTo, yRet) + 25;
+    doc.setFillColor(240, 240, 240);
+    doc.setDrawColor(0, 0, 0);
+    doc.rect(36, tableY, 540, 26, 'FD');
 
-    let itemY = tableY + 40;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
+    doc.setTextColor(0, 0, 0);
+    doc.text('QTY', 50, tableY + 18);
+    doc.text('ITEM NAME', 110, tableY + 18);
+    doc.text('TYPE', 360, tableY + 18);
+    doc.text('COLOR', 480, tableY + 18);
+
+    let itemY = tableY + 42;
     doc.setFont('helvetica', 'normal');
+    doc.setFontSize(12);
+    doc.setTextColor(0, 0, 0);
+
     (order.items || []).forEach((item) => {
       doc.text(String(item.quantity || 1), 50, itemY);
       doc.text(item.name || 'Order Item', 110, itemY);
       doc.text(item.itemType || '—', 360, itemY);
       doc.text(item.color || '—', 480, itemY);
-      itemY += 20;
+      itemY += 22;
     });
 
-    doc.setFont('helvetica', 'italic');
-    doc.setFontSize(9);
-    doc.setTextColor(100, 116, 139);
-    doc.text(settings.packingSlipContent || 'Thank you for your order! Please inspect items upon arrival.', 50, itemY + 40);
+    // Custom Packing Slip Notice Content
+    itemY += 25;
+    const rawNotice = settings.packingSlipContent || 'Thank you for your order! Please inspect items upon arrival.';
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(12);
+    doc.setTextColor(0, 0, 0);
+    doc.text('SPECIAL NOTICE / RETURN POLICY:', 50, itemY);
+
+    itemY += 18;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(12);
+    doc.setTextColor(0, 0, 0);
+
+    // Line/word wrap notice text to max printable width of 510 points (fits well within 540pt margin area)
+    const splitNotice = doc.splitTextToSize(rawNotice, 510);
+    doc.text(splitNotice, 50, itemY);
   });
 
   return Buffer.from(doc.output('arraybuffer'));

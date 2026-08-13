@@ -316,7 +316,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
   const handleExportPackingSlipsOnlyPDF = () => {
     setIsExporting(true);
     try {
-      // Create Letter-sized Packing Slip PDF for Color Laser Printer
+      // Create Letter-sized Packing Slip PDF for Laser/Document Printer
       const doc = new jsPDF({
         unit: 'in',
         format: 'letter',
@@ -327,75 +327,78 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
           doc.addPage();
         }
 
-        doc.setFontSize(20);
-        doc.setTextColor(30, 41, 59);
+        doc.setFontSize(16);
+        doc.setTextColor(0, 0, 0);
         doc.text(settings.companyName || 'Acme Shipping Corp', 0.5, 0.75);
 
         doc.setFontSize(14);
-        doc.setTextColor(71, 85, 105);
-        doc.text('PACKING SLIP / INVOICE', 6.0, 0.75);
+        doc.setTextColor(0, 0, 0);
+        doc.text('PACKING SLIP / INVOICE', 5.8, 0.75);
 
-        doc.setFontSize(10);
-        doc.text(`Order #: ${formatOrderId(order.orderNumber)}`, 6.0, 1.0);
-        doc.text(`Ship Date: ${new Date().toLocaleDateString()}`, 6.0, 1.2);
-        doc.text(`Package Box: ${order.boxName || 'Standard Package'}`, 6.0, 1.4);
+        doc.setFontSize(12);
+        doc.setTextColor(0, 0, 0);
+        doc.text(`Order #: ${formatOrderId(order.orderNumber)}`, 5.8, 1.0);
+        doc.text(`Ship Date: ${new Date().toLocaleDateString()}`, 5.8, 1.25);
+        doc.text(`Package Box: ${order.boxName || 'Standard Package'}`, 5.8, 1.5);
 
         // Return Address
-        doc.setFontSize(9);
+        doc.setFontSize(12);
+        doc.setTextColor(0, 0, 0);
         doc.text('FROM:', 0.5, 1.2);
-        doc.text(settings.returnAddress.name, 0.5, 1.35);
-        doc.text(settings.returnAddress.street1, 0.5, 1.5);
-        doc.text(`${settings.returnAddress.city}, ${settings.returnAddress.state} ${settings.returnAddress.zip}`, 0.5, 1.65);
+        doc.text(settings.returnAddress.name, 0.5, 1.4);
+        doc.text(settings.returnAddress.street1, 0.5, 1.6);
+        doc.text(`${settings.returnAddress.city}, ${settings.returnAddress.state} ${settings.returnAddress.zip}`, 0.5, 1.8);
 
         // Ship To Address
+        doc.setFontSize(12);
+        doc.setTextColor(0, 0, 0);
         doc.text('SHIP TO:', 3.0, 1.2);
-        doc.text(order.recipientName, 3.0, 1.35);
-        if (order.company) doc.text(order.company, 3.0, 1.5);
-        doc.text(order.street1, 3.0, 1.65);
-        if (order.street2) doc.text(order.street2, 3.0, 1.8);
-        doc.text(`${order.city}, ${order.state} ${order.zip}`, 3.0, 1.95);
+        doc.text(order.recipientName, 3.0, 1.4);
+        if (order.company) doc.text(order.company, 3.0, 1.6);
+        doc.text(order.street1, 3.0, 1.8);
+        if (order.street2) doc.text(order.street2, 3.0, 2.0);
+        doc.text(`${order.city}, ${order.state} ${order.zip}`, 3.0, 2.2);
 
         // Line Items Table Header
-        let y = 2.4;
-        doc.setFillColor(241, 245, 249);
-        doc.rect(0.5, y, 7.5, 0.3, 'F');
-        doc.setFontSize(10);
-        doc.setTextColor(15, 23, 42);
-        doc.text('QTY', 0.6, y + 0.2);
-        doc.text('ITEM NAME', 1.2, y + 0.2);
-        doc.text('TYPE', 4.5, y + 0.2);
-        doc.text('COLOR', 5.8, y + 0.2);
-        doc.text('WEIGHT', 7.0, y + 0.2);
+        let y = 2.6;
+        doc.setFillColor(240, 240, 240);
+        doc.setDrawColor(0, 0, 0);
+        doc.rect(0.5, y, 7.5, 0.35, 'FD');
 
-        y += 0.4;
+        doc.setFontSize(12);
+        doc.setTextColor(0, 0, 0);
+        doc.text('QTY', 0.6, y + 0.22);
+        doc.text('ITEM NAME', 1.2, y + 0.22);
+        doc.text('TYPE', 4.5, y + 0.22);
+        doc.text('COLOR', 5.8, y + 0.22);
+        doc.text('WEIGHT', 7.0, y + 0.22);
+
+        y += 0.5;
 
         order.items.forEach((item) => {
-          doc.setFontSize(9);
+          doc.setFontSize(12);
+          doc.setTextColor(0, 0, 0);
           doc.text(String(item.quantity), 0.6, y);
           doc.text(item.name || 'Item', 1.2, y);
           doc.text(item.itemType || '—', 4.5, y);
           doc.text(item.color || '—', 5.8, y);
           doc.text(`${item.weightOz || 4 * item.quantity} oz`, 7.0, y);
-          y += 0.25;
+          y += 0.3;
         });
 
-        // Custom Packing Slip Content Box (From DB Settings Table)
-        y += 0.4;
-        doc.setFillColor(248, 250, 252);
-        doc.setDrawColor(203, 213, 225);
-        doc.roundedRect(0.5, y, 7.5, 1.2, 0.1, 0.1, 'FD');
+        // Custom Packing Slip Content Box
+        y += 0.3;
+        doc.setFontSize(12);
+        doc.setTextColor(0, 0, 0);
+        doc.text('SPECIAL NOTICE / RETURN POLICY:', 0.5, y);
 
-        doc.setFontSize(10);
-        doc.setTextColor(30, 58, 138);
-        doc.text('IMPORTANT CUSTOMER INFORMATION & RETURN POLICY:', 0.7, y + 0.25);
-
-        doc.setFontSize(8.5);
-        doc.setTextColor(51, 65, 85);
-        const splitContent = doc.splitTextToSize(settings.packingSlipContent || 'Thank you for your order!', 7.1);
-        doc.text(splitContent, 0.7, y + 0.45);
+        y += 0.25;
+        // Word wrap notice text to max width of 7.2 inches (0.5 to 7.7 in)
+        const splitContent = doc.splitTextToSize(settings.packingSlipContent || 'Thank you for your order!', 7.2);
+        doc.text(splitContent, 0.5, y);
       });
 
-      doc.save(`Packing_Slips_Letter_ColorLaser_${Date.now()}.pdf`);
+      doc.save(`Packing_Slips_Letter_${Date.now()}.pdf`);
     } catch (err) {
       console.error('Packing slips PDF export error:', err);
     } finally {
@@ -567,27 +570,27 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
                   </div>
 
                   {/* Recipient & Address Box */}
-                  <div className="grid grid-cols-2 gap-6 bg-slate-50 p-4 rounded-lg border border-slate-200 mb-6 text-xs">
+                  <div className="grid grid-cols-2 gap-6 bg-slate-50 p-4 rounded-lg border border-slate-200 mb-6 text-[12pt] text-black">
                     <div>
-                      <span className="font-bold text-slate-700 uppercase tracking-wider block mb-1">Ship To:</span>
-                      <p className="font-bold text-slate-900 text-sm">{order.recipientName}</p>
-                      {order.company && <p className="font-medium text-slate-700">{order.company}</p>}
+                      <span className="font-bold text-black uppercase tracking-wider block mb-1">Ship To:</span>
+                      <p className="font-bold text-black text-[12pt]">{order.recipientName}</p>
+                      {order.company && <p className="font-medium text-black">{order.company}</p>}
                       <p>{order.street1}</p>
                       {order.street2 && <p>{order.street2}</p>}
                       <p>{order.city}, {order.state} {order.zip}</p>
-                      <p className="text-slate-500 mt-1">Phone: {order.phone || 'N/A'}</p>
+                      <p className="text-black mt-1">Phone: {order.phone || 'N/A'}</p>
                     </div>
 
                     <div>
-                      <span className="font-bold text-slate-700 uppercase tracking-wider block mb-1">Shipping Details:</span>
-                      <p>Carrier: <strong className="text-blue-700">{order.carrier || 'USPS'}</strong> ({order.serviceLevel || 'Priority'})</p>
+                      <span className="font-bold text-black uppercase tracking-wider block mb-1">Shipping Details:</span>
+                      <p>Carrier: <strong className="text-black font-bold">{order.carrier || 'USPS'}</strong> ({order.serviceLevel || 'Priority'})</p>
                       <p className="mt-1">Tracking Number:</p>
                       {order.trackingNumber ? (
-                        <p className="font-mono bg-white px-2 py-1 rounded border border-slate-300 font-bold text-slate-800 inline-block mt-0.5">
+                        <p className="font-mono bg-white px-2 py-1 rounded border border-slate-300 font-bold text-black inline-block mt-0.5">
                           {order.trackingNumber}
                         </p>
                       ) : (
-                        <span className="inline-block bg-amber-50 text-amber-800 border border-amber-300 px-2 py-0.5 rounded text-xs font-semibold mt-0.5">
+                        <span className="inline-block bg-slate-100 text-black border border-slate-300 px-2 py-0.5 rounded text-[10pt] font-semibold mt-0.5">
                           Not Purchased Yet (Postage Needed)
                         </span>
                       )}
@@ -596,9 +599,9 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
 
                   {/* Line Items Table */}
                   <div className="mb-6">
-                    <table className="w-full text-xs text-left border-collapse">
+                    <table className="w-full text-[12pt] text-left border-collapse text-black">
                       <thead>
-                        <tr className="bg-slate-100 text-slate-700 border-b border-slate-300 font-bold uppercase tracking-wider">
+                        <tr className="bg-slate-100 text-black border-b border-slate-300 font-bold uppercase tracking-wider">
                           <th className="py-2.5 px-3 text-center">Qty</th>
                           <th className="py-2.5 px-3">Item Name</th>
                           <th className="py-2.5 px-3">Type</th>
@@ -609,11 +612,11 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
                       <tbody className="divide-y divide-slate-200">
                         {order.items.map((item, idx) => (
                           <tr key={idx} className="hover:bg-slate-50">
-                            <td className="py-2.5 px-3 text-center font-bold text-slate-900 bg-slate-50">{item.quantity}</td>
-                            <td className="py-2.5 px-3 text-slate-900 font-semibold">{item.name}</td>
-                            <td className="py-2.5 px-3 text-slate-600">{item.itemType || '—'}</td>
-                            <td className="py-2.5 px-3 text-slate-600">{item.color || '—'}</td>
-                            <td className="py-2.5 px-3 text-right text-slate-600">{item.weightOz || 12} oz</td>
+                            <td className="py-2.5 px-3 text-center font-bold text-black bg-slate-50">{item.quantity}</td>
+                            <td className="py-2.5 px-3 text-black font-semibold">{item.name}</td>
+                            <td className="py-2.5 px-3 text-black">{item.itemType || '—'}</td>
+                            <td className="py-2.5 px-3 text-black">{item.color || '—'}</td>
+                            <td className="py-2.5 px-3 text-right text-black">{item.weightOz || 12} oz</td>
                           </tr>
                         ))}
                       </tbody>
@@ -621,12 +624,12 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
                   </div>
 
                   {/* CUSTOM PACKING SLIP CONTENT AREA (From Settings Table) */}
-                  <div className="bg-blue-50/80 border border-blue-200 rounded-xl p-4 text-xs text-slate-700">
-                    <div className="flex items-center space-x-1.5 font-bold text-blue-900 uppercase tracking-wide mb-1.5">
-                      <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+                  <div className="bg-slate-50 border border-slate-300 rounded-xl p-4 text-[12pt] text-black print:text-black">
+                    <div className="flex items-center space-x-1.5 font-bold text-black uppercase tracking-wide mb-1.5 text-[12pt]">
+                      <Sparkles className="w-4 h-4 text-black shrink-0" />
                       <span>Important Notice &amp; Customer Service Policy</span>
                     </div>
-                    <p className="leading-relaxed whitespace-pre-wrap text-slate-800">
+                    <p className="leading-relaxed whitespace-pre-wrap break-words text-black text-[12pt]">
                       {settings.packingSlipContent || 'Thank you for your business! Please keep this packing slip for your records.'}
                     </p>
                   </div>
