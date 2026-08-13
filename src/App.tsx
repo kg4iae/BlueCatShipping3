@@ -545,6 +545,7 @@ export default function App() {
       {purchasedLabelOrder && (
         <LabelPrintDialog
           order={purchasedLabelOrder}
+          settings={settings}
           onClose={() => setPurchasedLabelOrder(null)}
         />
       )}

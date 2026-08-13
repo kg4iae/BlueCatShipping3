@@ -20,7 +20,19 @@ import {
   Eye,
   Building,
   MapPin,
+  Printer,
+  Zap,
+  RefreshCw,
+  Wifi,
+  WifiOff,
+  CheckCircle2,
+  ExternalLink,
 } from 'lucide-react';
+import {
+  getQZPrinters,
+  printTestThermalLabel,
+  isQZConnected,
+} from '../lib/qzTray';
 
 interface SettingsPageProps {
   settings: AppSetting;
@@ -37,7 +49,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   onCreatePackage,
   onDeletePackage,
 }) => {
-  const [activeSection, setActiveSection] = useState<'returnAddress' | 'carrierDefaults' | 'packingslip' | 'easypost' | 'packages' | 'mssql' | 'security'>('returnAddress');
+  const [activeSection, setActiveSection] = useState<'returnAddress' | 'carrierDefaults' | 'qztray' | 'packingslip' | 'easypost' | 'packages' | 'mssql' | 'security'>('returnAddress');
 
   // Business / FROM Address Form states
   const [companyName, setCompanyName] = useState(settings.companyName || 'BlueCat Bobbins Shipping');
@@ -54,6 +66,17 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   // Carrier & Rates defaults state
   const [defaultDomesticCarrier, setDefaultDomesticCarrier] = useState<CarrierType>(settings.defaultDomesticCarrier || 'USPS');
   const [defaultDomesticService, setDefaultDomesticService] = useState<string>(settings.defaultDomesticService || 'Priority');
+
+  // QZ Tray Direct Web Printing states
+  const [qzPrinterLabel, setQzPrinterLabel] = useState<string>(settings.qzPrinterLabel || '');
+  const [qzPrinterPackingSlip, setQzPrinterPackingSlip] = useState<string>(settings.qzPrinterPackingSlip || '');
+  const [qzAutoPrintOnPurchase, setQzAutoPrintOnPurchase] = useState<boolean>(settings.qzAutoPrintOnPurchase || false);
+  const [qzSilentPrinting, setQzSilentPrinting] = useState<boolean>(settings.qzSilentPrinting || false);
+  const [qzConnected, setQzConnected] = useState<boolean>(false);
+  const [qzPrintersList, setQzPrintersList] = useState<string[]>([]);
+  const [detectingPrinters, setDetectingPrinters] = useState<boolean>(false);
+  const [qzStatusMsg, setQzStatusMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
+  const [testingQZ, setTestingQZ] = useState<boolean>(false);
 
   // Form states
   const [packingSlipContent, setPackingSlipContent] = useState(settings.packingSlipContent || '');
@@ -145,6 +168,77 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     await onUpdateSettings({
       defaultDomesticCarrier,
       defaultDomesticService,
+    });
+    setSaving(false);
+    triggerSuccess();
+  };
+
+  const handleDetectQZPrinters = async () => {
+    setDetectingPrinters(true);
+    setQzStatusMsg(null);
+    try {
+      const printers = await getQZPrinters();
+      setQzPrintersList(printers);
+      setQzConnected(true);
+      setQzStatusMsg({
+        type: 'success',
+        text: `Connected to QZ Tray! Found ${printers.length} printer(s) on your local system.`,
+      });
+      if (!qzPrinterLabel && printers.length > 0) {
+        const thermal = printers.find((p) => /zebra|rollo|dymo|thermal|tsc|bixolon/i.test(p)) || printers[0];
+        setQzPrinterLabel(thermal);
+      }
+      if (!qzPrinterPackingSlip && printers.length > 0) {
+        setQzPrinterPackingSlip(printers[0]);
+      }
+    } catch (err: any) {
+      setQzConnected(false);
+      setQzStatusMsg({
+        type: 'error',
+        text: err?.message || 'Could not connect to QZ Tray. Make sure QZ Tray software is running on your computer.',
+      });
+    } finally {
+      setDetectingPrinters(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeSection === 'qztray') {
+      handleDetectQZPrinters();
+    }
+  }, [activeSection]);
+
+  const handleTestQZPrintLabel = async () => {
+    if (!qzPrinterLabel) {
+      setQzStatusMsg({ type: 'error', text: 'Please select or enter a 4x6 Label Printer name first.' });
+      return;
+    }
+    setTestingQZ(true);
+    setQzStatusMsg(null);
+    try {
+      const res = await printTestThermalLabel(qzPrinterLabel);
+      setQzStatusMsg({
+        type: res.success ? 'success' : 'error',
+        text: res.message,
+      });
+    } catch (err: any) {
+      setQzStatusMsg({
+        type: 'error',
+        text: `Test print error: ${err?.message || 'Failed to print'}`,
+      });
+    } finally {
+      setTestingQZ(false);
+    }
+  };
+
+  const handleSaveQZSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    await onUpdateSettings({
+      qzPrinterLabel,
+      qzPrinterPackingSlip,
+      qzAutoPrintOnPurchase,
+      qzSilentPrinting,
     });
     setSaving(false);
     triggerSuccess();
@@ -304,6 +398,25 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
           >
             <Truck className="w-4 h-4" />
             <span>Domestic Carrier &amp; Rates</span>
+          </button>
+
+          <button
+            onClick={() => setActiveSection('qztray')}
+            className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+              activeSection === 'qztray'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <div className="flex items-center space-x-3">
+              <Printer className="w-4 h-4" />
+              <span>QZ Tray Hardware Printing</span>
+            </div>
+            {qzConnected ? (
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" title="QZ Tray Connected" />
+            ) : (
+              <span className="w-2 h-2 rounded-full bg-slate-300" title="QZ Tray Disconnected" />
+            )}
           </button>
 
           <button
@@ -651,6 +764,304 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   </button>
                 </div>
               </form>
+            </div>
+          )}
+
+          {/* SECTION: QZ TRAY DIRECT HARDWARE PRINTING */}
+          {activeSection === 'qztray' && (
+            <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-6">
+              <div className="border-b border-slate-100 pb-4 flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 flex items-center space-x-2">
+                    <Printer className="w-5 h-5 text-indigo-600" />
+                    <span>QZ Tray Direct Hardware Web Printing</span>
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Connect directly to thermal label printers (Zebra, Rollo, Dymo, Bixolon, TSC) and laser printers over local WebSockets without browser print dialogs.
+                  </p>
+                </div>
+
+                <div className="flex items-center space-x-2">
+                  <button
+                    type="button"
+                    onClick={handleDetectQZPrinters}
+                    disabled={detectingPrinters}
+                    className="bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold px-3.5 py-2 rounded-lg flex items-center space-x-1.5 transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 text-indigo-600 ${detectingPrinters ? 'animate-spin' : ''}`} />
+                    <span>{detectingPrinters ? 'Scanning...' : 'Detect Printers'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Status Banner & Diagnostics */}
+              <div
+                className={`p-4 rounded-xl border flex items-start space-x-3 text-xs ${
+                  qzConnected
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-950'
+                    : 'bg-amber-50 border-amber-200 text-amber-950'
+                }`}
+              >
+                {qzConnected ? (
+                  <Wifi className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                ) : (
+                  <WifiOff className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                )}
+                <div className="flex-1 space-y-2">
+                  <div className="font-bold flex items-center space-x-2">
+                    <span>QZ Tray Status: {qzConnected ? 'Connected & Active' : 'Disconnected / Not Accessible'}</span>
+                    {qzConnected && (
+                      <span className="bg-emerald-200 text-emerald-900 font-extrabold px-2 py-0.2 rounded-full text-[10px]">
+                        WebSocket Active
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] leading-relaxed">
+                    {qzConnected
+                      ? `Found ${qzPrintersList.length} local printer(s) via WebSocket connection. You can now send thermal labels and packing slips directly to your hardware.`
+                      : 'QZ Tray is running on your computer, but the browser is blocking or unable to reach its secure local WebSocket connection.'}
+                  </p>
+
+                  {!qzConnected && (
+                    <div className="pt-2 border-t border-amber-200/80 space-y-2 text-[11px]">
+                      <p className="font-bold text-amber-900">Follow these 3 quick steps to fix the connection:</p>
+
+                      {/* Diagnostic 1: iFrame Notice */}
+                      {typeof window !== 'undefined' && window.self !== window.top && (
+                        <div className="bg-amber-100/80 p-2.5 rounded-lg border border-amber-300 flex items-center justify-between text-amber-950">
+                          <span className="font-semibold">
+                            ⚠️ Embedded iFrame Detected: Web browsers block direct access to `localhost` inside embedded preview frames.
+                          </span>
+                          <a
+                            href={window.location.href}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="bg-amber-800 text-white font-bold px-3 py-1 rounded text-[10px] shrink-0 hover:bg-amber-900 transition-all ml-2"
+                          >
+                            Open in Standalone Tab ↗
+                          </a>
+                        </div>
+                      )}
+
+                      {/* Diagnostic 2: SSL Certificate Accept Buttons */}
+                      <div className="bg-white/80 p-2.5 rounded-lg border border-amber-200 space-y-1.5 text-slate-800">
+                        <p className="font-semibold">
+                          1. Trust Local SSL Certificate (Required for HTTPS apps to talk to localhost):
+                        </p>
+                        <div className="flex flex-wrap gap-2 pt-1">
+                          <a
+                            href="https://localhost:8181"
+                            target="_blank"
+                            rel="noreferrer"
+                            className="bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold px-3 py-1.5 rounded-md flex items-center space-x-1 transition-all"
+                          >
+                            <span>Trust SSL (https://localhost:8181)</span>
+                            <ExternalLink className="w-3 h-3" />
+                          </a>
+                          <a
+                            href="https://127.0.0.1:8181"
+                            target="_blank"
+                            rel="noreferrer"
+                            className="bg-slate-700 hover:bg-slate-800 text-white text-[11px] font-bold px-3 py-1.5 rounded-md flex items-center space-x-1 transition-all"
+                          >
+                            <span>Trust SSL (https://127.0.0.1:8181)</span>
+                            <ExternalLink className="w-3 h-3" />
+                          </a>
+                        </div>
+                        <p className="text-[10px] text-slate-500 italic mt-1">
+                          Clicking a button above will open QZ Tray in a new browser tab. If you see "Your connection is not private", click <strong>Advanced → Proceed to localhost (unsafe)</strong> once to trust QZ Tray's local server certificate.
+                        </p>
+                      </div>
+
+                      {/* Diagnostic 3: Desktop prompt */}
+                      <div className="bg-white/80 p-2.5 rounded-lg border border-amber-200 text-slate-800">
+                        <p className="font-semibold">
+                          2. Allow Connection in QZ Tray Desktop Prompt:
+                        </p>
+                        <p className="text-[10px] text-slate-600 mt-0.5">
+                          When QZ Tray pops up on your computer, check <em>"Remember this decision"</em> and click <strong>"Allow"</strong>.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {qzStatusMsg && (
+                <div
+                  className={`p-3.5 rounded-lg text-xs font-semibold flex items-center space-x-2 ${
+                    qzStatusMsg.type === 'success'
+                      ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                      : qzStatusMsg.type === 'error'
+                      ? 'bg-rose-100 text-rose-900 border border-rose-300'
+                      : 'bg-indigo-100 text-indigo-900 border border-indigo-300'
+                  }`}
+                >
+                  {qzStatusMsg.type === 'success' ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                  )}
+                  <span>{qzStatusMsg.text}</span>
+                </div>
+              )}
+
+              <form onSubmit={handleSaveQZSettings} className="space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                  {/* Label Printer Picker */}
+                  <div>
+                    <label className="block text-xs font-bold text-slate-800 mb-1 flex items-center space-x-1.5">
+                      <Printer className="w-4 h-4 text-indigo-600" />
+                      <span>Default 4x6 Thermal Shipping Label Printer</span>
+                    </label>
+                    {qzPrintersList.length > 0 ? (
+                      <select
+                        value={qzPrinterLabel}
+                        onChange={(e) => setQzPrinterLabel(e.target.value)}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs font-semibold text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      >
+                        <option value="">-- Select Thermal Label Printer --</option>
+                        {qzPrintersList.map((printer) => (
+                          <option key={printer} value={printer}>
+                            {printer}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={qzPrinterLabel}
+                        onChange={(e) => setQzPrinterLabel(e.target.value)}
+                        placeholder="e.g. Zebra ZD420, Rollo Printer, Dymo 4XL"
+                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs font-semibold text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      />
+                    )}
+                    <p className="text-[11px] text-slate-500 mt-1">
+                      Used for printing 4x6 thermal shipping labels (Zebra ZPL, Rollo, Dymo 4XL, Bixolon, Citizen).
+                    </p>
+                  </div>
+
+                  {/* Packing Slip Printer Picker */}
+                  <div>
+                    <label className="block text-xs font-bold text-slate-800 mb-1 flex items-center space-x-1.5">
+                      <FileText className="w-4 h-4 text-indigo-600" />
+                      <span>Default Packing Slip / Document Printer</span>
+                    </label>
+                    {qzPrintersList.length > 0 ? (
+                      <select
+                        value={qzPrinterPackingSlip}
+                        onChange={(e) => setQzPrinterPackingSlip(e.target.value)}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs font-semibold text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      >
+                        <option value="">-- Select Document Printer --</option>
+                        {qzPrintersList.map((printer) => (
+                          <option key={printer} value={printer}>
+                            {printer}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={qzPrinterPackingSlip}
+                        onChange={(e) => setQzPrinterPackingSlip(e.target.value)}
+                        placeholder="e.g. HP LaserJet, Brother HL-L2350DW"
+                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs font-semibold text-slate-800 focus:bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      />
+                    )}
+                    <p className="text-[11px] text-slate-500 mt-1">
+                      Used for standard 8.5x11 packing slip invoices and customs docs.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Print Options & Toggles */}
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                  <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Printing Preferences</h4>
+
+                  <label className="flex items-center space-x-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={qzAutoPrintOnPurchase}
+                      onChange={(e) => setQzAutoPrintOnPurchase(e.target.checked)}
+                      className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                    />
+                    <div>
+                      <span className="text-xs font-bold text-slate-900 block">Auto Direct-Print Label Upon Purchase</span>
+                      <span className="text-[11px] text-slate-500 block">
+                        Automatically send newly purchased shipping labels straight to your thermal printer as soon as EasyPost completes the order.
+                      </span>
+                    </div>
+                  </label>
+
+                  <label className="flex items-center space-x-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={qzSilentPrinting}
+                      onChange={(e) => setQzSilentPrinting(e.target.checked)}
+                      className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                    />
+                    <div>
+                      <span className="text-xs font-bold text-slate-900 block">Silent Printing (Bypass Browser Print Dialogs)</span>
+                      <span className="text-[11px] text-slate-500 block">
+                        Send print jobs in background without popping up browser PDF tabs or print dialogs.
+                      </span>
+                    </div>
+                  </label>
+                </div>
+
+                {/* Actions & Test Buttons */}
+                <div className="pt-2 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={handleTestQZPrintLabel}
+                    disabled={testingQZ || !qzPrinterLabel}
+                    className="bg-indigo-50 border border-indigo-200 text-indigo-900 hover:bg-indigo-100 text-xs font-bold px-4 py-2.5 rounded-xl shadow-xs flex items-center space-x-2 transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    <Zap className="w-4 h-4 text-indigo-600" />
+                    <span>{testingQZ ? 'Sending Test...' : 'Send 4x6 Thermal Test Label'}</span>
+                  </button>
+
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs px-5 py-2.5 rounded-xl shadow-sm flex items-center space-x-2 cursor-pointer disabled:opacity-50"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>{saving ? 'Saving...' : 'Save QZ Tray Settings'}</span>
+                  </button>
+                </div>
+              </form>
+
+              {/* Setup Instructions Card */}
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-3 text-xs text-slate-700">
+                <div className="flex items-center justify-between">
+                  <h4 className="font-bold text-slate-900 text-sm flex items-center space-x-2">
+                    <Sparkles className="w-4 h-4 text-amber-500" />
+                    <span>How to Setup QZ Tray for Direct Web Printing</span>
+                  </h4>
+                  <a
+                    href="https://qz.io/download/"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs font-bold text-indigo-600 hover:text-indigo-800 flex items-center space-x-1"
+                  >
+                    <span>Download QZ Tray App</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+                <ol className="list-decimal list-inside space-y-1.5 text-slate-600 leading-relaxed text-[11px]">
+                  <li>
+                    <strong>Download &amp; Install QZ Tray:</strong> Download QZ Tray (free for Windows, macOS, and Linux) from <a href="https://qz.io/download/" target="_blank" rel="noreferrer" className="text-indigo-600 underline">qz.io/download</a>.
+                  </li>
+                  <li>
+                    <strong>Launch QZ Tray:</strong> Ensure QZ Tray is running in your system tray / menu bar. It connects securely via local WebSockets (`localhost:8182`).
+                  </li>
+                  <li>
+                    <strong>Detect &amp; Save Printers:</strong> Click <strong>"Detect Printers"</strong> above, choose your thermal label printer (Zebra, Rollo, Dymo), and click Save.
+                  </li>
+                </ol>
+              </div>
             </div>
           )}
 

@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { ShippingOrder, AppSetting, formatOrderId } from '../types';
 import { jsPDF } from 'jspdf';
-import { Printer, Download, X, FileText, PackageCheck, Sparkles, Tag, ExternalLink, RefreshCw } from 'lucide-react';
+import { Printer, Download, X, FileText, PackageCheck, Sparkles, Tag, ExternalLink, RefreshCw, Zap, CheckCircle2, AlertCircle } from 'lucide-react';
+import { printPdfToQZ, getDefaultQZPrinter } from '../lib/qzTray';
 
 interface BatchPrintModalProps {
   orders: ShippingOrder[];
@@ -19,8 +20,58 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
   const [viewMode, setViewMode] = useState<'both' | 'labels' | 'slips'>('both');
   const [isExporting, setIsExporting] = useState(false);
   const [isPurchasing, setIsPurchasing] = useState(false);
+  const [qzPrinting, setQzPrinting] = useState(false);
+  const [qzStatus, setQzStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
   const orderIdsStr = orders.map((o) => o.id).join(',');
+
+  const handleDirectQZPrintLabels = async () => {
+    setQzPrinting(true);
+    setQzStatus(null);
+    try {
+      const printer = settings.qzPrinterLabel || (await getDefaultQZPrinter()) || '';
+      if (!printer) {
+        setQzStatus({
+          type: 'error',
+          msg: 'No printer specified. Please configure your 4x6 Thermal Printer in Settings > QZ Tray Hardware Printing.',
+        });
+        return;
+      }
+
+      // Fetch combined batch PDF labels binary
+      const pdfRes = await fetch(`/api/orders/batch-labels.pdf?orderIds=${orderIdsStr}`);
+      if (!pdfRes.ok) {
+        throw new Error(`Failed to generate batch PDF labels: HTTP ${pdfRes.status}`);
+      }
+      const buffer = await pdfRes.arrayBuffer();
+      let binary = '';
+      const bytes = new Uint8Array(buffer);
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const base64Pdf = window.btoa(binary);
+
+      const res = await printPdfToQZ(printer, base64Pdf, { scaleContent: true, rasterize: true });
+      if (res.success) {
+        setQzStatus({
+          type: 'success',
+          msg: `Successfully sent ${orders.length} label(s) directly to printer "${printer}" via QZ Tray!`,
+        });
+      } else {
+        setQzStatus({
+          type: 'error',
+          msg: res.message,
+        });
+      }
+    } catch (err: any) {
+      setQzStatus({
+        type: 'error',
+        msg: err?.message || 'Failed to direct print via QZ Tray.',
+      });
+    } finally {
+      setQzPrinting(false);
+    }
+  };
 
   const handlePurchaseBatch = async () => {
     if (onPurchaseBatchLabels) {
@@ -292,12 +343,22 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
 
           <div className="flex items-center space-x-2 flex-wrap gap-y-1">
             <button
+              onClick={handleDirectQZPrintLabels}
+              disabled={qzPrinting}
+              className="flex items-center space-x-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-1.5 rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer disabled:opacity-50"
+              title="Send thermal labels directly to your physical printer via QZ Tray"
+            >
+              <Zap className="w-3.5 h-3.5 text-amber-300" />
+              <span>{qzPrinting ? 'Printing...' : 'Direct Print (QZ Tray)'}</span>
+            </button>
+
+            <button
               onClick={handlePrintServerLabels}
               className="flex items-center space-x-1.5 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 px-3 py-1.5 rounded-lg text-xs font-bold shadow-2xs transition-all cursor-pointer"
               title="Print/Download combined PDF labels for selected batch"
             >
               <Printer className="w-3.5 h-3.5 text-indigo-600" />
-              <span>Print Labels (PDF)</span>
+              <span>PDF Labels</span>
             </button>
 
             <button
@@ -306,7 +367,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
               title="Print/Download combined PDF packing slips for selected batch"
             >
               <FileText className="w-3.5 h-3.5 text-slate-600" />
-              <span>Print Packing Slips (PDF)</span>
+              <span>PDF Slips</span>
             </button>
 
             <button
@@ -329,6 +390,30 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
 
         {/* Scrollable Printable Documents Preview Area */}
         <div className="p-6 overflow-y-auto space-y-8 flex-1 bg-slate-50 print:bg-white print:p-0">
+          {qzStatus && (
+            <div
+              className={`p-3.5 rounded-xl border text-xs font-semibold flex items-center space-x-2 max-w-3xl mx-auto shadow-xs ${
+                qzStatus.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
+                  : 'bg-rose-50 border-rose-300 text-rose-950'
+              }`}
+            >
+              {qzStatus.type === 'success' ? (
+                <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+              ) : (
+                <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
+              )}
+              <span className="flex-1">{qzStatus.msg}</span>
+              <button
+                type="button"
+                onClick={() => setQzStatus(null)}
+                className="text-slate-400 hover:text-slate-700 text-xs px-1.5 py-0.5 rounded"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
           {orders.map((order, index) => (
             <div key={order.id} className="space-y-6 print:space-y-0">
               {/* --- 1. PACKING SLIP --- */}

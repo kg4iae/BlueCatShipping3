@@ -105,6 +105,10 @@ export interface AppSetting {
   appPassword?: string;
   defaultDomesticCarrier?: CarrierType;
   defaultDomesticService?: string;
+  qzPrinterLabel?: string;
+  qzPrinterPackingSlip?: string;
+  qzAutoPrintOnPurchase?: boolean;
+  qzSilentPrinting?: boolean;
 }
 
 export interface BatchLabelResult {

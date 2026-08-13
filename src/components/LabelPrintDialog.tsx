@@ -1,13 +1,18 @@
-import React from 'react';
-import { ShippingOrder, formatOrderId } from '../types';
-import { X, Printer, FileText, CheckCircle2, Download, ExternalLink, Package } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { ShippingOrder, AppSetting, formatOrderId } from '../types';
+import { X, Printer, FileText, CheckCircle2, Download, ExternalLink, Package, Zap, AlertCircle } from 'lucide-react';
+import { printPdfToQZ, getDefaultQZPrinter } from '../lib/qzTray';
 
 interface LabelPrintDialogProps {
   order: ShippingOrder;
+  settings?: AppSetting;
   onClose: () => void;
 }
 
-export const LabelPrintDialog: React.FC<LabelPrintDialogProps> = ({ order, onClose }) => {
+export const LabelPrintDialog: React.FC<LabelPrintDialogProps> = ({ order, settings, onClose }) => {
+  const [qzPrinting, setQzPrinting] = useState(false);
+  const [qzStatus, setQzStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+
   const handlePrintLabel = () => {
     window.open(`/api/orders/${order.id}/label.pdf`, '_blank');
   };
@@ -20,6 +25,48 @@ export const LabelPrintDialog: React.FC<LabelPrintDialogProps> = ({ order, onClo
     window.open(`/api/orders/${order.id}/label.pdf`, '_blank');
     window.open(`/api/orders/${order.id}/packing-slip.pdf`, '_blank');
   };
+
+  const handleDirectQZPrint = async () => {
+    setQzPrinting(true);
+    setQzStatus(null);
+    try {
+      const printer = settings?.qzPrinterLabel || (await getDefaultQZPrinter()) || '';
+      if (!printer) {
+        setQzStatus({
+          type: 'error',
+          msg: 'No thermal printer configured. Please pick a printer in Settings > QZ Tray Hardware Printing.',
+        });
+        return;
+      }
+      const pdfRes = await fetch(`/api/orders/${order.id}/label.pdf`);
+      if (!pdfRes.ok) throw new Error(`HTTP ${pdfRes.status}`);
+      const buffer = await pdfRes.arrayBuffer();
+      let binary = '';
+      const bytes = new Uint8Array(buffer);
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const base64Pdf = window.btoa(binary);
+
+      const res = await printPdfToQZ(printer, base64Pdf, { scaleContent: true, rasterize: true });
+      if (res.success) {
+        setQzStatus({ type: 'success', msg: `Printed directly to printer "${printer}" via QZ Tray!` });
+      } else {
+        setQzStatus({ type: 'error', msg: res.message });
+      }
+    } catch (err: any) {
+      setQzStatus({ type: 'error', msg: err?.message || 'QZ Tray print error' });
+    } finally {
+      setQzPrinting(false);
+    }
+  };
+
+  // Auto-print on mount if qzAutoPrintOnPurchase is enabled in settings
+  useEffect(() => {
+    if (settings?.qzAutoPrintOnPurchase) {
+      handleDirectQZPrint();
+    }
+  }, []);
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
@@ -45,6 +92,23 @@ export const LabelPrintDialog: React.FC<LabelPrintDialogProps> = ({ order, onClo
 
         {/* Modal Content */}
         <div className="p-6 space-y-5">
+          {qzStatus && (
+            <div
+              className={`p-3.5 rounded-xl border text-xs font-semibold flex items-center space-x-2 ${
+                qzStatus.type === 'success'
+                  ? 'bg-emerald-100 border-emerald-300 text-emerald-950'
+                  : 'bg-rose-100 border-rose-300 text-rose-950'
+              }`}
+            >
+              {qzStatus.type === 'success' ? (
+                <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+              ) : (
+                <AlertCircle className="w-5 h-5 text-rose-600 shrink-0" />
+              )}
+              <span className="flex-1">{qzStatus.msg}</span>
+            </div>
+          )}
+
           {/* Order Summary Box */}
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-2 text-xs">
             <div className="flex items-center justify-between text-slate-500 pb-2 border-b border-slate-200">
@@ -83,6 +147,15 @@ export const LabelPrintDialog: React.FC<LabelPrintDialogProps> = ({ order, onClo
 
           {/* Action Buttons */}
           <div className="space-y-2.5 pt-2">
+            <button
+              onClick={handleDirectQZPrint}
+              disabled={qzPrinting}
+              className="w-full flex items-center justify-center space-x-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-3 rounded-xl text-xs font-bold shadow-md transition-all cursor-pointer disabled:opacity-50"
+            >
+              <Zap className="w-4 h-4 text-amber-300 animate-bounce" />
+              <span>{qzPrinting ? 'Sending to Printer via QZ Tray...' : 'Direct Thermal Print (QZ Tray)'}</span>
+            </button>
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <button
                 onClick={handlePrintLabel}
