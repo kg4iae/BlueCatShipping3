@@ -102,6 +102,20 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [isValidating, setIsValidating] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [purchasingOrderId, setPurchasingOrderId] = useState<string | null>(null);
+
+  const handleSinglePurchaseLabel = async (orderId: string) => {
+    setPurchasingOrderId(orderId);
+    try {
+      if (onPurchaseLabel) {
+        await onPurchaseLabel(orderId);
+      } else {
+        await onGenerateBatchLabels([orderId]);
+      }
+    } finally {
+      setPurchasingOrderId(null);
+    }
+  };
 
   const handleSyncMssql = async (action: 'pull' | 'push' = 'pull') => {
     if (!onSyncMssql) return;
@@ -286,10 +300,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <button
               onClick={handleGenerateLabelsClick}
               disabled={selectedOrderIds.length === 0 || isGenerating}
-              className="flex items-center space-x-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex items-center space-x-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               title="Bulk purchase EasyPost shipping labels for selected orders and open print view"
             >
-              <Printer className="w-3.5 h-3.5" />
+              {isGenerating ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-white" />
+              ) : (
+                <Printer className="w-3.5 h-3.5" />
+              )}
               <span>
                 {isGenerating ? 'Purchasing Bulk Labels...' : `Bulk Purchase Labels (${selectedOrderIds.length})`}
               </span>
@@ -581,18 +599,22 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         ) : (
                           <div className="flex items-center justify-end space-x-2">
                             <button
-                              onClick={() => {
-                                if (onPurchaseLabel) {
-                                  onPurchaseLabel(order.id);
-                                } else {
-                                  onGenerateBatchLabels([order.id]);
-                                }
-                              }}
-                              className="inline-flex items-center space-x-1 bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 py-1 rounded text-xs font-bold shadow-2xs transition-all cursor-pointer"
+                              onClick={() => handleSinglePurchaseLabel(order.id)}
+                              disabled={purchasingOrderId === order.id}
+                              className="inline-flex items-center space-x-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 py-1 rounded text-xs font-bold shadow-2xs transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                               title="Purchase postage label from EasyPost and save PDF label to database"
                             >
-                              <Tag className="w-3 h-3" />
-                              <span>Purchase Label</span>
+                              {purchasingOrderId === order.id ? (
+                                <>
+                                  <RefreshCw className="w-3 h-3 animate-spin text-white shrink-0" />
+                                  <span>Purchasing...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Tag className="w-3 h-3 shrink-0" />
+                                  <span>Purchase Label</span>
+                                </>
+                              )}
                             </button>
                           </div>
                         )}

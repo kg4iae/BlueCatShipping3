@@ -73,6 +73,116 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
     }
   };
 
+  const handleDirectQZPrintSlips = async () => {
+    setQzPrinting(true);
+    setQzStatus(null);
+    try {
+      const printer = settings.qzPrinterPackingSlip || (await getDefaultQZPrinter()) || '';
+      if (!printer) {
+        setQzStatus({
+          type: 'error',
+          msg: 'No packing slip printer specified. Please configure your Document Printer in Settings > QZ Tray Hardware Printing.',
+        });
+        return;
+      }
+
+      // Fetch combined batch PDF packing slips binary
+      const pdfRes = await fetch(`/api/orders/batch-packing-slips.pdf?orderIds=${orderIdsStr}`);
+      if (!pdfRes.ok) {
+        throw new Error(`Failed to generate batch PDF packing slips: HTTP ${pdfRes.status}`);
+      }
+      const buffer = await pdfRes.arrayBuffer();
+      let binary = '';
+      const bytes = new Uint8Array(buffer);
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const base64Pdf = window.btoa(binary);
+
+      const res = await printPdfToQZ(printer, base64Pdf, { scaleContent: true, rasterize: false });
+      if (res.success) {
+        setQzStatus({
+          type: 'success',
+          msg: `Successfully sent ${orders.length} packing slip(s) directly to printer "${printer}" via QZ Tray!`,
+        });
+      } else {
+        setQzStatus({
+          type: 'error',
+          msg: res.message,
+        });
+      }
+    } catch (err: any) {
+      setQzStatus({
+        type: 'error',
+        msg: err?.message || 'Failed to direct print packing slips via QZ Tray.',
+      });
+    } finally {
+      setQzPrinting(false);
+    }
+  };
+
+  const handleDirectQZPrintBoth = async () => {
+    setQzPrinting(true);
+    setQzStatus(null);
+    try {
+      const labelPrinter = settings.qzPrinterLabel || (await getDefaultQZPrinter()) || '';
+      const slipPrinter = settings.qzPrinterPackingSlip || labelPrinter;
+
+      if (!labelPrinter && !slipPrinter) {
+        setQzStatus({
+          type: 'error',
+          msg: 'No printers specified. Please configure your printers in Settings > QZ Tray Hardware Printing.',
+        });
+        return;
+      }
+
+      const [labelRes, slipRes] = await Promise.all([
+        fetch(`/api/orders/batch-labels.pdf?orderIds=${orderIdsStr}`),
+        fetch(`/api/orders/batch-packing-slips.pdf?orderIds=${orderIdsStr}`),
+      ]);
+
+      if (!labelRes.ok || !slipRes.ok) {
+        throw new Error('Failed to generate batch PDF documents.');
+      }
+
+      const [labelBuf, slipBuf] = await Promise.all([labelRes.arrayBuffer(), slipRes.arrayBuffer()]);
+
+      let labelBin = '';
+      const labelBytes = new Uint8Array(labelBuf);
+      for (let i = 0; i < labelBytes.byteLength; i++) {
+        labelBin += String.fromCharCode(labelBytes[i]);
+      }
+
+      let slipBin = '';
+      const slipBytes = new Uint8Array(slipBuf);
+      for (let i = 0; i < slipBytes.byteLength; i++) {
+        slipBin += String.fromCharCode(slipBytes[i]);
+      }
+
+      const resLabel = await printPdfToQZ(labelPrinter, window.btoa(labelBin), { scaleContent: true, rasterize: true });
+      const resSlip = await printPdfToQZ(slipPrinter, window.btoa(slipBin), { scaleContent: true, rasterize: false });
+
+      if (resLabel.success && resSlip.success) {
+        setQzStatus({
+          type: 'success',
+          msg: `Successfully sent ${orders.length} label(s) (to "${labelPrinter}") and ${orders.length} packing slip(s) (to "${slipPrinter}") via QZ Tray!`,
+        });
+      } else {
+        setQzStatus({
+          type: 'error',
+          msg: `Label: ${resLabel.message} | Slip: ${resSlip.message}`,
+        });
+      }
+    } catch (err: any) {
+      setQzStatus({
+        type: 'error',
+        msg: err?.message || 'Failed to direct print labels and packing slips via QZ Tray.',
+      });
+    } finally {
+      setQzPrinting(false);
+    }
+  };
+
   const handlePurchaseBatch = async () => {
     if (onPurchaseBatchLabels) {
       setIsPurchasing(true);
@@ -345,11 +455,31 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
             <button
               onClick={handleDirectQZPrintLabels}
               disabled={qzPrinting}
-              className="flex items-center space-x-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-1.5 rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer disabled:opacity-50"
-              title="Send thermal labels directly to your physical printer via QZ Tray"
+              className="flex items-center space-x-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer disabled:opacity-50"
+              title="Send thermal labels directly to your printer via QZ Tray"
             >
               <Zap className="w-3.5 h-3.5 text-amber-300" />
-              <span>{qzPrinting ? 'Printing...' : 'Direct Print (QZ Tray)'}</span>
+              <span>{qzPrinting ? 'Printing...' : 'Direct Print Labels'}</span>
+            </button>
+
+            <button
+              onClick={handleDirectQZPrintSlips}
+              disabled={qzPrinting}
+              className="flex items-center space-x-1.5 bg-teal-600 hover:bg-teal-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer disabled:opacity-50"
+              title="Send packing slips directly to your document printer via QZ Tray"
+            >
+              <Zap className="w-3.5 h-3.5 text-amber-300" />
+              <span>{qzPrinting ? 'Printing...' : 'Direct Print Slips'}</span>
+            </button>
+
+            <button
+              onClick={handleDirectQZPrintBoth}
+              disabled={qzPrinting}
+              className="flex items-center space-x-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer disabled:opacity-50"
+              title="Send both thermal labels and packing slips directly to your hardware printers via QZ Tray"
+            >
+              <Zap className="w-3.5 h-3.5 text-amber-300 animate-bounce" />
+              <span>{qzPrinting ? 'Printing Both...' : 'Direct Print Both (Labels & Slips)'}</span>
             </button>
 
             <button
@@ -372,7 +502,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
 
             <button
               onClick={handlePrintBothServer}
-              className="flex items-center space-x-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-3.5 py-1.5 rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer"
+              className="flex items-center space-x-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer"
               title="Print both Labels and Packing Slips for selected batch"
             >
               <ExternalLink className="w-3.5 h-3.5" />

@@ -31,6 +31,7 @@ import {
 import {
   getQZPrinters,
   printTestThermalLabel,
+  printTestPackingSlip,
   isQZConnected,
 } from '../lib/qzTray';
 
@@ -217,6 +218,29 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     setQzStatusMsg(null);
     try {
       const res = await printTestThermalLabel(qzPrinterLabel);
+      setQzStatusMsg({
+        type: res.success ? 'success' : 'error',
+        text: res.message,
+      });
+    } catch (err: any) {
+      setQzStatusMsg({
+        type: 'error',
+        text: `Test print error: ${err?.message || 'Failed to print'}`,
+      });
+    } finally {
+      setTestingQZ(false);
+    }
+  };
+
+  const handleTestQZPrintPackingSlip = async () => {
+    if (!qzPrinterPackingSlip) {
+      setQzStatusMsg({ type: 'error', text: 'Please select or enter a Packing Slip / Document Printer name first.' });
+      return;
+    }
+    setTestingQZ(true);
+    setQzStatusMsg(null);
+    try {
+      const res = await printTestPackingSlip(qzPrinterPackingSlip);
       setQzStatusMsg({
         type: res.success ? 'success' : 'error',
         text: res.message,
@@ -1012,15 +1036,27 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
 
                 {/* Actions & Test Buttons */}
                 <div className="pt-2 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100">
-                  <button
-                    type="button"
-                    onClick={handleTestQZPrintLabel}
-                    disabled={testingQZ || !qzPrinterLabel}
-                    className="bg-indigo-50 border border-indigo-200 text-indigo-900 hover:bg-indigo-100 text-xs font-bold px-4 py-2.5 rounded-xl shadow-xs flex items-center space-x-2 transition-all cursor-pointer disabled:opacity-50"
-                  >
-                    <Zap className="w-4 h-4 text-indigo-600" />
-                    <span>{testingQZ ? 'Sending Test...' : 'Send 4x6 Thermal Test Label'}</span>
-                  </button>
+                  <div className="flex items-center space-x-2 flex-wrap gap-y-2">
+                    <button
+                      type="button"
+                      onClick={handleTestQZPrintLabel}
+                      disabled={testingQZ || !qzPrinterLabel}
+                      className="bg-indigo-50 border border-indigo-200 text-indigo-900 hover:bg-indigo-100 text-xs font-bold px-3.5 py-2.5 rounded-xl shadow-xs flex items-center space-x-1.5 transition-all cursor-pointer disabled:opacity-50"
+                    >
+                      <Zap className="w-4 h-4 text-indigo-600" />
+                      <span>{testingQZ ? 'Testing...' : 'Test Thermal Label'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleTestQZPrintPackingSlip}
+                      disabled={testingQZ || !qzPrinterPackingSlip}
+                      className="bg-teal-50 border border-teal-200 text-teal-900 hover:bg-teal-100 text-xs font-bold px-3.5 py-2.5 rounded-xl shadow-xs flex items-center space-x-1.5 transition-all cursor-pointer disabled:opacity-50"
+                    >
+                      <FileText className="w-4 h-4 text-teal-600" />
+                      <span>{testingQZ ? 'Testing...' : 'Test Packing Slip'}</span>
+                    </button>
+                  </div>
 
                   <button
                     type="submit"

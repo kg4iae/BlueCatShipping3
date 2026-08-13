@@ -210,3 +210,43 @@ export async function printTestThermalLabel(printerName: string): Promise<QZPrin
   `;
   return printZplToQZ(printerName, sampleZpl);
 }
+
+/**
+ * Send a sample HTML/document packing slip test to QZ Tray
+ */
+export async function printTestPackingSlip(printerName: string): Promise<QZPrintResult> {
+  const connected = await connectQZ();
+  if (!connected) {
+    return {
+      success: false,
+      message: 'QZ Tray is not running or connected.'
+    };
+  }
+
+  try {
+    const config = qz.configs.create(printerName);
+    const htmlData = `
+      <div style="font-family: Arial, sans-serif; padding: 30px; border: 2px solid #333; max-width: 600px; margin: 0 auto;">
+        <h1 style="color: #1e293b; margin-bottom: 5px;">TEST PACKING SLIP</h1>
+        <p style="color: #64748b; font-size: 14px;">QZ Tray Direct Web Document Printing Test</p>
+        <hr style="border: 1px solid #ccc; margin: 20px 0;" />
+        <p><strong>Printer Name:</strong> ${printerName}</p>
+        <p><strong>Timestamp:</strong> ${new Date().toLocaleString()}</p>
+        <p style="color: #059669; font-weight: bold; font-size: 16px; margin-top: 30px;">
+          ✓ QZ Tray Document Printer Connection Working!
+        </p>
+      </div>
+    `;
+    const data = [{ type: 'html', format: 'plain', data: htmlData }];
+    await qz.print(config, data);
+    return {
+      success: true,
+      message: `Sent test packing slip to "${printerName}".`
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message: err?.message || `Failed to print test packing slip to "${printerName}".`
+    };
+  }
+}

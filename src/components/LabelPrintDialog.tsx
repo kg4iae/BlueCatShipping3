@@ -50,9 +50,98 @@ export const LabelPrintDialog: React.FC<LabelPrintDialogProps> = ({ order, setti
 
       const res = await printPdfToQZ(printer, base64Pdf, { scaleContent: true, rasterize: true });
       if (res.success) {
-        setQzStatus({ type: 'success', msg: `Printed directly to printer "${printer}" via QZ Tray!` });
+        setQzStatus({ type: 'success', msg: `Printed label directly to thermal printer "${printer}" via QZ Tray!` });
       } else {
         setQzStatus({ type: 'error', msg: res.message });
+      }
+    } catch (err: any) {
+      setQzStatus({ type: 'error', msg: err?.message || 'QZ Tray label print error' });
+    } finally {
+      setQzPrinting(false);
+    }
+  };
+
+  const handleDirectQZPrintPackingSlip = async () => {
+    setQzPrinting(true);
+    setQzStatus(null);
+    try {
+      const printer = settings?.qzPrinterPackingSlip || (await getDefaultQZPrinter()) || '';
+      if (!printer) {
+        setQzStatus({
+          type: 'error',
+          msg: 'No packing slip printer configured. Please pick a printer in Settings > QZ Tray Hardware Printing.',
+        });
+        return;
+      }
+      const pdfRes = await fetch(`/api/orders/${order.id}/packing-slip.pdf`);
+      if (!pdfRes.ok) throw new Error(`HTTP ${pdfRes.status}`);
+      const buffer = await pdfRes.arrayBuffer();
+      let binary = '';
+      const bytes = new Uint8Array(buffer);
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const base64Pdf = window.btoa(binary);
+
+      const res = await printPdfToQZ(printer, base64Pdf, { scaleContent: true, rasterize: false });
+      if (res.success) {
+        setQzStatus({ type: 'success', msg: `Printed packing slip directly to document printer "${printer}" via QZ Tray!` });
+      } else {
+        setQzStatus({ type: 'error', msg: res.message });
+      }
+    } catch (err: any) {
+      setQzStatus({ type: 'error', msg: err?.message || 'QZ Tray packing slip print error' });
+    } finally {
+      setQzPrinting(false);
+    }
+  };
+
+  const handleDirectQZPrintBoth = async () => {
+    setQzPrinting(true);
+    setQzStatus(null);
+    try {
+      const labelPrinter = settings?.qzPrinterLabel || (await getDefaultQZPrinter()) || '';
+      const slipPrinter = settings?.qzPrinterPackingSlip || labelPrinter;
+
+      if (!labelPrinter && !slipPrinter) {
+        setQzStatus({
+          type: 'error',
+          msg: 'No printers configured. Please set up your printers in Settings > QZ Tray Hardware Printing.',
+        });
+        return;
+      }
+
+      // Fetch both PDFs
+      const [labelRes, slipRes] = await Promise.all([
+        fetch(`/api/orders/${order.id}/label.pdf`),
+        fetch(`/api/orders/${order.id}/packing-slip.pdf`),
+      ]);
+
+      if (!labelRes.ok || !slipRes.ok) throw new Error('Failed to fetch order PDF documents');
+
+      const [labelBuf, slipBuf] = await Promise.all([labelRes.arrayBuffer(), slipRes.arrayBuffer()]);
+
+      let labelBin = '';
+      const labelBytes = new Uint8Array(labelBuf);
+      for (let i = 0; i < labelBytes.byteLength; i++) labelBin += String.fromCharCode(labelBytes[i]);
+
+      let slipBin = '';
+      const slipBytes = new Uint8Array(slipBuf);
+      for (let i = 0; i < slipBytes.byteLength; i++) slipBin += String.fromCharCode(slipBytes[i]);
+
+      const resLabel = await printPdfToQZ(labelPrinter, window.btoa(labelBin), { scaleContent: true, rasterize: true });
+      const resSlip = await printPdfToQZ(slipPrinter, window.btoa(slipBin), { scaleContent: true, rasterize: false });
+
+      if (resLabel.success && resSlip.success) {
+        setQzStatus({
+          type: 'success',
+          msg: `Successfully printed both Label (to "${labelPrinter}") and Packing Slip (to "${slipPrinter}") via QZ Tray!`,
+        });
+      } else {
+        setQzStatus({
+          type: 'error',
+          msg: `Label: ${resLabel.message} | Slip: ${resSlip.message}`,
+        });
       }
     } catch (err: any) {
       setQzStatus({ type: 'error', msg: err?.message || 'QZ Tray print error' });
@@ -60,13 +149,6 @@ export const LabelPrintDialog: React.FC<LabelPrintDialogProps> = ({ order, setti
       setQzPrinting(false);
     }
   };
-
-  // Auto-print on mount if qzAutoPrintOnPurchase is enabled in settings
-  useEffect(() => {
-    if (settings?.qzAutoPrintOnPurchase) {
-      handleDirectQZPrint();
-    }
-  }, []);
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
@@ -146,41 +228,67 @@ export const LabelPrintDialog: React.FC<LabelPrintDialogProps> = ({ order, setti
           </div>
 
           {/* Action Buttons */}
-          <div className="space-y-2.5 pt-2">
-            <button
-              onClick={handleDirectQZPrint}
-              disabled={qzPrinting}
-              className="w-full flex items-center justify-center space-x-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-3 rounded-xl text-xs font-bold shadow-md transition-all cursor-pointer disabled:opacity-50"
-            >
-              <Zap className="w-4 h-4 text-amber-300 animate-bounce" />
-              <span>{qzPrinting ? 'Sending to Printer via QZ Tray...' : 'Direct Thermal Print (QZ Tray)'}</span>
-            </button>
+          <div className="space-y-3 pt-2">
+            {/* QZ Tray Direct Hardware Printing Header */}
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
+              <div className="flex items-center space-x-1.5 text-xs font-bold text-slate-900">
+                <Zap className="w-4 h-4 text-emerald-600" />
+                <span>QZ Tray Direct Web Hardware Printing</span>
+              </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              <button
-                onClick={handlePrintLabel}
-                className="flex items-center justify-center space-x-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-xl text-xs font-bold shadow-sm transition-all cursor-pointer"
-              >
-                <Printer className="w-4 h-4" />
-                <span>Print Shipping Label</span>
-              </button>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  onClick={handleDirectQZPrint}
+                  disabled={qzPrinting}
+                  className="flex items-center justify-center space-x-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded-lg text-xs font-bold shadow-xs transition-all cursor-pointer disabled:opacity-50"
+                  title={`Print label to ${settings?.qzPrinterLabel || 'default thermal printer'}`}
+                >
+                  <Printer className="w-3.5 h-3.5 text-amber-300" />
+                  <span>{qzPrinting ? 'Printing...' : 'Direct Print Label'}</span>
+                </button>
+
+                <button
+                  onClick={handleDirectQZPrintPackingSlip}
+                  disabled={qzPrinting}
+                  className="flex items-center justify-center space-x-1.5 bg-teal-600 hover:bg-teal-700 text-white px-3 py-2 rounded-lg text-xs font-bold shadow-xs transition-all cursor-pointer disabled:opacity-50"
+                  title={`Print packing slip to ${settings?.qzPrinterPackingSlip || 'default document printer'}`}
+                >
+                  <FileText className="w-3.5 h-3.5 text-amber-300" />
+                  <span>{qzPrinting ? 'Printing...' : 'Direct Print Slip'}</span>
+                </button>
+              </div>
 
               <button
-                onClick={handlePrintPackingSlip}
-                className="flex items-center justify-center space-x-2 bg-slate-800 hover:bg-slate-900 text-white px-4 py-2.5 rounded-xl text-xs font-bold shadow-sm transition-all cursor-pointer"
+                onClick={handleDirectQZPrintBoth}
+                disabled={qzPrinting}
+                className="w-full flex items-center justify-center space-x-2 bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded-lg text-xs font-bold shadow-xs transition-all cursor-pointer disabled:opacity-50"
               >
-                <FileText className="w-4 h-4 text-indigo-400" />
-                <span>Print Packing Slip</span>
+                <Zap className="w-3.5 h-3.5 text-amber-300" />
+                <span>{qzPrinting ? 'Sending Jobs...' : 'Direct Print Both (Label & Slip)'}</span>
               </button>
             </div>
 
-            <button
-              onClick={handlePrintBoth}
-              className="w-full flex items-center justify-center space-x-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl text-xs font-bold shadow-sm transition-all cursor-pointer"
-            >
-              <ExternalLink className="w-4 h-4" />
-              <span>Print Both (Label &amp; Packing Slip)</span>
-            </button>
+            {/* Standard Browser PDF Preview / Download fallback */}
+            <div className="pt-1 space-y-2">
+              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider text-center">Standard Browser PDF Open</div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={handlePrintLabel}
+                  className="flex items-center justify-center space-x-1.5 bg-slate-100 border border-slate-300 text-slate-700 hover:bg-slate-200 px-3 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5 text-slate-500" />
+                  <span>PDF Label</span>
+                </button>
+
+                <button
+                  onClick={handlePrintPackingSlip}
+                  className="flex items-center justify-center space-x-1.5 bg-slate-100 border border-slate-300 text-slate-700 hover:bg-slate-200 px-3 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer"
+                >
+                  <FileText className="w-3.5 h-3.5 text-slate-500" />
+                  <span>PDF Slip</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
 

@@ -26,6 +26,7 @@ import {
   Scale,
   Tag,
   Download,
+  RefreshCw,
 } from 'lucide-react';
 
 interface OrderDetailModalProps {
@@ -804,11 +805,15 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
               <button
                 onClick={handlePurchase}
                 disabled={saving || order.status === 'address_error' || weightOz <= 0}
-                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-5 py-2.5 rounded-lg shadow-sm flex items-center space-x-2 transition-all cursor-pointer disabled:opacity-50"
+                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-5 py-2.5 rounded-lg shadow-sm flex items-center space-x-2 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 title="Purchase shipping label from EasyPost and save label PDF to database"
               >
-                <Tag className="w-4 h-4" />
-                <span>{saving ? 'Purchasing...' : 'Purchase Label (EasyPost)'}</span>
+                {saving ? (
+                  <RefreshCw className="w-4 h-4 animate-spin text-white shrink-0" />
+                ) : (
+                  <Tag className="w-4 h-4 shrink-0" />
+                )}
+                <span>{saving ? 'Purchasing Label...' : 'Purchase Label (EasyPost)'}</span>
               </button>
             )}
 
