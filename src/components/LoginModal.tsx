@@ -46,7 +46,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onLoginSuccess }) => {
           <div className="w-14 h-14 bg-indigo-50 border border-indigo-200 rounded-xl flex items-center justify-center text-indigo-600 mb-4 shadow-sm">
             <Lock className="w-7 h-7" />
           </div>
-          <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Portal Database Login</h2>
+          <h2 className="text-2xl font-bold text-slate-900 tracking-tight">BlueCat Bobbins Shipping Login</h2>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -59,7 +59,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onLoginSuccess }) => {
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="Enter database username..."
+                placeholder="Enter username..."
                 className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-3 pl-11 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white text-sm font-medium"
                 required
                 autoFocus
