@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { AppSetting, PackageType, CarrierType } from '../types';
+import { AppSetting, PackageType, CarrierType, User } from '../types';
 import {
   FileText,
   Save,
@@ -27,7 +27,11 @@ import {
   WifiOff,
   CheckCircle2,
   ExternalLink,
+  Users,
+  UserPlus,
+  KeyRound,
 } from 'lucide-react';
+
 import {
   getQZPrinters,
   printTestThermalLabel,
@@ -107,8 +111,134 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   const [testingMssql, setTestingMssql] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; version?: string } | null>(null);
 
+  // Database User Management State
+  const [dbUsers, setDbUsers] = useState<User[]>([]);
+  const [loadingUsers, setLoadingUsers] = useState<boolean>(false);
+  const [showAddUser, setShowAddUser] = useState<boolean>(false);
+  const [newUsername, setNewUsername] = useState('');
+  const [newUserPassword, setNewUserPassword] = useState('');
+  const [newUserFullName, setNewUserFullName] = useState('');
+  const [newUserRole, setNewUserRole] = useState('Admin');
+  const [userMsg, setUserMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Change Password state for selected user
+  const [changeUserModal, setChangeUserModal] = useState<string | null>(null);
+  const [changePasswordVal, setChangePasswordVal] = useState('');
+
+  const fetchDbUsers = async () => {
+    try {
+      setLoadingUsers(true);
+      const res = await fetch('/api/users');
+      if (res.ok) {
+        const data = await res.json();
+        setDbUsers(data);
+      }
+    } catch (err) {
+      console.error('Failed to load DB users:', err);
+    } finally {
+      setLoadingUsers(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeSection === 'security') {
+      fetchDbUsers();
+    }
+  }, [activeSection]);
+
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setUserMsg(null);
+    try {
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: newUsername,
+          password: newUserPassword,
+          fullName: newUserFullName,
+          role: newUserRole,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setUserMsg({ type: 'success', text: `User account "${newUsername}" added to database!` });
+        setNewUsername('');
+        setNewUserPassword('');
+        setNewUserFullName('');
+        setShowAddUser(false);
+        fetchDbUsers();
+      } else {
+        setUserMsg({ type: 'error', text: data.error || 'Failed to create user account.' });
+      }
+    } catch (err) {
+      setUserMsg({ type: 'error', text: 'Error connecting to backend server.' });
+    }
+  };
+
+  const handleChangePassword = async (username: string) => {
+    if (!changePasswordVal) return;
+    setUserMsg(null);
+    try {
+      const res = await fetch(`/api/users/${encodeURIComponent(username)}/password`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: changePasswordVal }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setUserMsg({ type: 'success', text: `Password updated in database for ${username}!` });
+        setChangeUserModal(null);
+        setChangePasswordVal('');
+        fetchDbUsers();
+      } else {
+        setUserMsg({ type: 'error', text: data.error || 'Failed to update password.' });
+      }
+    } catch (err) {
+      setUserMsg({ type: 'error', text: 'Error updating password.' });
+    }
+  };
+
+  const handleDeleteUser = async (username: string) => {
+    if (!window.confirm(`Are you sure you want to delete database user account "${username}"?`)) return;
+    setUserMsg(null);
+    try {
+      const res = await fetch(`/api/users/${encodeURIComponent(username)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setUserMsg({ type: 'success', text: `User account "${username}" deleted from Database.` });
+        fetchDbUsers();
+      } else {
+        setUserMsg({ type: 'error', text: data.error || 'Failed to delete user.' });
+      }
+    } catch (err) {
+      setUserMsg({ type: 'error', text: 'Error deleting user account.' });
+    }
+  };
+
+  const handleUpdateUserRole = async (username: string, newRole: string) => {
+    setUserMsg(null);
+    try {
+      const res = await fetch(`/api/users/${encodeURIComponent(username)}/role`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: newRole }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setUserMsg({ type: 'success', text: `Role updated to "${newRole}" for user ${username}.` });
+        fetchDbUsers();
+      } else {
+        setUserMsg({ type: 'error', text: data.error || 'Failed to update role.' });
+      }
+    } catch (err) {
+      setUserMsg({ type: 'error', text: 'Error updating user role.' });
+    }
+  };
+
   // EasyPost Connection test state
   const [testingEasyPost, setTestingEasyPost] = useState(false);
+
   const [easyPostTestResult, setEasyPostTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
   const handleTestEasyPost = async () => {
@@ -499,9 +629,10 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                 : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
             }`}
           >
-            <Lock className="w-4 h-4" />
-            <span>Portal Password Security</span>
+            <ShieldCheck className="w-4 h-4" />
+            <span>Database Security &amp; Users</span>
           </button>
+
         </div>
 
         {/* Content Section Panels */}
@@ -1572,42 +1703,293 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
             </div>
           )}
 
-          {/* SECTION 5: APP PASSWORD SECURITY */}
+          {/* SECTION 5: DATABASE SECURITY & USER ACCOUNTS */}
           {activeSection === 'security' && (
             <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-6">
-              <div>
-                <h3 className="text-base font-bold text-slate-900 flex items-center space-x-2">
-                  <Lock className="w-5 h-5 text-amber-600" />
-                  <span>Portal Password Security</span>
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Update the password required to access this web application session.
-                </p>
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-4 border-b border-slate-200">
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 flex items-center space-x-2">
+                    <ShieldCheck className="w-5 h-5 text-indigo-600" />
+                    <span>Database Security &amp; User Accounts</span>
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Usernames and encrypted SHA-256 password hashes are stored in the <code className="font-mono text-indigo-600 font-semibold bg-indigo-50 px-1 py-0.5 rounded border border-indigo-100">[dbo].[Users]</code> table in MS SQL.
+                  </p>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <button
+                    onClick={fetchDbUsers}
+                    disabled={loadingUsers}
+                    className="inline-flex items-center space-x-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-lg text-xs font-semibold transition-colors cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loadingUsers ? 'animate-spin' : ''}`} />
+                    <span>Refresh</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowAddUser(!showAddUser);
+                      setUserMsg(null);
+                    }}
+                    className="inline-flex items-center space-x-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-3.5 py-2 rounded-lg text-xs font-semibold shadow-sm transition-colors cursor-pointer"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>Add User Account</span>
+                  </button>
+                </div>
               </div>
 
-              <form onSubmit={handleSavePassword} className="space-y-4 max-w-md">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">New Portal Password</label>
+              {userMsg && (
+                <div
+                  className={`px-4 py-3 rounded-lg text-xs flex items-center space-x-2 font-medium ${
+                    userMsg.type === 'success'
+                      ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                      : 'bg-rose-50 text-rose-800 border border-rose-200'
+                  }`}
+                >
+                  {userMsg.type === 'success' ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                  ) : (
+                    <AlertTriangle className="w-4 h-4 text-rose-600 flex-shrink-0" />
+                  )}
+                  <span>{userMsg.text}</span>
+                </div>
+              )}
+
+              {/* ADD NEW USER FORM */}
+              {showAddUser && (
+                <div className="bg-indigo-50/50 border border-indigo-200 rounded-xl p-5 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-indigo-900 flex items-center space-x-2">
+                      <UserPlus className="w-4 h-4 text-indigo-600" />
+                      <span>Create New User Account in Database</span>
+                    </h4>
+                    <button
+                      onClick={() => setShowAddUser(false)}
+                      className="text-slate-400 hover:text-slate-600 text-xs cursor-pointer font-medium"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+
+                  <form onSubmit={handleCreateUser} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Username <span className="text-rose-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={newUsername}
+                        onChange={(e) => setNewUsername(e.target.value)}
+                        placeholder="e.g. jsmith"
+                        className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-xs text-slate-900 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Password <span className="text-rose-500">*</span>
+                      </label>
+                      <input
+                        type="password"
+                        value={newUserPassword}
+                        onChange={(e) => setNewUserPassword(e.target.value)}
+                        placeholder="Enter account password..."
+                        className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-xs text-slate-900 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">Full Name</label>
+                      <input
+                        type="text"
+                        value={newUserFullName}
+                        onChange={(e) => setNewUserFullName(e.target.value)}
+                        placeholder="e.g. John Smith"
+                        className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-xs text-slate-900 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">Role Permission</label>
+                      <select
+                        value={newUserRole}
+                        onChange={(e) => setNewUserRole(e.target.value)}
+                        className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-xs text-slate-900 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      >
+                        <option value="Admin">Admin (Full Access)</option>
+                        <option value="Shipping Manager">Shipping Manager</option>
+                        <option value="Warehouse Operator">Warehouse Operator</option>
+                      </select>
+                    </div>
+
+                    <div className="sm:col-span-2 pt-2 flex justify-end space-x-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowAddUser(false)}
+                        className="bg-white border border-slate-300 text-slate-700 font-semibold text-xs px-4 py-2 rounded-lg hover:bg-slate-50 cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs px-5 py-2 rounded-lg shadow-sm cursor-pointer"
+                      >
+                        Save User to Database
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              )}
+
+              {/* CHANGE USER PASSWORD MODAL / FORM */}
+              {changeUserModal && (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-bold text-amber-900 flex items-center space-x-2">
+                      <KeyRound className="w-4 h-4 text-amber-600" />
+                      <span>Update Password for User: <strong className="text-amber-950 font-mono underline">{changeUserModal}</strong></span>
+                    </h4>
+                    <button
+                      onClick={() => setChangeUserModal(null)}
+                      className="text-slate-400 hover:text-slate-600 text-xs cursor-pointer font-medium"
+                    >
+                      Close
+                    </button>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="password"
+                      value={changePasswordVal}
+                      onChange={(e) => setChangePasswordVal(e.target.value)}
+                      placeholder="Enter new password for this user..."
+                      className="flex-1 bg-white border border-amber-300 rounded-lg px-3 py-2 text-xs text-slate-900 focus:ring-2 focus:ring-amber-500 focus:outline-none"
+                    />
+                    <button
+                      onClick={() => handleChangePassword(changeUserModal)}
+                      disabled={!changePasswordVal}
+                      className="bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs px-4 py-2 rounded-lg shadow-sm cursor-pointer disabled:opacity-50"
+                    >
+                      Update Password
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* USERS TABLE */}
+              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                <table className="w-full text-left text-xs text-slate-700">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-semibold uppercase text-[10px] tracking-wider">
+                    <tr>
+                      <th className="px-4 py-3">Username</th>
+                      <th className="px-4 py-3">Full Name</th>
+                      <th className="px-4 py-3">Role</th>
+                      <th className="px-4 py-3">Last Login</th>
+                      <th className="px-4 py-3 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 bg-white">
+                    {dbUsers.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-8 text-center text-slate-400 italic">
+                          {loadingUsers ? 'Loading user accounts from Database...' : 'No users found in Database.'}
+                        </td>
+                      </tr>
+                    ) : (
+                      dbUsers.map((user) => (
+                        <tr key={user.username} className="hover:bg-slate-50 transition-colors">
+                          <td className="px-4 py-3 font-medium text-slate-900 flex items-center space-x-2">
+                            <div className="w-7 h-7 bg-indigo-100 text-indigo-700 rounded-full flex items-center justify-center font-bold text-xs uppercase">
+                              {user.username.charAt(0)}
+                            </div>
+                            <div>
+                              <span className="font-bold text-slate-900">{user.username}</span>
+                              {user.id && <span className="text-[10px] text-slate-400 block font-mono">ID: {user.id}</span>}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-slate-600">{user.fullName || '—'}</td>
+                          <td className="px-4 py-3">
+                            <select
+                              value={user.role || 'Admin'}
+                              onChange={(e) => handleUpdateUserRole(user.username, e.target.value)}
+                              className={`px-2.5 py-1 rounded-md text-xs font-semibold border cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm transition-colors ${
+                                user.role === 'Admin'
+                                  ? 'bg-purple-50 text-purple-900 border-purple-200 hover:bg-purple-100'
+                                  : user.role === 'Shipping Manager'
+                                  ? 'bg-sky-50 text-sky-900 border-sky-200 hover:bg-sky-100'
+                                  : 'bg-slate-50 text-slate-900 border-slate-200 hover:bg-slate-100'
+                              }`}
+                              title="Click to update user role in database"
+                            >
+                              <option value="Admin">Admin (Full Access)</option>
+                              <option value="Shipping Manager">Shipping Manager</option>
+                              <option value="Warehouse Operator">Warehouse Operator</option>
+                            </select>
+                          </td>
+                          <td className="px-4 py-3 text-slate-500 font-mono text-[11px]">
+                            {user.lastLoginAt ? new Date(user.lastLoginAt).toLocaleString() : 'Never logged in'}
+                          </td>
+                          <td className="px-4 py-3 text-right space-x-2">
+                            <button
+                              onClick={() => {
+                                setChangeUserModal(user.username);
+                                setChangePasswordVal('');
+                                setUserMsg(null);
+                              }}
+                              className="inline-flex items-center space-x-1 text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 px-2 py-1 rounded transition-colors cursor-pointer font-medium"
+                              title="Change user password"
+                            >
+                              <KeyRound className="w-3.5 h-3.5" />
+                              <span>Reset Password</span>
+                            </button>
+                            <button
+                              onClick={() => handleDeleteUser(user.username)}
+                              className="inline-flex items-center space-x-1 text-rose-600 hover:text-rose-800 hover:bg-rose-50 px-2 py-1 rounded transition-colors cursor-pointer font-medium"
+                              title="Delete user account"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>Delete</span>
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* MASTER BACKUP APP PASSWORD */}
+              <div className="pt-6 border-t border-slate-200 space-y-3">
+                <div className="flex items-center space-x-2 text-slate-800 font-bold text-xs">
+                  <Lock className="w-4 h-4 text-amber-600" />
+                  <span>Master Administrative Override Password</span>
+                </div>
+                <p className="text-xs text-slate-500">
+                  Fallback administrative password used if database connectivity is offline:
+                </p>
+
+                <form onSubmit={handleSavePassword} className="flex items-center space-x-2 max-w-md">
                   <input
                     type="password"
                     value={appPassword}
                     onChange={(e) => setAppPassword(e.target.value)}
-                    placeholder="Enter new password..."
-                    className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2.5 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
+                    placeholder="Enter new master override password..."
+                    className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
                     required
                   />
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs px-5 py-2.5 rounded-lg shadow-sm cursor-pointer disabled:opacity-50"
-                >
-                  {saving ? 'Updating...' : 'Update Password'}
-                </button>
-              </form>
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    className="bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs px-4 py-2 rounded-lg shadow-sm cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                  >
+                    {saving ? 'Saving...' : 'Update Master Key'}
+                  </button>
+                </form>
+              </div>
             </div>
           )}
+
         </div>
       </div>
     </div>

@@ -181,6 +181,17 @@ export interface ScanFormType {
 export interface UserSession {
   isAuthenticated: boolean;
   username: string;
+  fullName?: string;
   role: string;
   loginTime?: string;
+}
+
+export interface User {
+  id?: number | string;
+  username: string;
+  passwordHash?: string;
+  fullName?: string;
+  role: string;
+  createdAt?: string;
+  lastLoginAt?: string;
 }

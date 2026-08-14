@@ -13,6 +13,7 @@ import {
   Truck,
   Sparkles,
   FileText,
+  User,
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -27,6 +28,7 @@ interface NavbarProps {
   easyPostMode: string;
   onLogout: () => void;
   onSyncMssql?: () => Promise<void>;
+  currentUser?: { username: string; fullName?: string; role?: string } | null;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -41,8 +43,10 @@ export const Navbar: React.FC<NavbarProps> = ({
   easyPostMode,
   onLogout,
   onSyncMssql,
+  currentUser,
 }) => {
   const [isSyncing, setIsSyncing] = React.useState(false);
+
 
   const handleSyncClick = async () => {
     if (!onSyncMssql) return;
@@ -96,14 +100,21 @@ export const Navbar: React.FC<NavbarProps> = ({
               <span>{readyToShipCount} Ready to Ship</span>
             </span>
           )}
+          {currentUser && (
+            <span className="inline-flex items-center space-x-1 bg-indigo-950/80 text-indigo-200 px-2 py-0.5 rounded text-[11px] font-medium border border-indigo-700/60">
+              <User className="w-3 h-3 text-indigo-400" />
+              <span>User: <strong className="text-white">{currentUser.username}</strong> ({currentUser.role || 'Admin'})</span>
+            </span>
+          )}
           <button
             onClick={onLogout}
-            className="flex items-center space-x-1 text-slate-400 hover:text-slate-200 transition-colors pl-2 border-l border-slate-800 cursor-pointer"
-            title="Lock Portal Session"
+            className="flex items-center space-x-1 text-slate-400 hover:text-rose-300 transition-colors pl-2 border-l border-slate-800 cursor-pointer"
+            title="Logout of Portal Session"
           >
-            <Lock className="w-3 h-3" />
-            <span>Lock Session</span>
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Logout</span>
           </button>
+
         </div>
       </div>
 
@@ -166,17 +177,19 @@ export const Navbar: React.FC<NavbarProps> = ({
               <span>Analytics</span>
             </button>
 
-            <button
-              onClick={() => setActiveTab('settings')}
-              className={`flex items-center space-x-2 px-3.5 py-2 rounded-lg text-sm font-semibold transition-all cursor-pointer ${
-                activeTab === 'settings'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-800/80'
-              }`}
-            >
-              <Settings className="w-4 h-4" />
-              <span>Configuration</span>
-            </button>
+            {currentUser?.role?.toLowerCase() === 'admin' && (
+              <button
+                onClick={() => setActiveTab('settings')}
+                className={`flex items-center space-x-2 px-3.5 py-2 rounded-lg text-sm font-semibold transition-all cursor-pointer ${
+                  activeTab === 'settings'
+                    ? 'bg-indigo-600 text-white shadow-sm'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-800/80'
+                }`}
+              >
+                <Settings className="w-4 h-4" />
+                <span>Configuration</span>
+              </button>
+            )}
           </nav>
 
           {/* Quick Actions Buttons */}

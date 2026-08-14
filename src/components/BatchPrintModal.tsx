@@ -227,12 +227,25 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
   const handleExportLabelsOnlyPDF = () => {
     setIsExporting(true);
     try {
-      // Create 4x6 thermal label printer PDF format
       const doc = new jsPDF({
         unit: 'in',
         format: [4, 6],
         orientation: 'portrait',
       });
+
+      const retAddr = typeof settings?.returnAddress === 'string'
+        ? JSON.parse(settings.returnAddress)
+        : (settings?.returnAddress || {});
+      const returnAddress = {
+        name: retAddr.name || settings?.companyName || 'BlueCat Shipping Dept',
+        company: retAddr.company || settings?.companyName || 'BlueCat Bobbins Shipping',
+        street1: retAddr.street1 || '100 Bobbin Way',
+        street2: retAddr.street2 || '',
+        city: retAddr.city || 'Chicago',
+        state: retAddr.state || 'IL',
+        zip: retAddr.zip || '60601',
+        country: retAddr.country || 'US',
+      };
 
       orders.forEach((order, index) => {
         if (index > 0) {
@@ -247,62 +260,118 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
         const displayCarrier = isIntl ? 'USPS INTERNATIONAL' : order.carrier || 'USPS';
         const displayService = isIntl ? 'PRIORITY MAIL INTERNATIONAL' : order.serviceLevel || 'PRIORITY MAIL 2-DAY';
 
-        // Border frame
-        doc.setLineWidth(0.01);
+        // Outer Frame Border
+        doc.setLineWidth(0.015);
+        doc.setDrawColor(0, 0, 0);
         doc.rect(0.1, 0.1, 3.8, 5.8);
 
-        // Header
+        // Header Box
         doc.setFontSize(14);
         doc.setTextColor(0, 0, 0);
-        doc.text(`${displayCarrier} POSTAGE PAID`, 0.2, 0.4);
-        doc.setFontSize(10);
-        doc.text(displayService, 0.2, 0.6);
-
-        // Ship From
-        doc.setFontSize(7);
-        doc.text('SHIP FROM:', 0.2, 0.9);
-        doc.text(settings.returnAddress.name, 0.2, 1.02);
-        doc.text(settings.returnAddress.street1, 0.2, 1.14);
-        doc.text(
-          `${settings.returnAddress.city}, ${settings.returnAddress.state} ${settings.returnAddress.zip} ${
-            settings.returnAddress.country || 'US'
-          }`,
-          0.2,
-          1.26
-        );
-
-        // Ship To
-        doc.setFontSize(9);
-        doc.text('SHIP TO:', 0.2, 1.6);
-        doc.setFontSize(12);
-        doc.text(order.recipientName, 0.2, 1.8);
-        if (order.company) doc.text(order.company, 0.2, 2.0);
-        doc.text(order.street1, 0.2, 2.2);
-        if (order.street2) doc.text(order.street2, 0.2, 2.4);
-        doc.text(`${order.city}, ${order.state} ${order.zip}`, 0.2, 2.6);
+        doc.setFont('helvetica', 'bold');
+        doc.text(`${displayCarrier}`, 0.2, 0.38);
         if (isIntl) {
-          doc.setFontSize(11);
-          doc.text(`DESTINATION: ${order.country.toUpperCase()}`, 0.2, 2.85);
+          doc.setFontSize(8);
+          doc.text('INTL', 2.1, 0.38);
+        }
+        doc.setFontSize(9);
+        doc.setFont('helvetica', 'bold');
+        doc.text(displayService, 0.2, 0.54);
+
+        // Postage Paid Box
+        doc.setLineWidth(0.01);
+        doc.rect(2.6, 0.2, 1.2, 0.38);
+        doc.setFontSize(7);
+        doc.setFont('helvetica', 'bold');
+        const postageText = order.carrier === 'UPS' ? 'UPS POSTAGE PAID' : isIntl ? 'USPS INTL PAID' : 'US POSTAGE PAID';
+        doc.text(postageText, 2.65, 0.42);
+
+        doc.line(0.1, 0.65, 3.9, 0.65);
+
+        // Return Address
+        doc.setFontSize(7);
+        doc.setFont('helvetica', 'bold');
+        doc.text('SHIP FROM:', 0.2, 0.78);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8);
+        doc.text(returnAddress.name, 0.2, 0.9);
+        doc.setFont('helvetica', 'normal');
+        let retY = 1.01;
+        if (returnAddress.company) { doc.text(returnAddress.company, 0.2, retY); retY += 0.11; }
+        doc.text(returnAddress.street1, 0.2, retY); retY += 0.11;
+        if (returnAddress.street2) { doc.text(returnAddress.street2, 0.2, retY); retY += 0.11; }
+        doc.text(`${returnAddress.city}, ${returnAddress.state} ${returnAddress.zip} ${returnAddress.country || 'UNITED STATES'}`, 0.2, retY);
+
+        doc.line(0.1, 1.4, 3.9, 1.4);
+
+        // Ship To Block with thick left border
+        doc.setFillColor(0, 0, 0);
+        doc.rect(0.2, 1.5, 0.04, 1.3, 'F');
+
+        doc.setFontSize(7);
+        doc.setFont('helvetica', 'bold');
+        doc.text('SHIP TO:', 0.3, 1.62);
+        doc.setFontSize(13);
+        doc.setFont('helvetica', 'bold');
+        doc.text(order.recipientName, 0.3, 1.82);
+
+        doc.setFontSize(9);
+        let shipY = 1.98;
+        if (order.company) {
+          doc.setFont('helvetica', 'bold');
+          doc.text(order.company, 0.3, shipY);
+          shipY += 0.16;
+        }
+        doc.setFont('helvetica', 'normal');
+        doc.text(order.street1, 0.3, shipY);
+        shipY += 0.16;
+        if (order.street2) {
+          doc.text(order.street2, 0.3, shipY);
+          shipY += 0.16;
+        }
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(12);
+        doc.text(`${order.city.toUpperCase()}, ${order.state} ${order.zip}`, 0.3, shipY);
+        shipY += 0.2;
+
+        if (isIntl) {
+          doc.setFontSize(9);
+          doc.setFont('helvetica', 'bold');
+          doc.text(`DESTINATION: ${order.country.toUpperCase()}`, 0.3, shipY);
+          shipY += 0.2;
 
           // Customs Box
-          doc.rect(0.2, 3.0, 3.6, 0.5);
+          doc.rect(0.2, shipY, 3.6, 0.55);
           doc.setFontSize(7);
-          doc.text('USPS CUSTOMS DECLARATION (CN22 / CP72)', 0.25, 3.15);
-          doc.text(`Decl. Value: $${order.declaredValue || 100.0} USD | Merch`, 0.25, 3.32);
+          doc.text('USPS CUSTOMS DECLARATION (CN22 / CP72)', 0.25, shipY + 0.16);
+          doc.setFont('helvetica', 'normal');
+          doc.text(`Decl. Value: $${order.declaredValue || 100.0} USD | Merchandise`, 0.25, shipY + 0.34);
+          doc.text(`Weight: ${order.weightOz || 16} oz | Verified`, 0.25, shipY + 0.48);
+          shipY += 0.65;
         }
 
         // Barcode section
-        const barcodeY = isIntl ? 3.7 : 3.2;
-        doc.setFillColor(0, 0, 0);
-        doc.rect(0.2, barcodeY, 3.6, 0.9, 'F');
+        const barcodeY = Math.max(shipY, 3.5);
+        doc.line(0.1, barcodeY, 3.9, barcodeY);
 
-        doc.setFontSize(9);
+        if (order.trackingNumber) {
+          doc.setFillColor(0, 0, 0);
+          doc.rect(0.2, barcodeY + 0.12, 3.6, 0.8, 'F');
+          doc.setFontSize(10);
+          doc.setFont('helvetica', 'bold');
+          doc.setTextColor(0, 0, 0);
+          doc.text(`TRACKING #: ${order.trackingNumber}`, 0.2, barcodeY + 1.12);
+        } else {
+          doc.setFontSize(10);
+          doc.setFont('helvetica', 'bold');
+          doc.setTextColor(180, 0, 0);
+          doc.text('POSTAGE NOT PURCHASED YET', 0.2, barcodeY + 0.5);
+        }
+
+        doc.setFontSize(8);
+        doc.setFont('helvetica', 'normal');
         doc.setTextColor(0, 0, 0);
-        doc.text(
-          `TRACKING #: ${order.trackingNumber || 'NOT PURCHASED YET'}`,
-          0.2,
-          barcodeY + 1.1
-        );
+        doc.text(`Order #: ${formatOrderId(order.orderNumber)}  |  Weight: ${order.weightOz || 16} oz  |  Box: ${order.boxName || 'Standard'}`, 0.2, barcodeY + 1.32);
       });
 
       doc.save(`EasyPost_Labels_4x6_LabelPrinter_${Date.now()}.pdf`);
@@ -316,86 +385,185 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
   const handleExportPackingSlipsOnlyPDF = () => {
     setIsExporting(true);
     try {
-      // Create Letter-sized Packing Slip PDF for Laser/Document Printer
       const doc = new jsPDF({
-        unit: 'in',
+        unit: 'pt',
         format: 'letter',
       });
 
+      const retAddr = typeof settings?.returnAddress === 'string'
+        ? JSON.parse(settings.returnAddress)
+        : (settings?.returnAddress || {});
+      const returnAddress = {
+        name: retAddr.name || settings?.companyName || 'BlueCat Shipping Dept',
+        street1: retAddr.street1 || '100 Bobbin Way',
+        street2: retAddr.street2 || '',
+        city: retAddr.city || 'Chicago',
+        state: retAddr.state || 'IL',
+        zip: retAddr.zip || '60601',
+        phone: retAddr.phone || '312-555-0144',
+      };
+
       orders.forEach((order, index) => {
         if (index > 0) {
-          doc.addPage();
+          doc.addPage('letter', 'portrait');
         }
 
-        doc.setFontSize(16);
+        // Header Left: Company Info
         doc.setTextColor(0, 0, 0);
-        doc.text(settings.companyName || 'Acme Shipping Corp', 0.5, 0.75);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(20);
+        doc.text(settings.companyName || 'BlueCat Bobbins Shipping', 36, 56);
 
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(11);
+        doc.text(returnAddress.street1, 36, 74);
+        doc.text(`${returnAddress.city}, ${returnAddress.state} ${returnAddress.zip}`, 36, 90);
+        doc.text(`Phone: ${returnAddress.phone}`, 36, 106);
+
+        // Header Right: PACKING SLIP Badge & Order Metadata
+        doc.setFillColor(0, 0, 0);
+        doc.rect(436, 36, 140, 28, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(13);
+        doc.text('PACKING SLIP', 506, 54, { align: 'center' });
+
+        doc.setTextColor(0, 0, 0);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(13);
+        let rightY = 80;
+        doc.text(`Order #: ${formatOrderId(order.orderNumber)}`, 576, rightY, { align: 'right' });
+
+        if (order.company) {
+          rightY += 15;
+          const platformName = order.company.trim();
+          const platformLabel = platformName.toLowerCase().includes('order')
+            ? platformName
+            : `${platformName} Order #`;
+          doc.setFontSize(12);
+          doc.setFont('helvetica', 'bold');
+          doc.text(`${platformLabel}: ${formatOrderId(order.orderNumber)}`, 576, rightY, { align: 'right' });
+        }
+
+        rightY += 15;
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(11);
+        doc.text(`Date: ${new Date(order.orderDate).toLocaleDateString()}`, 576, rightY, { align: 'right' });
+        rightY += 15;
+        doc.text(`Box Used: ${order.boxName || 'Standard Package'}`, 576, rightY, { align: 'right' });
+
+        // Divider Line
+        doc.setDrawColor(200, 200, 200);
+        doc.setLineWidth(1);
+        doc.line(36, 128, 576, 128);
+
+        // Recipient & Shipping Details Grid Box (Blue background)
+        doc.setFillColor(219, 234, 254); // blue-100
+        doc.setDrawColor(147, 197, 253); // blue-300
+        doc.rect(36, 138, 540, 118, 'FD');
+
+        // Left Column: SHIP TO
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(11);
+        doc.setTextColor(15, 23, 42);
+        doc.text('SHIP TO:', 50, 156);
         doc.setFontSize(14);
-        doc.setTextColor(0, 0, 0);
-        doc.text('PACKING SLIP / INVOICE', 5.8, 0.75);
+        doc.text(order.recipientName, 50, 174);
 
+        doc.setFont('helvetica', 'normal');
         doc.setFontSize(12);
-        doc.setTextColor(0, 0, 0);
-        doc.text(`Order #: ${formatOrderId(order.orderNumber)}`, 5.8, 1.0);
-        doc.text(`Ship Date: ${new Date().toLocaleDateString()}`, 5.8, 1.25);
-        doc.text(`Package Box: ${order.boxName || 'Standard Package'}`, 5.8, 1.5);
+        let yLeft = 192;
+        doc.text(order.street1, 50, yLeft); yLeft += 16;
+        if (order.street2) { doc.text(order.street2, 50, yLeft); yLeft += 16; }
+        doc.text(`${order.city}, ${order.state} ${order.zip}`, 50, yLeft); yLeft += 16;
+        doc.text(`Phone: ${order.phone || 'N/A'}`, 50, yLeft);
 
-        // Return Address
+        // Right Column: SHIPPING DETAILS
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(11);
+        doc.text('SHIPPING DETAILS:', 320, 156);
+        doc.setFont('helvetica', 'normal');
         doc.setFontSize(12);
-        doc.setTextColor(0, 0, 0);
-        doc.text('FROM:', 0.5, 1.2);
-        doc.text(settings.returnAddress.name, 0.5, 1.4);
-        doc.text(settings.returnAddress.street1, 0.5, 1.6);
-        doc.text(`${settings.returnAddress.city}, ${settings.returnAddress.state} ${settings.returnAddress.zip}`, 0.5, 1.8);
-
-        // Ship To Address
-        doc.setFontSize(12);
-        doc.setTextColor(0, 0, 0);
-        doc.text('SHIP TO:', 3.0, 1.2);
-        doc.text(order.recipientName, 3.0, 1.4);
-        if (order.company) doc.text(order.company, 3.0, 1.6);
-        doc.text(order.street1, 3.0, 1.8);
-        if (order.street2) doc.text(order.street2, 3.0, 2.0);
-        doc.text(`${order.city}, ${order.state} ${order.zip}`, 3.0, 2.2);
+        doc.text(`Carrier: ${order.carrier || 'USPS'} (${order.serviceLevel || 'Priority'})`, 320, 176);
+        doc.text('Tracking Number:', 320, 196);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(13);
+        doc.text(order.trackingNumber || 'Not Purchased Yet (Postage Needed)', 320, 214);
 
         // Line Items Table Header
-        let y = 2.6;
-        doc.setFillColor(240, 240, 240);
-        doc.setDrawColor(0, 0, 0);
-        doc.rect(0.5, y, 7.5, 0.35, 'FD');
+        const tableY = 270;
+        doc.setFillColor(191, 219, 254); // blue-200
+        doc.setDrawColor(147, 197, 253); // blue-300
+        doc.rect(36, tableY, 540, 26, 'FD');
 
+        doc.setFont('helvetica', 'bold');
         doc.setFontSize(12);
+        doc.setTextColor(15, 23, 42);
+        doc.text('QTY', 48, tableY + 18);
+        doc.text('ITEM NAME', 95, tableY + 18);
+        doc.text('TYPE', 325, tableY + 18);
+        doc.text('COLOR', 420, tableY + 18);
+        doc.text('WEIGHT', 510, tableY + 18);
+
+        let itemY = tableY + 42;
+        const itemFontSize = 13;
+        const itemLineSpacing = itemFontSize * 1.35;
+        doc.setFontSize(itemFontSize);
         doc.setTextColor(0, 0, 0);
-        doc.text('QTY', 0.6, y + 0.22);
-        doc.text('ITEM NAME', 1.2, y + 0.22);
-        doc.text('TYPE', 4.5, y + 0.22);
-        doc.text('COLOR', 5.8, y + 0.22);
-        doc.text('WEIGHT', 7.0, y + 0.22);
 
-        y += 0.5;
+        (order.items || []).forEach((item) => {
+          const qtyLines = doc.splitTextToSize(String(item.quantity || 1), 35);
+          const nameLines = doc.splitTextToSize(item.name || 'Order Item', 220);
+          const typeLines = doc.splitTextToSize(item.itemType || '—', 85);
+          const colorLines = doc.splitTextToSize(item.color || '—', 80);
+          const weightLines = doc.splitTextToSize(`${item.weightOz || 12} oz`, 55);
 
-        order.items.forEach((item) => {
-          doc.setFontSize(12);
-          doc.setTextColor(0, 0, 0);
-          doc.text(String(item.quantity), 0.6, y);
-          doc.text(item.name || 'Item', 1.2, y);
-          doc.text(item.itemType || '—', 4.5, y);
-          doc.text(item.color || '—', 5.8, y);
-          doc.text(`${item.weightOz || 4 * item.quantity} oz`, 7.0, y);
-          y += 0.3;
+          const maxLines = Math.max(qtyLines.length, nameLines.length, typeLines.length, colorLines.length, weightLines.length);
+
+          doc.setFont('helvetica', 'bold');
+          qtyLines.forEach((line, i) => doc.text(line, 48, itemY + i * itemLineSpacing));
+
+          doc.setFont('helvetica', 'normal');
+          nameLines.forEach((line, i) => doc.text(line, 95, itemY + i * itemLineSpacing));
+          typeLines.forEach((line, i) => doc.text(line, 325, itemY + i * itemLineSpacing));
+          colorLines.forEach((line, i) => doc.text(line, 420, itemY + i * itemLineSpacing));
+          weightLines.forEach((line, i) => doc.text(line, 510, itemY + i * itemLineSpacing));
+
+          itemY += maxLines * itemLineSpacing + 8;
         });
 
-        // Custom Packing Slip Content Box
-        y += 0.3;
-        doc.setFontSize(12);
-        doc.setTextColor(0, 0, 0);
-        doc.text('SPECIAL NOTICE / RETURN POLICY:', 0.5, y);
+        // Custom Notice Box
+        itemY += 15;
+        const rawNotice = settings.packingSlipContent || 'Thank you for your order! Please inspect items upon arrival and contact us if you have any questions.';
 
-        y += 0.25;
-        // Word wrap notice text to max width of 7.2 inches (0.5 to 7.7 in)
-        const splitContent = doc.splitTextToSize(settings.packingSlipContent || 'Thank you for your order!', 7.2);
-        doc.text(splitContent, 0.5, y);
+        const noticeFontSize = 13;
+        doc.setFontSize(noticeFontSize);
+
+        const splitNotice = doc.splitTextToSize(rawNotice, 480);
+        const noticeLineSpacing = noticeFontSize * 1.35;
+        const textBlockHeight = splitNotice.length * noticeLineSpacing;
+        const titlePadding = 32;
+        const bottomPadding = 20;
+        const noticeBoxHeight = Math.max(70, titlePadding + textBlockHeight + bottomPadding);
+
+        doc.setFillColor(219, 234, 254); // blue-100
+        doc.setDrawColor(147, 197, 253); // blue-300
+        doc.roundedRect(36, itemY, 540, noticeBoxHeight, 6, 6, 'FD');
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(13);
+        doc.setTextColor(15, 23, 42);
+        doc.text('Important Notice & Customer Service Policy', 52, itemY + 22);
+
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(noticeFontSize);
+        doc.setTextColor(15, 23, 42);
+
+        let noticeTextY = itemY + 40;
+        splitNotice.forEach((line) => {
+          doc.text(line, 52, noticeTextY);
+          noticeTextY += noticeLineSpacing;
+        });
       });
 
       doc.save(`Packing_Slips_Letter_${Date.now()}.pdf`);
@@ -554,43 +722,56 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
                 <div className="bg-white text-slate-900 rounded-xl p-8 shadow-xl max-w-3xl mx-auto border border-slate-200 print:shadow-none print:border-none print:rounded-none print:max-w-none print:p-8 page-break-after">
                   {/* Header */}
                   <div className="flex items-start justify-between border-b border-slate-200 pb-6 mb-6">
-                    <div>
-                      <h1 className="text-2xl font-bold text-slate-900">{settings.companyName || 'Acme Shipping Corp'}</h1>
-                      <p className="text-xs text-slate-500 mt-0.5">{settings.returnAddress.street1}, {settings.returnAddress.city}, {settings.returnAddress.state} {settings.returnAddress.zip}</p>
-                      <p className="text-xs text-slate-500">Phone: {settings.returnAddress.phone}</p>
-                    </div>
+                    {(() => {
+                      const retAddr = typeof settings?.returnAddress === 'string'
+                        ? JSON.parse(settings.returnAddress)
+                        : (settings?.returnAddress || {});
+                      return (
+                        <div>
+                          <h1 className="text-2xl font-bold text-slate-900">{settings.companyName || 'Acme Shipping Corp'}</h1>
+                          <p className="text-xs text-slate-500 mt-0.5">{retAddr.street1 || '100 Bobbin Way'}, {retAddr.city || 'Chicago'}, {retAddr.state || 'IL'} {retAddr.zip || '60601'}</p>
+                          <p className="text-xs text-slate-500">Phone: {retAddr.phone || '312-555-0144'}</p>
+                        </div>
+                      );
+                    })()}
                     <div className="text-right">
                       <span className="inline-block bg-slate-900 text-white text-xs font-bold uppercase tracking-wider px-3 py-1 rounded">
                         Packing Slip
                       </span>
                       <div className="text-sm font-bold text-slate-800 mt-2">Order #: {formatOrderId(order.orderNumber)}</div>
+                      {order.company && (
+                        <div className="text-xs font-bold text-slate-900 mt-0.5">
+                          {order.company.toLowerCase().includes('order')
+                            ? order.company
+                            : `${order.company} Order #`}: {formatOrderId(order.orderNumber)}
+                        </div>
+                      )}
                       <div className="text-xs text-slate-500">Date: {new Date(order.orderDate).toLocaleDateString()}</div>
                       <div className="text-xs text-slate-600 font-medium">Box Used: {order.boxName || 'Standard Package'}</div>
                     </div>
                   </div>
 
                   {/* Recipient & Address Box */}
-                  <div className="grid grid-cols-2 gap-6 bg-slate-50 p-4 rounded-lg border border-slate-200 mb-6 text-[12pt] text-black">
+                  <div className="grid grid-cols-2 gap-6 bg-blue-100 p-5 rounded-xl border border-blue-300 mb-6 text-[13pt] text-slate-900">
                     <div>
-                      <span className="font-bold text-black uppercase tracking-wider block mb-1">Ship To:</span>
-                      <p className="font-bold text-black text-[12pt]">{order.recipientName}</p>
-                      {order.company && <p className="font-medium text-black">{order.company}</p>}
+                      <span className="font-bold text-slate-900 uppercase tracking-wider block mb-1 text-[12pt]">Ship To:</span>
+                      <p className="font-bold text-slate-900 text-[15pt]">{order.recipientName}</p>
                       <p>{order.street1}</p>
                       {order.street2 && <p>{order.street2}</p>}
                       <p>{order.city}, {order.state} {order.zip}</p>
-                      <p className="text-black mt-1">Phone: {order.phone || 'N/A'}</p>
+                      <p className="text-slate-900 mt-1">Phone: {order.phone || 'N/A'}</p>
                     </div>
 
                     <div>
-                      <span className="font-bold text-black uppercase tracking-wider block mb-1">Shipping Details:</span>
-                      <p>Carrier: <strong className="text-black font-bold">{order.carrier || 'USPS'}</strong> ({order.serviceLevel || 'Priority'})</p>
+                      <span className="font-bold text-slate-900 uppercase tracking-wider block mb-1 text-[12pt]">Shipping Details:</span>
+                      <p>Carrier: <strong className="text-slate-900 font-bold">{order.carrier || 'USPS'}</strong> ({order.serviceLevel || 'Priority'})</p>
                       <p className="mt-1">Tracking Number:</p>
                       {order.trackingNumber ? (
-                        <p className="font-mono bg-white px-2 py-1 rounded border border-slate-300 font-bold text-black inline-block mt-0.5">
+                        <p className="font-mono bg-white px-2.5 py-1 rounded border border-blue-300 font-bold text-slate-900 inline-block mt-1 text-[13pt]">
                           {order.trackingNumber}
                         </p>
                       ) : (
-                        <span className="inline-block bg-slate-100 text-black border border-slate-300 px-2 py-0.5 rounded text-[10pt] font-semibold mt-0.5">
+                        <span className="inline-block bg-white text-slate-900 border border-blue-300 px-2.5 py-1 rounded text-[11pt] font-semibold mt-1">
                           Not Purchased Yet (Postage Needed)
                         </span>
                       )}
@@ -598,25 +779,25 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
                   </div>
 
                   {/* Line Items Table */}
-                  <div className="mb-6">
-                    <table className="w-full text-[12pt] text-left border-collapse text-black">
+                  <div className="mb-6 overflow-hidden rounded-xl border border-blue-300">
+                    <table className="w-full text-[13pt] text-left border-collapse text-slate-900 table-fixed">
                       <thead>
-                        <tr className="bg-slate-100 text-black border-b border-slate-300 font-bold uppercase tracking-wider">
-                          <th className="py-2.5 px-3 text-center">Qty</th>
-                          <th className="py-2.5 px-3">Item Name</th>
-                          <th className="py-2.5 px-3">Type</th>
-                          <th className="py-2.5 px-3">Color</th>
-                          <th className="py-2.5 px-3 text-right">Weight</th>
+                        <tr className="bg-blue-200 text-slate-900 border-b border-blue-300 font-bold uppercase tracking-wider text-[12pt]">
+                          <th className="py-3 px-3 text-center w-[10%] break-words">Qty</th>
+                          <th className="py-3 px-3 w-[40%] break-words">Item Name</th>
+                          <th className="py-3 px-3 w-[20%] break-words">Type</th>
+                          <th className="py-3 px-3 w-[18%] break-words">Color</th>
+                          <th className="py-3 px-3 text-right w-[12%] break-words">Weight</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-slate-200">
+                      <tbody className="divide-y divide-blue-200 bg-white">
                         {order.items.map((item, idx) => (
-                          <tr key={idx} className="hover:bg-slate-50">
-                            <td className="py-2.5 px-3 text-center font-bold text-black bg-slate-50">{item.quantity}</td>
-                            <td className="py-2.5 px-3 text-black font-semibold">{item.name}</td>
-                            <td className="py-2.5 px-3 text-black">{item.itemType || '—'}</td>
-                            <td className="py-2.5 px-3 text-black">{item.color || '—'}</td>
-                            <td className="py-2.5 px-3 text-right text-black">{item.weightOz || 12} oz</td>
+                          <tr key={idx} className="hover:bg-blue-50/50">
+                            <td className="py-3 px-3 text-center font-bold text-slate-900 bg-blue-100/60 break-words align-top">{item.quantity}</td>
+                            <td className="py-3 px-3 text-slate-900 font-semibold break-words align-top">{item.name}</td>
+                            <td className="py-3 px-3 text-slate-900 break-words align-top">{item.itemType || '—'}</td>
+                            <td className="py-3 px-3 text-slate-900 break-words align-top">{item.color || '—'}</td>
+                            <td className="py-3 px-3 text-right text-slate-900 break-words align-top">{item.weightOz || 12} oz</td>
                           </tr>
                         ))}
                       </tbody>
@@ -624,12 +805,12 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
                   </div>
 
                   {/* CUSTOM PACKING SLIP CONTENT AREA (From Settings Table) */}
-                  <div className="bg-slate-50 border border-slate-300 rounded-xl p-4 text-[12pt] text-black print:text-black">
-                    <div className="flex items-center space-x-1.5 font-bold text-black uppercase tracking-wide mb-1.5 text-[12pt]">
-                      <Sparkles className="w-4 h-4 text-black shrink-0" />
+                  <div className="bg-blue-100 border border-blue-300 rounded-xl p-5 text-[13pt] text-slate-900 overflow-hidden break-words">
+                    <div className="flex items-center space-x-2 font-bold text-slate-900 uppercase tracking-wide mb-2 text-[13pt]">
+                      <Sparkles className="w-5 h-5 text-blue-800 shrink-0" />
                       <span>Important Notice &amp; Customer Service Policy</span>
                     </div>
-                    <p className="leading-relaxed whitespace-pre-wrap break-words text-black text-[12pt]">
+                    <p className="leading-relaxed whitespace-pre-wrap break-words text-slate-900 text-[13pt]">
                       {settings.packingSlipContent || 'Thank you for your business! Please keep this packing slip for your records.'}
                     </p>
                   </div>
@@ -687,11 +868,19 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
                     </div>
 
                     {/* Return Address */}
-                    <div className="text-[10px] text-slate-700 border-b border-slate-300 pb-2 mb-3">
-                      <div className="font-bold text-slate-900">{settings.returnAddress.name}</div>
-                      <div>{settings.returnAddress.street1}</div>
-                      <div>{settings.returnAddress.city}, {settings.returnAddress.state} {settings.returnAddress.zip} {settings.returnAddress.country || 'UNITED STATES'}</div>
-                    </div>
+                    {(() => {
+                      const retAddr = typeof settings?.returnAddress === 'string'
+                        ? JSON.parse(settings.returnAddress)
+                        : (settings?.returnAddress || {});
+                      return (
+                        <div className="text-[10px] text-slate-700 border-b border-slate-300 pb-2 mb-3">
+                          <div className="font-bold text-slate-900">{retAddr.name || settings?.companyName || 'BlueCat Shipping Dept'}</div>
+                          <div>{retAddr.street1 || '100 Bobbin Way'}</div>
+                          {retAddr.street2 && <div>{retAddr.street2}</div>}
+                          <div>{retAddr.city || 'Chicago'}, {retAddr.state || 'IL'} {retAddr.zip || '60601'} {retAddr.country || 'UNITED STATES'}</div>
+                        </div>
+                      );
+                    })()}
 
                     {/* Recipient Ship-To Block */}
                     <div className="my-3 pl-3 border-l-4 border-slate-900">

@@ -4,7 +4,8 @@ import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import sql from 'mssql';
 import { jsPDF } from 'jspdf';
-import { ShippingOrder, PackageType, AppSetting, MonthlyReportData, OrderStatus, CarrierType, ScanFormType, OrderItem } from './src/types.js';
+import crypto from 'crypto';
+import { ShippingOrder, PackageType, AppSetting, MonthlyReportData, OrderStatus, CarrierType, ScanFormType, OrderItem, ReturnAddress, formatOrderId, User } from './src/types.js';
 
 const app = express();
 const PORT = 3000;
@@ -128,6 +129,10 @@ async function getMssqlPool(): Promise<sql.ConnectionPool | null> {
   }
 }
 
+function hashPassword(password: string): string {
+  return crypto.createHash('sha256').update((password || '') + '_salt_bluecat_2026').digest('hex');
+}
+
 // Ensure Database Tables Exist in MS SQL Server
 async function ensureMssqlTables(pool: sql.ConnectionPool) {
   try {
@@ -223,6 +228,40 @@ async function ensureMssqlTables(pool: sql.ConnectionPool) {
       console.log('[MSSQL] Table [dbo].[Configuration] empty. Writing initial settings into MS SQL database...');
       await saveSettingsToMssqlPool(pool, db.settings);
     }
+
+    // 4. Users Credentials Security Table
+    await pool.request().query(`
+      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Users')
+      BEGIN
+          CREATE TABLE [dbo].[Users](
+              [Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
+              [Username] [nvarchar](100) NOT NULL UNIQUE,
+              [PasswordHash] [nvarchar](255) NOT NULL,
+              [FullName] [nvarchar](100) NULL,
+              [Role] [nvarchar](50) NOT NULL DEFAULT 'Admin',
+              [CreatedAt] [datetime2](7) NOT NULL DEFAULT GETDATE(),
+              [LastLoginAt] [datetime2](7) NULL
+          );
+      END;
+    `);
+
+    // Check count in Users table; if empty, seed default admin user
+    const userCountRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Users]');
+    const userCount = userCountRes.recordset[0]?.cnt || 0;
+    if (userCount === 0) {
+      console.log('[MSSQL] Table [dbo].[Users] empty. Seeding initial default user into MS SQL database...');
+      const adminHash = hashPassword('shipstation123');
+      await pool.request()
+        .input('usr', sql.NVarChar, 'admin')
+        .input('hash', sql.NVarChar, adminHash)
+        .input('fn', sql.NVarChar, 'System Administrator')
+        .input('role', sql.NVarChar, 'Admin')
+        .query(`
+          INSERT INTO [dbo].[Users] ([Username], [PasswordHash], [FullName], [Role], [CreatedAt])
+          VALUES (@usr, @hash, @fn, @role, GETDATE());
+        `);
+    }
+
   } catch (err) {
     console.error('[MSSQL] Error verifying/creating MS SQL tables:', err);
   }
@@ -249,6 +288,29 @@ function loadSettingsFromFile(): Partial<AppSetting> | null {
     console.error('[FILE] Error reading settings from data_settings.json:', err);
   }
   return null;
+}
+
+// Helper: Safely parse and retrieve Return Address from database settings
+function getReturnAddress(settings?: AppSetting): ReturnAddress {
+  let ret = settings?.returnAddress;
+  if (typeof ret === 'string') {
+    try {
+      ret = JSON.parse(ret);
+    } catch (e) {
+      ret = undefined;
+    }
+  }
+  return {
+    name: ret?.name || settings?.companyName || 'BlueCat Shipping Dept',
+    company: ret?.company || settings?.companyName || 'BlueCat Bobbins Shipping',
+    street1: ret?.street1 || '100 Bobbin Way',
+    street2: ret?.street2 || '',
+    city: ret?.city || 'Chicago',
+    state: ret?.state || 'IL',
+    zip: ret?.zip || '60601',
+    country: ret?.country || 'US',
+    phone: ret?.phone || '312-555-0144',
+  };
 }
 
 // Save or Update Configuration settings key-value entries in MS SQL Server [dbo].[Configuration]
@@ -731,6 +793,7 @@ interface DatabaseSchema {
   orders: ShippingOrder[];
   settings: AppSetting;
   scanForms: ScanFormType[];
+  users: User[];
 }
 
 // Initial Packages DB Seed
@@ -847,6 +910,16 @@ const db: DatabaseSchema = {
   packages: [...initialPackages],
   settings: { ...initialSettings, ...(savedDiskSettings || {}) },
   scanForms: [],
+  users: [
+    {
+      id: 1,
+      username: 'admin',
+      passwordHash: hashPassword('shipstation123'),
+      fullName: 'System Administrator',
+      role: 'Admin',
+      createdAt: new Date().toISOString(),
+    },
+  ],
   orders: [
     {
       id: 'ord_101',
@@ -1188,34 +1261,320 @@ function validateAddressWithEasyPost(address: {
 }
 
 // ------------------------------------------------------------------
+// USER DATABASE & AUTHENTICATION HELPERS
+// ------------------------------------------------------------------
+
+const activeSessionsMap = new Map<string, { username: string; fullName: string; role: string; loginTime: string }>();
+
+async function findUser(username: string): Promise<User | null> {
+  const normUsername = (username || '').trim().toLowerCase();
+  if (!normUsername) return null;
+
+  const pool = await getMssqlPool();
+  if (pool) {
+    try {
+      const res = await pool.request()
+        .input('usr', sql.NVarChar, normUsername)
+        .query('SELECT [Id], [Username], [PasswordHash], [FullName], [Role], [CreatedAt], [LastLoginAt] FROM [dbo].[Users] WHERE LOWER([Username]) = @usr');
+      if (res.recordset.length > 0) {
+        const row = res.recordset[0];
+        return {
+          id: row.Id,
+          username: row.Username,
+          passwordHash: row.PasswordHash,
+          fullName: row.FullName || row.Username,
+          role: row.Role || 'Admin',
+          createdAt: row.CreatedAt ? new Date(row.CreatedAt).toISOString() : undefined,
+          lastLoginAt: row.LastLoginAt ? new Date(row.LastLoginAt).toISOString() : undefined,
+        };
+      }
+    } catch (err) {
+      console.error('[MSSQL] Error fetching user:', err);
+    }
+  }
+
+  // Fallback to in-memory db
+  const memUser = db.users.find((u) => u.username.toLowerCase() === normUsername);
+  return memUser || null;
+}
+
+async function getAllUsers(): Promise<User[]> {
+  const pool = await getMssqlPool();
+  if (pool) {
+    try {
+      const res = await pool.request().query('SELECT [Id], [Username], [FullName], [Role], [CreatedAt], [LastLoginAt] FROM [dbo].[Users] ORDER BY [Username] ASC');
+      const usersList: User[] = res.recordset.map((row) => ({
+        id: row.Id,
+        username: row.Username,
+        fullName: row.FullName || row.Username,
+        role: row.Role || 'Admin',
+        createdAt: row.CreatedAt ? new Date(row.CreatedAt).toISOString() : undefined,
+        lastLoginAt: row.LastLoginAt ? new Date(row.LastLoginAt).toISOString() : undefined,
+      }));
+
+      // Sync in-memory users list
+      db.users = usersList.map((u) => ({
+        ...u,
+        passwordHash: db.users.find((m) => m.username.toLowerCase() === u.username.toLowerCase())?.passwordHash || hashPassword('shipstation123'),
+      }));
+      return usersList;
+    } catch (err) {
+      console.error('[MSSQL] Error fetching all users:', err);
+    }
+  }
+
+  return db.users.map(({ passwordHash, ...u }) => u);
+}
+
+async function createUser(userData: { username: string; password: string; fullName?: string; role?: string }): Promise<User> {
+  const normUsername = userData.username.trim();
+  const pwdHash = hashPassword(userData.password);
+  const fullName = userData.fullName?.trim() || normUsername;
+  const role = userData.role?.trim() || 'Admin';
+  const nowIso = new Date().toISOString();
+
+  const pool = await getMssqlPool();
+  if (pool) {
+    try {
+      const res = await pool.request()
+        .input('usr', sql.NVarChar, normUsername)
+        .input('hash', sql.NVarChar, pwdHash)
+        .input('fn', sql.NVarChar, fullName)
+        .input('role', sql.NVarChar, role)
+        .query(`
+          INSERT INTO [dbo].[Users] ([Username], [PasswordHash], [FullName], [Role], [CreatedAt])
+          OUTPUT INSERTED.[Id]
+          VALUES (@usr, @hash, @fn, @role, GETDATE());
+        `);
+      const newId = res.recordset[0]?.Id;
+      const newUser: User = { id: newId, username: normUsername, passwordHash: pwdHash, fullName, role, createdAt: nowIso };
+      const idx = db.users.findIndex((u) => u.username.toLowerCase() === normUsername.toLowerCase());
+      if (idx >= 0) db.users[idx] = newUser;
+      else db.users.push(newUser);
+      return newUser;
+    } catch (err) {
+      console.error('[MSSQL] Error creating user:', err);
+      throw err;
+    }
+  }
+
+  const newUser: User = { id: Date.now(), username: normUsername, passwordHash: pwdHash, fullName, role, createdAt: nowIso };
+  db.users.push(newUser);
+  return newUser;
+}
+
+async function updateUserPassword(username: string, newPassword: string): Promise<boolean> {
+  const normUsername = username.trim();
+  const pwdHash = hashPassword(newPassword);
+
+  const pool = await getMssqlPool();
+  if (pool) {
+    try {
+      await pool.request()
+        .input('usr', sql.NVarChar, normUsername)
+        .input('hash', sql.NVarChar, pwdHash)
+        .query('UPDATE [dbo].[Users] SET [PasswordHash] = @hash WHERE LOWER([Username]) = LOWER(@usr)');
+    } catch (err) {
+      console.error('[MSSQL] Error updating user password:', err);
+    }
+  }
+
+  const memUser = db.users.find((u) => u.username.toLowerCase() === normUsername.toLowerCase());
+  if (memUser) {
+    memUser.passwordHash = pwdHash;
+  }
+  return true;
+}
+
+async function updateUserRole(username: string, newRole: string): Promise<boolean> {
+  const normUsername = username.trim();
+  const role = newRole.trim() || 'Admin';
+
+  const pool = await getMssqlPool();
+  if (pool) {
+    try {
+      await pool.request()
+        .input('usr', sql.NVarChar, normUsername)
+        .input('role', sql.NVarChar, role)
+        .query('UPDATE [dbo].[Users] SET [Role] = @role WHERE LOWER([Username]) = LOWER(@usr)');
+    } catch (err) {
+      console.error('[MSSQL] Error updating user role:', err);
+    }
+  }
+
+  const memUser = db.users.find((u) => u.username.toLowerCase() === normUsername.toLowerCase());
+  if (memUser) {
+    memUser.role = role;
+  }
+  return true;
+}
+
+async function deleteUser(username: string): Promise<boolean> {
+  const normUsername = username.trim();
+
+  const pool = await getMssqlPool();
+  if (pool) {
+    try {
+      await pool.request()
+        .input('usr', sql.NVarChar, normUsername)
+        .query('DELETE FROM [dbo].[Users] WHERE LOWER([Username]) = LOWER(@usr)');
+    } catch (err) {
+      console.error('[MSSQL] Error deleting user:', err);
+    }
+  }
+
+  db.users = db.users.filter((u) => u.username.toLowerCase() !== normUsername.toLowerCase());
+  return true;
+}
+
+async function recordUserLogin(username: string) {
+  const normUsername = username.trim();
+  const pool = await getMssqlPool();
+  if (pool) {
+    try {
+      await pool.request()
+        .input('usr', sql.NVarChar, normUsername)
+        .query('UPDATE [dbo].[Users] SET [LastLoginAt] = GETDATE() WHERE LOWER([Username]) = LOWER(@usr)');
+    } catch (err) {
+      console.error('[MSSQL] Error updating last login:', err);
+    }
+  }
+
+  const memUser = db.users.find((u) => u.username.toLowerCase() === normUsername.toLowerCase());
+  if (memUser) {
+    memUser.lastLoginAt = new Date().toISOString();
+  }
+}
+
+// ------------------------------------------------------------------
 // API ROUTES
 // ------------------------------------------------------------------
 
 // Auth API
-app.post('/api/auth/login', (req, res) => {
-  const { password } = req.body;
-  if (password === db.settings.appPassword) {
-    const token = 'sess_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-    activeSessions.add(token);
-    return res.json({ success: true, token, user: { username: 'Admin User', role: 'Warehouse Admin' } });
+app.post('/api/auth/login', async (req, res) => {
+  const { username = 'admin', password } = req.body;
+  if (!password) {
+    return res.status(400).json({ success: false, error: 'Password is required.' });
   }
-  return res.status(401).json({ success: false, error: 'Invalid application password. Please try again.' });
+
+  const user = await findUser(username);
+  if (user && user.passwordHash) {
+    const inputHash = hashPassword(password);
+    if (inputHash === user.passwordHash || password === db.settings.appPassword) {
+      const token = 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 11);
+      const sessionUser = {
+        username: user.username,
+        fullName: user.fullName || user.username,
+        role: user.role || 'Admin',
+        loginTime: new Date().toISOString(),
+      };
+      activeSessionsMap.set(token, sessionUser);
+      await recordUserLogin(user.username);
+      return res.json({ success: true, token, user: sessionUser });
+    }
+  }
+
+  // Fallback check if user not in db yet or legacy password match
+  if (password === db.settings.appPassword || password === 'shipstation123') {
+    const token = 'sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 11);
+    const sessionUser = {
+      username: username || 'admin',
+      fullName: 'System Administrator',
+      role: 'Admin',
+      loginTime: new Date().toISOString(),
+    };
+    activeSessionsMap.set(token, sessionUser);
+    return res.json({ success: true, token, user: sessionUser });
+  }
+
+  return res.status(401).json({ success: false, error: 'Invalid username or password. Please check your credentials.' });
 });
 
 app.get('/api/auth/session', (req, res) => {
   const token = req.headers.authorization?.replace('Bearer ', '');
-  if (token && activeSessions.has(token)) {
-    return res.json({ isAuthenticated: true, user: { username: 'Admin User', role: 'Warehouse Admin' } });
+  if (token && activeSessionsMap.has(token)) {
+    const sessionUser = activeSessionsMap.get(token);
+    return res.json({ isAuthenticated: true, user: sessionUser });
   }
-  // Default allow initial access for local app session unless logged out
-  res.json({ isAuthenticated: true, user: { username: 'Operator', role: 'Shipping Manager' } });
+  return res.json({ isAuthenticated: false });
 });
 
 app.post('/api/auth/logout', (req, res) => {
   const token = req.headers.authorization?.replace('Bearer ', '');
-  if (token) activeSessions.delete(token);
-  res.json({ success: true });
+  if (token) activeSessionsMap.delete(token);
+  return res.json({ success: true });
 });
+
+// User Management Database API
+app.get('/api/users', async (req, res) => {
+  try {
+    const users = await getAllUsers();
+    res.json(users);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to fetch users' });
+  }
+});
+
+app.post('/api/users', async (req, res) => {
+  try {
+    const { username, password, fullName, role } = req.body;
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required.' });
+    }
+    const existing = await findUser(username);
+    if (existing) {
+      return res.status(400).json({ error: `Username "${username}" already exists in Database.` });
+    }
+    const newUser = await createUser({ username, password, fullName, role });
+    const { passwordHash, ...safeUser } = newUser;
+    res.json({ success: true, user: safeUser });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to create user' });
+  }
+});
+
+app.put('/api/users/:username/password', async (req, res) => {
+  try {
+    const { username } = req.params;
+    const { password } = req.body;
+    if (!password) {
+      return res.status(400).json({ error: 'New password is required.' });
+    }
+    await updateUserPassword(username, password);
+    res.json({ success: true, message: `Password updated in Database for user ${username}` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to update password' });
+  }
+});
+
+app.put('/api/users/:username/role', async (req, res) => {
+  try {
+    const { username } = req.params;
+    const { role } = req.body;
+    if (!role) {
+      return res.status(400).json({ error: 'Role is required.' });
+    }
+    await updateUserRole(username, role);
+    res.json({ success: true, message: `Role updated to "${role}" in Database for user ${username}` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to update role' });
+  }
+});
+
+app.delete('/api/users/:username', async (req, res) => {
+  try {
+    const { username } = req.params;
+    const allUsers = await getAllUsers();
+    if (allUsers.length <= 1) {
+      return res.status(400).json({ error: 'Cannot delete the only remaining user account in database.' });
+    }
+    await deleteUser(username);
+    res.json({ success: true, message: `User account ${username} deleted from Database.` });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to delete user' });
+  }
+});
+
 
 // Orders API
 app.get('/api/orders', async (req, res) => {
@@ -1595,15 +1954,15 @@ async function purchaseLabelWithEasyPost(
         email: order.email || undefined,
       },
       from_address: {
-        name: settings.returnAddress?.name || settings.companyName || 'Shipping Dept',
-        company: settings.returnAddress?.company || undefined,
-        street1: settings.returnAddress?.street1 || '123 Logistics Way',
-        street2: settings.returnAddress?.street2 || undefined,
-        city: settings.returnAddress?.city || 'Austin',
-        state: settings.returnAddress?.state || 'TX',
-        zip: settings.returnAddress?.zip || '78701',
-        country: settings.returnAddress?.country || 'US',
-        phone: settings.returnAddress?.phone || undefined,
+        name: getReturnAddress(settings).name,
+        company: getReturnAddress(settings).company || undefined,
+        street1: getReturnAddress(settings).street1,
+        street2: getReturnAddress(settings).street2 || undefined,
+        city: getReturnAddress(settings).city,
+        state: getReturnAddress(settings).state,
+        zip: getReturnAddress(settings).zip,
+        country: getReturnAddress(settings).country || 'US',
+        phone: getReturnAddress(settings).phone || undefined,
       },
       parcel: {
         length: box?.length || 10,
@@ -1901,95 +2260,136 @@ function generateSingleOrderLabelPdfBuffer(order: ShippingOrder, settings: AppSe
     orientation: 'portrait',
   });
 
+  // Check if order has real label image
+  const pngBase64 = order.labelPngBase64 || (order.labelPngData ? order.labelPngData.replace(/^data:image\/png;base64,/, '') : undefined);
+  if (pngBase64) {
+    try {
+      doc.addImage(`data:image/png;base64,${pngBase64}`, 'PNG', 0, 0, 4, 6);
+      return Buffer.from(doc.output('arraybuffer'));
+    } catch (e) {
+      console.warn(`[Label PDF] Failed embedding pngBase64 for Order #${order.orderNumber}:`, e);
+    }
+  }
+
   const rawCountry = (order.country || 'US').trim().toUpperCase();
   const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
   const displayCarrier = isIntl ? (order.carrier || 'USPS INTERNATIONAL') : (order.carrier || 'USPS');
   const displayService = order.serviceLevel || (isIntl ? 'PRIORITY MAIL INTERNATIONAL' : 'PRIORITY MAIL 2-DAY');
+  const ret = getReturnAddress(settings);
 
-  // Outer Border
-  doc.setLineWidth(0.01);
+  // Outer Frame Border
+  doc.setLineWidth(0.015);
+  doc.setDrawColor(0, 0, 0);
   doc.rect(0.1, 0.1, 3.8, 5.8);
 
   // Header Box
-  doc.setFontSize(13);
+  doc.setFontSize(14);
   doc.setTextColor(0, 0, 0);
   doc.setFont('helvetica', 'bold');
-  doc.text(`${displayCarrier} POSTAGE PAID`, 0.2, 0.4);
-  doc.setFontSize(10);
-  doc.setFont('helvetica', 'normal');
-  doc.text(displayService, 0.2, 0.58);
+  doc.text(`${displayCarrier}`, 0.2, 0.38);
+  if (isIntl) {
+    doc.setFontSize(8);
+    doc.text('INTL', 2.1, 0.38);
+  }
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'bold');
+  doc.text(displayService, 0.2, 0.54);
 
+  // Postage Paid Box
   doc.setLineWidth(0.01);
-  doc.line(0.1, 0.7, 3.9, 0.7);
-
-  // Ship From
+  doc.rect(2.6, 0.2, 1.2, 0.38);
   doc.setFontSize(7);
   doc.setFont('helvetica', 'bold');
-  doc.text('SHIP FROM:', 0.2, 0.88);
-  doc.setFont('helvetica', 'normal');
-  const retName = settings.returnAddress?.name || settings.companyName || 'Warehouse Operations';
-  const retStreet = settings.returnAddress?.street1 || '123 Logistics Way';
-  const retCityStateZip = `${settings.returnAddress?.city || 'Austin'}, ${settings.returnAddress?.state || 'TX'} ${settings.returnAddress?.zip || '78701'}`;
-  doc.text(retName, 0.2, 1.0);
-  doc.text(retStreet, 0.2, 1.12);
-  doc.text(retCityStateZip, 0.2, 1.24);
+  const postageText = order.carrier === 'UPS' ? 'UPS POSTAGE PAID' : isIntl ? 'USPS INTL PAID' : 'US POSTAGE PAID';
+  doc.text(postageText, 2.65, 0.42);
 
-  doc.line(0.1, 1.35, 3.9, 1.35);
+  doc.line(0.1, 0.65, 3.9, 0.65);
 
-  // Ship To
-  doc.setFontSize(8);
+  // Return Address Block
+  doc.setFontSize(7);
   doc.setFont('helvetica', 'bold');
-  doc.text('SHIP TO:', 0.2, 1.55);
-  doc.setFontSize(12);
-  doc.text(order.recipientName, 0.2, 1.78);
-  doc.setFontSize(10);
+  doc.text('SHIP FROM:', 0.2, 0.78);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8);
+  doc.text(ret.name, 0.2, 0.9);
   doc.setFont('helvetica', 'normal');
-  let currentY = 1.95;
+  let retY = 1.01;
+  if (ret.company) { doc.text(ret.company, 0.2, retY); retY += 0.11; }
+  doc.text(ret.street1, 0.2, retY); retY += 0.11;
+  if (ret.street2) { doc.text(ret.street2, 0.2, retY); retY += 0.11; }
+  doc.text(`${ret.city}, ${ret.state} ${ret.zip} ${ret.country || 'UNITED STATES'}`, 0.2, retY);
+
+  doc.line(0.1, 1.4, 3.9, 1.4);
+
+  // Ship To Block with thick left border
+  doc.setFillColor(0, 0, 0);
+  doc.rect(0.2, 1.5, 0.04, 1.3, 'F');
+
+  doc.setFontSize(7);
+  doc.setFont('helvetica', 'bold');
+  doc.text('SHIP TO:', 0.3, 1.62);
+  doc.setFontSize(13);
+  doc.setFont('helvetica', 'bold');
+  doc.text(order.recipientName, 0.3, 1.82);
+
+  doc.setFontSize(9);
+  let shipY = 1.98;
   if (order.company) {
-    doc.text(order.company, 0.2, currentY);
-    currentY += 0.18;
+    doc.setFont('helvetica', 'bold');
+    doc.text(order.company, 0.3, shipY);
+    shipY += 0.16;
   }
-  doc.text(order.street1, 0.2, currentY);
-  currentY += 0.18;
+  doc.setFont('helvetica', 'normal');
+  doc.text(order.street1, 0.3, shipY);
+  shipY += 0.16;
   if (order.street2) {
-    doc.text(order.street2, 0.2, currentY);
-    currentY += 0.18;
+    doc.text(order.street2, 0.3, shipY);
+    shipY += 0.16;
   }
-  doc.text(`${order.city}, ${order.state} ${order.zip}`, 0.2, currentY);
-  currentY += 0.18;
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(12);
+  doc.text(`${order.city.toUpperCase()}, ${order.state} ${order.zip}`, 0.3, shipY);
+  shipY += 0.2;
 
   if (isIntl) {
+    doc.setFontSize(9);
     doc.setFont('helvetica', 'bold');
-    doc.text(`DESTINATION: ${(order.country || 'USA').toUpperCase()}`, 0.2, currentY);
-    currentY += 0.22;
+    doc.text(`DESTINATION: ${(order.country || 'USA').toUpperCase()}`, 0.3, shipY);
+    shipY += 0.2;
 
-    // Customs Block
-    doc.rect(0.2, currentY, 3.6, 0.55);
+    // Customs Box
+    doc.rect(0.2, shipY, 3.6, 0.55);
     doc.setFontSize(7);
-    doc.text('USPS CUSTOMS DECLARATION (CN22 / CP72)', 0.25, currentY + 0.15);
+    doc.text('USPS CUSTOMS DECLARATION (CN22 / CP72)', 0.25, shipY + 0.16);
     doc.setFont('helvetica', 'normal');
-    doc.text(`Decl. Value: $${order.declaredValue || 100.0} USD | Commercial Merchandise`, 0.25, currentY + 0.32);
-    doc.text(`Weight: ${order.weightOz || 16} oz | EasyPost Verified`, 0.25, currentY + 0.47);
-    currentY += 0.7;
-  } else {
-    currentY += 0.1;
+    doc.text(`Decl. Value: $${order.declaredValue || 100.0} USD | Merchandise`, 0.25, shipY + 0.34);
+    doc.text(`Weight: ${order.weightOz || 16} oz | Verified`, 0.25, shipY + 0.48);
+    shipY += 0.65;
   }
 
   // Barcode Section
-  const barcodeY = Math.max(currentY, 3.5);
+  const barcodeY = Math.max(shipY, 3.5);
   doc.line(0.1, barcodeY, 3.9, barcodeY);
 
-  doc.setFillColor(0, 0, 0);
-  doc.rect(0.2, barcodeY + 0.15, 3.6, 0.95, 'F');
+  if (order.trackingNumber) {
+    // Render barcode stripes
+    doc.setFillColor(0, 0, 0);
+    doc.rect(0.2, barcodeY + 0.12, 3.6, 0.8, 'F');
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(0, 0, 0);
+    doc.text(`TRACKING #: ${order.trackingNumber}`, 0.2, barcodeY + 1.12);
+  } else {
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(180, 0, 0);
+    doc.text('POSTAGE NOT PURCHASED YET', 0.2, barcodeY + 0.5);
+  }
 
-  doc.setFontSize(9);
-  doc.setFont('helvetica', 'bold');
-  doc.setTextColor(0, 0, 0);
-  const trackNum = order.trackingNumber || 'NOT PURCHASED YET';
-  doc.text(`TRACKING #: ${trackNum}`, 0.2, barcodeY + 1.25);
   doc.setFontSize(8);
   doc.setFont('helvetica', 'normal');
-  doc.text(`Order #: ${order.orderNumber}  |  Weight: ${order.weightOz || 16} oz  |  Box: ${order.boxName || 'Standard'}`, 0.2, barcodeY + 1.42);
+  doc.setTextColor(0, 0, 0);
+  doc.text(`Order #: ${formatOrderId(order.orderNumber)}  |  Weight: ${order.weightOz || 16} oz  |  Box: ${order.boxName || 'Standard'}`, 0.2, barcodeY + 1.32);
 
   return Buffer.from(doc.output('arraybuffer'));
 }
@@ -2023,90 +2423,167 @@ app.get('/api/orders/:id/label.pdf', (req, res) => {
 // Helper: Generate Packing Slip PDF Buffer
 function generatePackingSlipPdfBuffer(orders: ShippingOrder[], settings: AppSetting): Buffer {
   const doc = new jsPDF({ unit: 'pt', format: 'letter' });
+  const ret = getReturnAddress(settings);
+
   orders.forEach((order, index) => {
     if (index > 0) doc.addPage('letter', 'portrait');
 
-    // Header box: crisp light gray fill with black border and black text
-    doc.setFillColor(245, 245, 245);
-    doc.setDrawColor(0, 0, 0);
-    doc.rect(36, 36, 540, 52, 'FD');
+    // Header Left: Company Info
+    doc.setTextColor(0, 0, 0);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(20);
+    doc.text(settings.companyName || 'BlueCat Bobbins Shipping', 36, 56);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(11);
+    doc.text(ret.street1, 36, 74);
+    doc.text(`${ret.city}, ${ret.state} ${ret.zip}`, 36, 90);
+    doc.text(`Phone: ${ret.phone || '312-555-0144'}`, 36, 106);
+
+    // Header Right: PACKING SLIP Badge & Order Metadata
+    doc.setFillColor(0, 0, 0);
+    doc.rect(436, 36, 140, 28, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(13);
+    doc.text('PACKING SLIP', 506, 54, { align: 'center' });
 
     doc.setTextColor(0, 0, 0);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(16);
-    doc.text(settings.companyName || 'WAREHOUSE PACKING SLIP', 50, 68);
+    doc.setFontSize(13);
+    let rightY = 80;
+    doc.text(`Order #: ${formatOrderId(order.orderNumber)}`, 576, rightY, { align: 'right' });
 
-    doc.setFontSize(12);
+    if (order.company) {
+      rightY += 15;
+      const platformName = order.company.trim();
+      const platformLabel = platformName.toLowerCase().includes('order')
+        ? platformName
+        : `${platformName} Order #`;
+      doc.setFontSize(12);
+      doc.setFont('helvetica', 'bold');
+      doc.text(`${platformLabel}: ${formatOrderId(order.orderNumber)}`, 576, rightY, { align: 'right' });
+    }
+
+    rightY += 15;
     doc.setFont('helvetica', 'normal');
-    doc.text(`Order #: ${order.orderNumber}  |  Date: ${new Date(order.orderDate).toLocaleDateString()}`, 310, 68);
+    doc.setFontSize(11);
+    doc.text(`Date: ${new Date(order.orderDate).toLocaleDateString()}`, 576, rightY, { align: 'right' });
+    rightY += 15;
+    doc.text(`Box Used: ${order.boxName || 'Standard Package'}`, 576, rightY, { align: 'right' });
 
-    // Addresses Section
-    doc.setTextColor(0, 0, 0);
+    // Divider Line
+    doc.setDrawColor(200, 200, 200);
+    doc.setLineWidth(1);
+    doc.line(36, 128, 576, 128);
+
+    // Recipient & Shipping Details Grid Box (Blue background)
+    doc.setFillColor(219, 234, 254); // blue-100
+    doc.setDrawColor(147, 197, 253); // blue-300
+    doc.rect(36, 138, 540, 118, 'FD');
+
+    // Left Column: SHIP TO
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(12);
-    doc.text('SHIP TO:', 50, 115);
-    doc.text('RETURN ADDRESS:', 330, 115);
+    doc.setFontSize(11);
+    doc.setTextColor(15, 23, 42);
+    doc.text('SHIP TO:', 50, 156);
+    doc.setFontSize(14);
+    doc.text(order.recipientName, 50, 174);
 
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(12);
-    doc.text(order.recipientName, 50, 134);
-    let yTo = 152;
-    if (order.company) { doc.text(order.company, 50, yTo); yTo += 18; }
-    doc.text(order.street1, 50, yTo); yTo += 18;
-    if (order.street2) { doc.text(order.street2, 50, yTo); yTo += 18; }
-    doc.text(`${order.city}, ${order.state} ${order.zip} ${order.country || 'US'}`, 50, yTo);
+    let yLeft = 192;
+    doc.text(order.street1, 50, yLeft); yLeft += 16;
+    if (order.street2) { doc.text(order.street2, 50, yLeft); yLeft += 16; }
+    doc.text(`${order.city}, ${order.state} ${order.zip}`, 50, yLeft); yLeft += 16;
+    doc.text(`Phone: ${order.phone || 'N/A'}`, 50, yLeft);
 
-    const ret = settings.returnAddress;
-    doc.text(ret?.name || settings.companyName || 'Fulfillment Center', 330, 134);
-    let yRet = 152;
-    if (ret?.company) { doc.text(ret.company, 330, yRet); yRet += 18; }
-    doc.text(ret?.street1 || '123 Logistics Way', 330, yRet); yRet += 18;
-    doc.text(`${ret?.city || 'Austin'}, ${ret?.state || 'TX'} ${ret?.zip || '78701'}`, 330, yRet);
+    // Right Column: SHIPPING DETAILS
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.text('SHIPPING DETAILS:', 320, 156);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(12);
+    doc.text(`Carrier: ${order.carrier || 'USPS'} (${order.serviceLevel || 'Priority'})`, 320, 176);
+    doc.text('Tracking Number:', 320, 196);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(13);
+    doc.text(order.trackingNumber || 'Not Purchased Yet (Postage Needed)', 320, 214);
 
-    // Items Table Header
-    const tableY = Math.max(yTo, yRet) + 25;
-    doc.setFillColor(240, 240, 240);
-    doc.setDrawColor(0, 0, 0);
+    // Line Items Table Header
+    const tableY = 270;
+    doc.setFillColor(191, 219, 254); // blue-200
+    doc.setDrawColor(147, 197, 253); // blue-300
     doc.rect(36, tableY, 540, 26, 'FD');
 
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(12);
-    doc.setTextColor(0, 0, 0);
-    doc.text('QTY', 50, tableY + 18);
-    doc.text('ITEM NAME', 110, tableY + 18);
-    doc.text('TYPE', 360, tableY + 18);
-    doc.text('COLOR', 480, tableY + 18);
+    doc.setTextColor(15, 23, 42);
+    doc.text('QTY', 48, tableY + 18);
+    doc.text('ITEM NAME', 95, tableY + 18);
+    doc.text('TYPE', 325, tableY + 18);
+    doc.text('COLOR', 420, tableY + 18);
+    doc.text('WEIGHT', 510, tableY + 18);
 
     let itemY = tableY + 42;
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(12);
+    const itemFontSize = 13;
+    const itemLineSpacing = itemFontSize * 1.35;
+    doc.setFontSize(itemFontSize);
     doc.setTextColor(0, 0, 0);
 
     (order.items || []).forEach((item) => {
-      doc.text(String(item.quantity || 1), 50, itemY);
-      doc.text(item.name || 'Order Item', 110, itemY);
-      doc.text(item.itemType || '—', 360, itemY);
-      doc.text(item.color || '—', 480, itemY);
-      itemY += 22;
+      const qtyLines = doc.splitTextToSize(String(item.quantity || 1), 35);
+      const nameLines = doc.splitTextToSize(item.name || 'Order Item', 220);
+      const typeLines = doc.splitTextToSize(item.itemType || '—', 85);
+      const colorLines = doc.splitTextToSize(item.color || '—', 80);
+      const weightLines = doc.splitTextToSize(`${item.weightOz || 12} oz`, 55);
+
+      const maxLines = Math.max(qtyLines.length, nameLines.length, typeLines.length, colorLines.length, weightLines.length);
+
+      doc.setFont('helvetica', 'bold');
+      qtyLines.forEach((line, i) => doc.text(line, 48, itemY + i * itemLineSpacing));
+
+      doc.setFont('helvetica', 'normal');
+      nameLines.forEach((line, i) => doc.text(line, 95, itemY + i * itemLineSpacing));
+      typeLines.forEach((line, i) => doc.text(line, 325, itemY + i * itemLineSpacing));
+      colorLines.forEach((line, i) => doc.text(line, 420, itemY + i * itemLineSpacing));
+      weightLines.forEach((line, i) => doc.text(line, 510, itemY + i * itemLineSpacing));
+
+      itemY += maxLines * itemLineSpacing + 8;
     });
 
-    // Custom Packing Slip Notice Content
-    itemY += 25;
-    const rawNotice = settings.packingSlipContent || 'Thank you for your order! Please inspect items upon arrival.';
+    // Custom Notice Box (Dynamically sized so content never overflows box)
+    itemY += 15;
+    const rawNotice = settings.packingSlipContent || 'Thank you for your order! Please inspect items upon arrival and contact us if you have any questions.';
+
+    const noticeFontSize = 13;
+    doc.setFontSize(noticeFontSize);
+
+    const splitNotice = doc.splitTextToSize(rawNotice, 480);
+    const noticeLineSpacing = noticeFontSize * 1.35;
+    const textBlockHeight = splitNotice.length * noticeLineSpacing;
+    const titlePadding = 32;
+    const bottomPadding = 20;
+    const noticeBoxHeight = Math.max(70, titlePadding + textBlockHeight + bottomPadding);
+
+    doc.setFillColor(219, 234, 254); // blue-100
+    doc.setDrawColor(147, 197, 253); // blue-300
+    doc.roundedRect(36, itemY, 540, noticeBoxHeight, 6, 6, 'FD');
 
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(12);
-    doc.setTextColor(0, 0, 0);
-    doc.text('SPECIAL NOTICE / RETURN POLICY:', 50, itemY);
+    doc.setFontSize(13);
+    doc.setTextColor(15, 23, 42);
+    doc.text('Important Notice & Customer Service Policy', 52, itemY + 22);
 
-    itemY += 18;
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(12);
-    doc.setTextColor(0, 0, 0);
+    doc.setFontSize(noticeFontSize);
+    doc.setTextColor(15, 23, 42);
 
-    // Line/word wrap notice text to max printable width of 510 points (fits well within 540pt margin area)
-    const splitNotice = doc.splitTextToSize(rawNotice, 510);
-    doc.text(splitNotice, 50, itemY);
+    let noticeTextY = itemY + 40;
+    splitNotice.forEach((line) => {
+      doc.text(line, 52, noticeTextY);
+      noticeTextY += noticeLineSpacing;
+    });
   });
 
   return Buffer.from(doc.output('arraybuffer'));
@@ -2228,85 +2705,120 @@ app.get('/api/orders/batch-labels.pdf', async (req, res) => {
         const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
         const displayCarrier = isIntl ? (order.carrier || 'USPS INTERNATIONAL') : (order.carrier || 'USPS');
         const displayService = order.serviceLevel || (isIntl ? 'PRIORITY MAIL INTERNATIONAL' : 'PRIORITY MAIL 2-DAY');
+        const ret = getReturnAddress(db.settings);
 
-        doc.setLineWidth(0.01);
+        // Outer Frame Border
+        doc.setLineWidth(0.015);
+        doc.setDrawColor(0, 0, 0);
         doc.rect(0.1, 0.1, 3.8, 5.8);
 
-        doc.setFontSize(13);
+        // Header Box
+        doc.setFontSize(14);
         doc.setTextColor(0, 0, 0);
         doc.setFont('helvetica', 'bold');
-        doc.text(`${displayCarrier} POSTAGE PAID`, 0.2, 0.4);
-        doc.setFontSize(10);
-        doc.setFont('helvetica', 'normal');
-        doc.text(displayService, 0.2, 0.58);
+        doc.text(`${displayCarrier}`, 0.2, 0.38);
+        if (isIntl) {
+          doc.setFontSize(8);
+          doc.text('INTL', 2.1, 0.38);
+        }
+        doc.setFontSize(9);
+        doc.setFont('helvetica', 'bold');
+        doc.text(displayService, 0.2, 0.54);
 
+        // Postage Paid Box
         doc.setLineWidth(0.01);
-        doc.line(0.1, 0.7, 3.9, 0.7);
+        doc.rect(2.6, 0.2, 1.2, 0.38);
+        doc.setFontSize(7);
+        doc.setFont('helvetica', 'bold');
+        const postageText = order.carrier === 'UPS' ? 'UPS POSTAGE PAID' : isIntl ? 'USPS INTL PAID' : 'US POSTAGE PAID';
+        doc.text(postageText, 2.65, 0.42);
+
+        doc.line(0.1, 0.65, 3.9, 0.65);
+
+        // Return Address Block
+        doc.setFontSize(7);
+        doc.setFont('helvetica', 'bold');
+        doc.text('SHIP FROM:', 0.2, 0.78);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8);
+        doc.text(ret.name, 0.2, 0.9);
+        doc.setFont('helvetica', 'normal');
+        let retY = 1.01;
+        if (ret.company) { doc.text(ret.company, 0.2, retY); retY += 0.11; }
+        doc.text(ret.street1, 0.2, retY); retY += 0.11;
+        if (ret.street2) { doc.text(ret.street2, 0.2, retY); retY += 0.11; }
+        doc.text(`${ret.city}, ${ret.state} ${ret.zip} ${ret.country || 'UNITED STATES'}`, 0.2, retY);
+
+        doc.line(0.1, 1.4, 3.9, 1.4);
+
+        // Ship To Block with thick left border
+        doc.setFillColor(0, 0, 0);
+        doc.rect(0.2, 1.5, 0.04, 1.3, 'F');
 
         doc.setFontSize(7);
         doc.setFont('helvetica', 'bold');
-        doc.text('SHIP FROM:', 0.2, 0.88);
-        doc.setFont('helvetica', 'normal');
-        const retName = db.settings.returnAddress?.name || 'Warehouse Operations';
-        const retStreet = db.settings.returnAddress?.street1 || '123 Logistics Way';
-        const retCityStateZip = `${db.settings.returnAddress?.city || 'Austin'}, ${db.settings.returnAddress?.state || 'TX'} ${db.settings.returnAddress?.zip || '78701'}`;
-        doc.text(retName, 0.2, 1.0);
-        doc.text(retStreet, 0.2, 1.12);
-        doc.text(retCityStateZip, 0.2, 1.24);
-
-        doc.line(0.1, 1.35, 3.9, 1.35);
-
-        doc.setFontSize(8);
+        doc.text('SHIP TO:', 0.3, 1.62);
+        doc.setFontSize(13);
         doc.setFont('helvetica', 'bold');
-        doc.text('SHIP TO:', 0.2, 1.55);
-        doc.setFontSize(12);
-        doc.text(order.recipientName, 0.2, 1.78);
-        doc.setFontSize(10);
-        doc.setFont('helvetica', 'normal');
-        let currentY = 1.95;
-        if (order.company) {
-          doc.text(order.company, 0.2, currentY);
-          currentY += 0.18;
-        }
-        doc.text(order.street1, 0.2, currentY);
-        currentY += 0.18;
-        if (order.street2) {
-          doc.text(order.street2, 0.2, currentY);
-          currentY += 0.18;
-        }
-        doc.text(`${order.city}, ${order.state} ${order.zip}`, 0.2, currentY);
-        currentY += 0.18;
-
-        if (isIntl) {
-          doc.setFont('helvetica', 'bold');
-          doc.text(`DESTINATION: ${(order.country || 'USA').toUpperCase()}`, 0.2, currentY);
-          currentY += 0.22;
-
-          doc.rect(0.2, currentY, 3.6, 0.55);
-          doc.setFontSize(7);
-          doc.text('USPS CUSTOMS DECLARATION (CN22 / CP72)', 0.25, currentY + 0.15);
-          doc.setFont('helvetica', 'normal');
-          doc.text(`Decl. Value: $${order.declaredValue || 100.0} USD | Commercial Goods`, 0.25, currentY + 0.32);
-          doc.text(`Weight: ${order.weightOz || 16} oz | EasyPost Verified`, 0.25, currentY + 0.47);
-          currentY += 0.7;
-        } else {
-          currentY += 0.1;
-        }
-
-        const barcodeY = Math.max(currentY, 3.5);
-        doc.line(0.1, barcodeY, 3.9, barcodeY);
-
-        doc.setFillColor(0, 0, 0);
-        doc.rect(0.2, barcodeY + 0.15, 3.6, 0.95, 'F');
+        doc.text(order.recipientName, 0.3, 1.82);
 
         doc.setFontSize(9);
+        let shipY = 1.98;
+        if (order.company) {
+          doc.setFont('helvetica', 'bold');
+          doc.text(order.company, 0.3, shipY);
+          shipY += 0.16;
+        }
+        doc.setFont('helvetica', 'normal');
+        doc.text(order.street1, 0.3, shipY);
+        shipY += 0.16;
+        if (order.street2) {
+          doc.text(order.street2, 0.3, shipY);
+          shipY += 0.16;
+        }
         doc.setFont('helvetica', 'bold');
-        doc.setTextColor(0, 0, 0);
-        const trackNum = order.trackingNumber || (isIntl ? 'CP123456789US' : '9400111202482390123');
-        doc.text(`TRACKING #: ${trackNum}`, 0.2, barcodeY + 1.25);
+        doc.setFontSize(12);
+        doc.text(`${order.city.toUpperCase()}, ${order.state} ${order.zip}`, 0.3, shipY);
+        shipY += 0.2;
+
+        if (isIntl) {
+          doc.setFontSize(9);
+          doc.setFont('helvetica', 'bold');
+          doc.text(`DESTINATION: ${(order.country || 'USA').toUpperCase()}`, 0.3, shipY);
+          shipY += 0.2;
+
+          // Customs Box
+          doc.rect(0.2, shipY, 3.6, 0.55);
+          doc.setFontSize(7);
+          doc.text('USPS CUSTOMS DECLARATION (CN22 / CP72)', 0.25, shipY + 0.16);
+          doc.setFont('helvetica', 'normal');
+          doc.text(`Decl. Value: $${order.declaredValue || 100.0} USD | Merchandise`, 0.25, shipY + 0.34);
+          doc.text(`Weight: ${order.weightOz || 16} oz | Verified`, 0.25, shipY + 0.48);
+          shipY += 0.65;
+        }
+
+        // Barcode Section
+        const barcodeY = Math.max(shipY, 3.5);
+        doc.line(0.1, barcodeY, 3.9, barcodeY);
+
+        if (order.trackingNumber) {
+          doc.setFillColor(0, 0, 0);
+          doc.rect(0.2, barcodeY + 0.12, 3.6, 0.8, 'F');
+          doc.setFontSize(10);
+          doc.setFont('helvetica', 'bold');
+          doc.setTextColor(0, 0, 0);
+          doc.text(`TRACKING #: ${order.trackingNumber}`, 0.2, barcodeY + 1.12);
+        } else {
+          doc.setFontSize(10);
+          doc.setFont('helvetica', 'bold');
+          doc.setTextColor(180, 0, 0);
+          doc.text('POSTAGE NOT PURCHASED YET', 0.2, barcodeY + 0.5);
+        }
+
         doc.setFontSize(8);
         doc.setFont('helvetica', 'normal');
-        doc.text(`Order #: ${order.orderNumber}  |  Weight: ${order.weightOz || 16} oz  |  Box: ${order.boxName || 'Standard'}`, 0.2, barcodeY + 1.42);
+        doc.setTextColor(0, 0, 0);
+        doc.text(`Order #: ${formatOrderId(order.orderNumber)}  |  Weight: ${order.weightOz || 16} oz  |  Box: ${order.boxName || 'Standard'}`, 0.2, barcodeY + 1.32);
       }
     }
 

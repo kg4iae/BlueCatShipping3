@@ -370,15 +370,24 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
                       <Building className="w-3.5 h-3.5 text-slate-600" />
                       <span>Mailer / Entry Facility</span>
                     </div>
-                    <div className="text-xs font-extrabold text-slate-900">{settings.companyName || 'Acme Logistics Corp'}</div>
-                    <div className="text-xs text-slate-700">{settings.returnAddress?.name || 'Fulfillment Dept'}</div>
-                    <div className="text-xs text-slate-700">
-                      {settings.returnAddress?.street1} {settings.returnAddress?.street2 || ''}
-                    </div>
-                    <div className="text-xs text-slate-700">
-                      {settings.returnAddress?.city}, {settings.returnAddress?.state} {settings.returnAddress?.zip}
-                    </div>
-                    <div className="text-xs text-slate-500">Phone: {settings.returnAddress?.phone || '312-555-0144'}</div>
+                    {(() => {
+                      const retAddr = typeof settings?.returnAddress === 'string'
+                        ? JSON.parse(settings.returnAddress)
+                        : (settings?.returnAddress || {});
+                      return (
+                        <>
+                          <div className="text-xs font-extrabold text-slate-900">{settings.companyName || 'Acme Logistics Corp'}</div>
+                          <div className="text-xs text-slate-700">{retAddr.name || 'Fulfillment Dept'}</div>
+                          <div className="text-xs text-slate-700">
+                            {retAddr.street1 || '100 Bobbin Way'} {retAddr.street2 || ''}
+                          </div>
+                          <div className="text-xs text-slate-700">
+                            {retAddr.city || 'Chicago'}, {retAddr.state || 'IL'} {retAddr.zip || '60601'}
+                          </div>
+                          <div className="text-xs text-slate-500">Phone: {retAddr.phone || '312-555-0144'}</div>
+                        </>
+                      );
+                    })()}
                   </div>
 
                   <div className="space-y-1 border-t sm:border-t-0 sm:border-l border-slate-300 pt-3 sm:pt-0 sm:pl-4">

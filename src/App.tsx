@@ -17,8 +17,16 @@ import { SettingsPage } from './components/SettingsPage';
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
 
 export default function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [currentUser, setCurrentUser] = useState<{ username: string; fullName?: string; role?: string } | null>(null);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'search' | 'reports' | 'settings'>('dashboard');
+
+  useEffect(() => {
+    if (activeTab === 'settings' && currentUser?.role?.toLowerCase() !== 'admin') {
+      setActiveTab('dashboard');
+    }
+  }, [activeTab, currentUser]);
+
 
   const [orders, setOrders] = useState<ShippingOrder[]>([]);
   const [packages, setPackages] = useState<PackageType[]>([]);
@@ -383,7 +391,14 @@ export default function App() {
   };
 
   if (!isAuthenticated) {
-    return <LoginModal onLoginSuccess={() => setIsAuthenticated(true)} />;
+    return (
+      <LoginModal
+        onLoginSuccess={(token, user) => {
+          setIsAuthenticated(true);
+          if (user) setCurrentUser(user);
+        }}
+      />
+    );
   }
 
   const pendingCount = orders.filter((o) => o.status === 'pending_validation').length;
@@ -429,7 +444,9 @@ export default function App() {
         easyPostMode={settings?.easyPostMode ?? 'test'}
         onLogout={() => setIsAuthenticated(false)}
         onSyncMssql={handleSyncMssql}
+        currentUser={currentUser}
       />
+
 
       {/* Primary Workspace View Switcher */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -557,6 +574,16 @@ export default function App() {
           onConfirmReship={handleConfirmReship}
         />
       )}
+
+      {!isAuthenticated && (
+        <LoginModal
+          onLoginSuccess={(token, user) => {
+            setIsAuthenticated(true);
+            if (user) setCurrentUser(user);
+          }}
+        />
+      )}
     </div>
   );
 }
+
