@@ -428,10 +428,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
                       {/* Recipient */}
                       <td className="py-3 px-3 font-medium text-slate-900">
-                        {/* Line 1: Name & optional company */}
-                        <div className="text-xs font-bold text-slate-900 truncate max-w-[220px]" title={order.company ? `${order.recipientName} (${order.company})` : order.recipientName}>
+                        {/* Line 1: Name */}
+                        <div className="text-xs font-bold text-slate-900 truncate max-w-[220px]" title={order.recipientName}>
                           <span>{order.recipientName}</span>
-                          {order.company && <span className="text-slate-400 font-normal text-[11px] ml-1">({order.company})</span>}
                         </div>
 
                         {/* Line 2: Flag + Marketplace */}

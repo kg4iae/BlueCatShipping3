@@ -488,7 +488,7 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
     req.input('status', sql.NVarChar(sql.MAX), order.status);
     req.input('shippingCost', sql.Decimal(18, 2), order.shippingCost || null);
     req.input('shippingDate', sql.DateTime2(7), order.shippingDate ? new Date(order.shippingDate) : null);
-    req.input('platform', sql.NVarChar(sql.MAX), order.company || 'Web App');
+    req.input('platform', sql.NVarChar(sql.MAX), order.marketplace || order.company || 'Web App');
     req.input('TotalWeight', sql.Float, order.weightOz || 16);
     req.input('box', sql.VarChar(50), order.boxId || 'pkg_medium');
     req.input('easypostShipmentId', sql.NVarChar(64), order.easypostShipmentId || null);
@@ -743,7 +743,8 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
         id: String(row.Id),
         orderNumber: row.receiptID ? String(row.receiptID) : `ORD-${row.Id}`,
         recipientName: row.name ? String(row.name) : 'Valued Customer',
-        company: row.platform ? String(row.platform) : '',
+        company: '',
+        marketplace: row.platform ? String(row.platform) : '',
         street1: row.address1 ? String(row.address1) : '',
         street2: row.address2 ? String(row.address2) : '',
         city: row.city ? String(row.city) : '',
@@ -925,7 +926,7 @@ const db: DatabaseSchema = {
       id: 'ord_101',
       orderNumber: 'ORD-8821',
       recipientName: 'Sarah Jenkins',
-      company: 'Apex Design Group',
+      marketplace: 'Etsy',
       street1: '742 Evergreen Terrace',
       city: 'Springfield',
       state: 'OR',
@@ -949,6 +950,7 @@ const db: DatabaseSchema = {
       id: 'ord_102',
       orderNumber: 'ORD-8822',
       recipientName: 'Marcus Vance',
+      marketplace: 'Shopify',
       street1: '1200 Market Street',
       street2: 'Apt 4B',
       city: 'San Francisco',
@@ -973,7 +975,7 @@ const db: DatabaseSchema = {
       id: 'ord_103',
       orderNumber: 'ORD-8823',
       recipientName: 'David Miller',
-      company: 'Miller Auto Parts',
+      marketplace: 'Amazon',
       street1: '555 Industrial Pkwy', // Invalid Zip intentionally
       city: 'Detroit',
       state: 'MI',
@@ -1000,7 +1002,7 @@ const db: DatabaseSchema = {
       id: 'ord_104',
       orderNumber: 'ORD-8824',
       recipientName: 'Elena Rostova',
-      company: 'Quantum Dynamics',
+      marketplace: 'eBay',
       street1: '100 Technology Square',
       street2: 'Fl 8',
       city: 'Cambridge',
@@ -1025,6 +1027,7 @@ const db: DatabaseSchema = {
       id: 'ord_105',
       orderNumber: 'ORD-8825',
       recipientName: 'Robert Sterling',
+      marketplace: 'Etsy',
       street1: '450 Peachtree St NE',
       city: 'Atlanta',
       state: 'GA',
@@ -1047,7 +1050,7 @@ const db: DatabaseSchema = {
       id: 'ord_106',
       orderNumber: 'ORD-8826',
       recipientName: 'Claire Tremblay',
-      company: 'Montreal Bobbin Works',
+      marketplace: 'Etsy',
       street1: '1234 Rue Sainte-Catherine',
       city: 'Montreal',
       state: 'QC',
@@ -1071,7 +1074,7 @@ const db: DatabaseSchema = {
       id: 'ord_107',
       orderNumber: 'ORD-8827',
       recipientName: 'Oliver Smith',
-      company: 'Thames Textile Co',
+      marketplace: 'Shopify',
       street1: '45 Baker Street',
       city: 'London',
       state: 'ENG',
@@ -1096,7 +1099,7 @@ const db: DatabaseSchema = {
       id: 'ord_1001',
       orderNumber: 'ORD-8790',
       recipientName: 'Jonathan Hayes',
-      company: 'Hayes Dental Lab',
+      marketplace: 'WooCommerce',
       street1: '880 17th Street',
       city: 'Denver',
       state: 'CO',
@@ -2452,18 +2455,12 @@ function generatePackingSlipPdfBuffer(orders: ShippingOrder[], settings: AppSett
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(13);
     let rightY = 80;
-    doc.text(`Order #: ${formatOrderId(order.orderNumber)}`, 576, rightY, { align: 'right' });
 
-    if (order.company) {
-      rightY += 15;
-      const platformName = order.company.trim();
-      const platformLabel = platformName.toLowerCase().includes('order')
-        ? platformName
-        : `${platformName} Order #`;
-      doc.setFontSize(12);
-      doc.setFont('helvetica', 'bold');
-      doc.text(`${platformLabel}: ${formatOrderId(order.orderNumber)}`, 576, rightY, { align: 'right' });
-    }
+    const platformName = (order.marketplace || order.company || '').trim();
+    const platformLabel = platformName
+      ? (platformName.toLowerCase().includes('order') ? platformName : `${platformName} Order #`)
+      : 'Order #';
+    doc.text(`${platformLabel}: ${formatOrderId(order.orderNumber)}`, 576, rightY, { align: 'right' });
 
     rightY += 15;
     doc.setFont('helvetica', 'normal');

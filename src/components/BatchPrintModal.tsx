@@ -432,18 +432,12 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(13);
         let rightY = 80;
-        doc.text(`Order #: ${formatOrderId(order.orderNumber)}`, 576, rightY, { align: 'right' });
 
-        if (order.company) {
-          rightY += 15;
-          const platformName = order.company.trim();
-          const platformLabel = platformName.toLowerCase().includes('order')
-            ? platformName
-            : `${platformName} Order #`;
-          doc.setFontSize(12);
-          doc.setFont('helvetica', 'bold');
-          doc.text(`${platformLabel}: ${formatOrderId(order.orderNumber)}`, 576, rightY, { align: 'right' });
-        }
+        const platformName = (order.marketplace || order.company || '').trim();
+        const platformLabel = platformName
+          ? (platformName.toLowerCase().includes('order') ? platformName : `${platformName} Order #`)
+          : 'Order #';
+        doc.text(`${platformLabel}: ${formatOrderId(order.orderNumber)}`, 576, rightY, { align: 'right' });
 
         rightY += 15;
         doc.setFont('helvetica', 'normal');
@@ -738,14 +732,13 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
                       <span className="inline-block bg-slate-900 text-white text-xs font-bold uppercase tracking-wider px-3 py-1 rounded">
                         Packing Slip
                       </span>
-                      <div className="text-sm font-bold text-slate-800 mt-2">Order #: {formatOrderId(order.orderNumber)}</div>
-                      {order.company && (
-                        <div className="text-xs font-bold text-slate-900 mt-0.5">
-                          {order.company.toLowerCase().includes('order')
-                            ? order.company
-                            : `${order.company} Order #`}: {formatOrderId(order.orderNumber)}
-                        </div>
-                      )}
+                      <div className="text-sm font-bold text-slate-800 mt-2">
+                        {(order.marketplace || order.company)
+                          ? ((order.marketplace || order.company)!.toLowerCase().includes('order')
+                              ? (order.marketplace || order.company)
+                              : `${order.marketplace || order.company} Order #`)
+                          : 'Order #'}: {formatOrderId(order.orderNumber)}
+                      </div>
                       <div className="text-xs text-slate-500">Date: {new Date(order.orderDate).toLocaleDateString()}</div>
                       <div className="text-xs text-slate-600 font-medium">Box Used: {order.boxName || 'Standard Package'}</div>
                     </div>
