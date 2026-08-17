@@ -104,13 +104,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [isSyncing, setIsSyncing] = useState(false);
   const [purchasingOrderId, setPurchasingOrderId] = useState<string | null>(null);
 
-  const handleSinglePurchaseLabel = async (orderId: string) => {
-    setPurchasingOrderId(orderId);
+  const handleSinglePurchaseLabel = async (order: ShippingOrder) => {
+    setPurchasingOrderId(order.id);
     try {
       if (onPurchaseLabel) {
-        await onPurchaseLabel(orderId);
+        await onPurchaseLabel(order.id, order.carrier, order.serviceLevel, order.shippingCost);
       } else {
-        await onGenerateBatchLabels([orderId]);
+        await onGenerateBatchLabels([order.id]);
       }
     } finally {
       setPurchasingOrderId(null);
@@ -362,7 +362,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 <th className="py-3 px-3">Recipient</th>
                 <th className="py-3 px-3">Order Details</th>
                 <th className="py-3 px-3">Package Box</th>
-                <th className="py-3 px-3">Carrier @ Rates</th>
+                <th className="py-3 px-3">Carrier Rates</th>
                 <th className="py-3 px-3">Status</th>
                 <th className="py-3 px-3 text-right">Action</th>
               </tr>
@@ -501,7 +501,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         </select>
                       </td>
 
-                      {/* Carrier & Rates / Shipping Cost */}
+                      {/* Carrier Rates / Shipping Cost */}
                       <td className="py-3 px-3">
                         {(() => {
                           const rates = getCalculatedRatesForOrder(order, settings?.defaultDomesticCarrier, settings?.defaultDomesticService);
@@ -516,33 +516,48 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             ? order.shippingCost
                             : matchedRate?.rate ?? 0;
 
+                          const carrierDisplay = order.carrier || (countryInfo ? (settings?.defaultInternationalCarrier || 'UPS') : (settings?.defaultDomesticCarrier || 'USPS'));
+                          const serviceDisplay = order.serviceLevel || (countryInfo ? (settings?.defaultInternationalService || 'UPS Worldwide Expedited') : (settings?.defaultDomesticService || 'Priority'));
+
                           return countryInfo ? (
-                            <button
-                              onClick={() => onOpenCompareRatesModal && onOpenCompareRatesModal(order)}
-                              className="inline-flex items-center space-x-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 px-2 py-1 rounded-lg text-xs font-bold cursor-pointer transition-colors shadow-2xs"
-                              title="Compare live shipping rates for this international order"
-                            >
-                              <DollarSign className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                              <span>{order.carrier ? `${order.carrier} ${order.serviceLevel || ''}` : 'Compare Rates'}</span>
-                              <span className="bg-amber-200 text-amber-950 px-1.5 py-0.5 rounded font-black text-xs">${cost.toFixed(2)}</span>
-                            </button>
+                            <div className="flex items-center space-x-1.5">
+                              <button
+                                onClick={() => onOpenCompareRatesModal && onOpenCompareRatesModal(order)}
+                                className="inline-flex items-center space-x-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 px-2 py-1 rounded-lg text-xs font-bold cursor-pointer transition-colors shadow-2xs"
+                                title="Click to compare and change carrier rates for this international order"
+                              >
+                                <DollarSign className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                <span>{carrierDisplay} {serviceDisplay}</span>
+                                <span className="bg-amber-200 text-amber-950 px-1.5 py-0.5 rounded font-black text-xs">${cost.toFixed(2)}</span>
+                              </button>
+                              {onOpenCompareRatesModal && (
+                                <button
+                                  onClick={() => onOpenCompareRatesModal(order)}
+                                  className="text-xs text-amber-700 hover:text-amber-900 font-semibold underline cursor-pointer"
+                                  title="Change carrier rate"
+                                >
+                                  Change
+                                </button>
+                              )}
+                            </div>
                           ) : (
                             <div className="flex items-center space-x-1.5">
-                              <span
-                                className="inline-flex items-center space-x-1.5 bg-blue-50 text-blue-900 border border-blue-200 px-2 py-1 rounded-lg text-xs font-bold"
-                                title="Domestic US Order Shipping Rate"
+                              <button
+                                onClick={() => onOpenCompareRatesModal && onOpenCompareRatesModal(order)}
+                                className="inline-flex items-center space-x-1.5 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 px-2 py-1 rounded-lg text-xs font-bold cursor-pointer transition-colors shadow-2xs text-left"
+                                title="Click to change carrier, service, or price"
                               >
                                 <Truck className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                                <span>{order.carrier || 'USPS'} {order.serviceLevel || 'Priority'}</span>
+                                <span>{carrierDisplay} {serviceDisplay}</span>
                                 <span className="bg-blue-100 text-blue-950 px-1.5 py-0.5 rounded font-black text-xs">${cost.toFixed(2)}</span>
-                              </span>
+                              </button>
                               {onOpenCompareRatesModal && (
                                 <button
                                   onClick={() => onOpenCompareRatesModal(order)}
                                   className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold underline cursor-pointer ml-0.5"
-                                  title="View shipping rates"
+                                  title="Change carrier rate"
                                 >
-                                  Rates
+                                  Change
                                 </button>
                               )}
                             </div>
@@ -598,7 +613,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         ) : (
                           <div className="flex items-center justify-end space-x-2">
                             <button
-                              onClick={() => handleSinglePurchaseLabel(order.id)}
+                              onClick={() => handleSinglePurchaseLabel(order)}
                               disabled={purchasingOrderId === order.id}
                               className="inline-flex items-center space-x-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 py-1 rounded text-xs font-bold shadow-2xs transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                               title="Purchase postage label from EasyPost and save PDF label to database"

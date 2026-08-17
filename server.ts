@@ -5,12 +5,211 @@ import { createServer as createViteServer } from 'vite';
 import sql from 'mssql';
 import { jsPDF } from 'jspdf';
 import crypto from 'crypto';
+import sharp from 'sharp';
 import { ShippingOrder, PackageType, AppSetting, MonthlyReportData, OrderStatus, CarrierType, ScanFormType, OrderItem, ReturnAddress, formatOrderId, User } from './src/types.js';
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+
+// Helper: Determine if an order has an international destination
+const US_STATE_MAP: Record<string, string> = {
+  'ALABAMA': 'AL', 'ALASKA': 'AK', 'ARIZONA': 'AZ', 'ARKANSAS': 'AR', 'CALIFORNIA': 'CA',
+  'COLORADO': 'CO', 'CONNECTICUT': 'CT', 'DELAWARE': 'DE', 'FLORIDA': 'FL', 'GEORGIA': 'GA',
+  'HAWAII': 'HI', 'IDAHO': 'ID', 'ILLINOIS': 'IL', 'INDIANA': 'IN', 'IOWA': 'IA',
+  'KANSAS': 'KS', 'KENTUCKY': 'KY', 'LOUISIANA': 'LA', 'MAINE': 'ME', 'MARYLAND': 'MD',
+  'MASSACHUSETTS': 'MA', 'MICHIGAN': 'MI', 'MINNESOTA': 'MN', 'MISSISSIPPI': 'MS', 'MISSOURI': 'MO',
+  'MONTANA': 'MT', 'NEBRASKA': 'NE', 'NEVADA': 'NV', 'NEW HAMPSHIRE': 'NH', 'NEW JERSEY': 'NJ',
+  'NEW MEXICO': 'NM', 'NEW YORK': 'NY', 'NORTH CAROLINA': 'NC', 'NORTH DAKOTA': 'ND', 'OHIO': 'OH',
+  'OKLAHOMA': 'OK', 'OREGON': 'OR', 'PENNSYLVANIA': 'PA', 'RHODE ISLAND': 'RI', 'SOUTH CAROLINA': 'SC',
+  'SOUTH DAKOTA': 'SD', 'TENNESSEE': 'TN', 'TEXAS': 'TX', 'UTAH': 'UT', 'VERMONT': 'VT',
+  'VIRGINIA': 'VA', 'WASHINGTON': 'WA', 'WEST VIRGINIA': 'WV', 'WISCONSIN': 'WI', 'WYOMING': 'WY',
+  'DISTRICT OF COLUMBIA': 'DC', 'PUERTO RICO': 'PR', 'GUAM': 'GU', 'VIRGIN ISLANDS': 'VI',
+};
+
+const COUNTRY_MAP: Record<string, string> = {
+  'UNITED STATES': 'US', 'UNITED STATES OF AMERICA': 'US', 'USA': 'US', 'U.S.A.': 'US', 'US': 'US',
+  'CANADA': 'CA', 'CAN': 'CA', 'CA': 'CA',
+  'UNITED KINGDOM': 'GB', 'GREAT BRITAIN': 'GB', 'ENGLAND': 'GB', 'UK': 'GB', 'GB': 'GB',
+  'AUSTRALIA': 'AU', 'AUS': 'AU', 'AU': 'AU',
+  'GERMANY': 'DE', 'DEUTSCHLAND': 'DE', 'DE': 'DE',
+  'FRANCE': 'FR', 'FR': 'FR',
+  'MEXICO': 'MX', 'MEX': 'MX', 'MX': 'MX',
+  'JAPAN': 'JP', 'JPN': 'JP', 'JP': 'JP',
+  'ITALY': 'IT', 'ITALIA': 'IT', 'IT': 'IT',
+  'SPAIN': 'ES', 'ESPANA': 'ES', 'ES': 'ES',
+};
+
+function normalizeCountryCode(countryStr?: string): string {
+  if (!countryStr || typeof countryStr !== 'string') return 'US';
+  const clean = countryStr.trim().toUpperCase();
+  if (COUNTRY_MAP[clean]) return COUNTRY_MAP[clean];
+  if (clean.length === 2) return clean;
+  return clean.slice(0, 2);
+}
+
+function normalizeStateCode(stateStr?: string, countryCode: string = 'US'): string {
+  if (!stateStr || typeof stateStr !== 'string') return '';
+  const clean = stateStr.trim().toUpperCase();
+  if (countryCode === 'US' && US_STATE_MAP[clean]) {
+    return US_STATE_MAP[clean];
+  }
+  return clean;
+}
+
+function cleanZipCode(zipStr?: any, countryCode: string = 'US'): string {
+  if (!zipStr) return countryCode === 'US' ? '90210' : '';
+  let clean = String(zipStr).trim();
+  if (countryCode === 'US') {
+    clean = clean.replace(/[^0-9-]/g, '');
+    if (/^\d{5}$/.test(clean)) return clean;
+    if (/^\d{5}-\d{4}$/.test(clean)) return clean;
+    if (clean.length > 5 && !clean.includes('-')) {
+      return clean.slice(0, 5);
+    }
+  }
+  return clean;
+}
+
+function cleanPhone(phoneStr?: any): string {
+  if (!phoneStr) return '';
+  return String(phoneStr).trim().replace(/[^\d+(). -]/g, '');
+}
+
+function normalizeCarrierName(carrierStr?: any): CarrierType {
+  if (!carrierStr) return 'USPS';
+  const c = String(carrierStr).trim().toUpperCase();
+  if (c.startsWith('UPS') || c.includes('UPS')) return 'UPS';
+  if (c.startsWith('FEDEX') || c.includes('FEDEX')) return 'FedEx';
+  if (c.startsWith('DHL') || c.includes('DHL')) return 'DHL';
+  return 'USPS';
+}
+
+function matchCarrier(rateCarrier: any, targetCarrier: any): boolean {
+  if (!rateCarrier || !targetCarrier) return false;
+  const rc = String(rateCarrier).trim().toUpperCase();
+  const normalizedTarget = normalizeCarrierName(targetCarrier).toUpperCase();
+  const normalizedRate = normalizeCarrierName(rateCarrier).toUpperCase();
+
+  if (normalizedRate === normalizedTarget) return true;
+  if (rc === normalizedTarget) return true;
+
+  if (normalizedTarget === 'UPS') {
+    return rc.startsWith('UPS') || rc.includes('UPS') || rc === 'UPSDAP' || rc === 'UPS_DAP' || rc === 'UPSACCOUNT';
+  }
+  if (normalizedTarget === 'USPS') {
+    return rc.startsWith('USPS') || rc.includes('USPS') || rc.includes('ENDICIA') || rc.includes('POSTAL');
+  }
+  if (normalizedTarget === 'FEDEX') {
+    return rc.startsWith('FEDEX') || rc.includes('FEDEX') || rc.includes('SMARTPOST');
+  }
+  if (normalizedTarget === 'DHL') {
+    return rc.startsWith('DHL') || rc.includes('DHL') || rc.includes('EXPRESS');
+  }
+  return rc.includes(normalizedTarget) || normalizedTarget.includes(rc);
+}
+
+function matchService(rateService: any, targetService: any): boolean {
+  if (!rateService || !targetService) return true;
+  const rs = String(rateService).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const ts = String(targetService).toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  if (rs === ts) return true;
+  if (rs.includes(ts) || ts.includes(rs)) return true;
+
+  // International UPS services
+  if ((ts.includes('standard') || ts.includes('upsstandard')) && (rs.includes('standard') || rs.includes('upsstandard'))) return true;
+  if ((ts.includes('saver') || ts.includes('upssaver') || ts.includes('worldwidesaver')) && (rs.includes('saver') || rs.includes('upssaver') || rs.includes('worldwidesaver'))) return true;
+  if ((ts.includes('expedited') || ts.includes('worldwideexpedited')) && (rs.includes('expedited') || rs.includes('worldwideexpedited'))) return true;
+  if ((ts.includes('expressplus') || ts.includes('worldwideexpressplus')) && (rs.includes('expressplus') || rs.includes('worldwideexpressplus'))) return true;
+  if ((ts.includes('express') || ts.includes('worldwideexpress')) && !ts.includes('expressplus') && (rs.includes('express') || rs.includes('worldwideexpress')) && !rs.includes('expressplus')) return true;
+  if ((ts.includes('worldwideeconomy') || ts.includes('economy')) && (rs.includes('worldwideeconomy') || rs.includes('economy'))) return true;
+
+  // Domestic UPS services
+  if ((ts.includes('ground') || ts.includes('upsground')) && (rs.includes('ground') || rs.includes('upsground'))) return true;
+  if ((ts.includes('2day') || ts.includes('2ndday') || ts.includes('secondday')) && (rs.includes('2day') || rs.includes('2ndday') || rs.includes('secondday'))) return true;
+  if ((ts.includes('nextday') || ts.includes('overnight')) && (rs.includes('nextday') || rs.includes('overnight'))) return true;
+  if ((ts.includes('3day') || ts.includes('3dayselect')) && (rs.includes('3day') || rs.includes('3dayselect'))) return true;
+
+  // USPS services
+  if (ts.includes('groundadvantage') && (rs.includes('groundadvantage') || rs.includes('first'))) return true;
+  if (ts.includes('priority') && !ts.includes('express') && rs.includes('priority') && !rs.includes('express')) return true;
+  if (ts.includes('express') && rs.includes('express')) return true;
+  if (ts.includes('firstclass') && rs.includes('firstclass')) return true;
+
+  // FedEx services
+  if (ts.includes('internationalpriority') && rs.includes('internationalpriority')) return true;
+  if (ts.includes('internationaleconomy') && rs.includes('internationaleconomy')) return true;
+  if (ts.includes('connectplus') && rs.includes('connectplus')) return true;
+
+  return false;
+}
+
+function getHsTariffNumber(item?: any, settings?: AppSetting): string {
+  const raw = item?.hsTariffNumber || item?.hs_tariff_number || item?.tariffNumber || item?.htsCode || item?.htsNumber;
+  if (raw !== undefined && raw !== null) {
+    const cleaned = String(raw).replace(/[^0-9]/g, '');
+    if (cleaned.length >= 6) {
+      return cleaned.slice(0, 6);
+    }
+  }
+  // Global HS Tariff Harmony code from settings
+  const rawGlobal = settings?.defaultHsTariffCode ?? db?.settings?.defaultHsTariffCode ?? '610910';
+  const globalCode = String(rawGlobal || '').replace(/[^0-9]/g, '');
+  if (globalCode.length >= 6) {
+    return globalCode.slice(0, 6);
+  }
+  return '610910';
+}
+
+function isInternationalOrder(order: Partial<ShippingOrder>): boolean {
+  const normCountry = normalizeCountryCode(order.country);
+  return normCountry !== 'US';
+}
+
+// Helper: Place a PNG label into a 4x6 inch jsPDF page with proportional centering
+async function addLabelImageToDoc(doc: jsPDF, labelBuffer: Buffer) {
+  try {
+    const meta = await sharp(labelBuffer).metadata();
+    const imgW = meta.width || 4;
+    const imgH = meta.height || 6;
+    const imgRatio = imgW / imgH;
+    const pageW = 4;
+    const pageH = 6;
+    const pageRatio = pageW / pageH; // 0.6667
+
+    let renderW = pageW;
+    let renderH = pageH;
+    let renderX = 0;
+    let renderY = 0;
+
+    if (Math.abs(imgRatio - pageRatio) < 0.1) {
+      renderW = pageW;
+      renderH = pageH;
+      renderX = 0;
+      renderY = 0;
+    } else if (imgRatio > pageRatio) {
+      // Wider than 4x6: fit to width and center vertically with small margins
+      renderW = pageW * 0.96;
+      renderH = renderW / imgRatio;
+      renderX = (pageW - renderW) / 2;
+      renderY = (pageH - renderH) / 2;
+    } else {
+      // Taller than 4x6: fit to height and center horizontally
+      renderH = pageH * 0.96;
+      renderW = renderH * imgRatio;
+      renderX = (pageW - renderW) / 2;
+      renderY = (pageH - renderH) / 2;
+    }
+
+    const base64Img = `data:image/png;base64,${labelBuffer.toString('base64')}`;
+    doc.addImage(base64Img, 'PNG', renderX, renderY, renderW, renderH);
+  } catch (e) {
+    const base64Img = `data:image/png;base64,${labelBuffer.toString('base64')}`;
+    doc.addImage(base64Img, 'PNG', 0, 0, 4, 6);
+  }
+}
 
 // Helper: Attempt MS SQL Server Database Connection Test
 async function testMssqlConnection(config: {
@@ -41,21 +240,26 @@ async function testMssqlConnection(config: {
     serverPort = parseInt(parts[1], 10) || serverPort;
   }
 
-  const sqlConfig: sql.config = {
-    server: serverHost,
-    port: serverPort,
-    database: config.database,
-    user: config.user,
-    password: config.password || process.env.MSSQL_PASSWORD || '',
-    options: {
-      encrypt: config.encrypt ?? false,
-      trustServerCertificate: true,
-      connectTimeout: 5000,
-      requestTimeout: 5000,
-    },
-  };
-
   try {
+    const sqlConfig: sql.config = {
+      server: serverHost,
+      port: serverPort,
+      database: config.database,
+      user: config.user,
+      password: config.password || process.env.MSSQL_PASSWORD || '',
+      connectionTimeout: 15000,
+      requestTimeout: 20000,
+      options: {
+        encrypt: config.encrypt ?? false,
+        trustServerCertificate: true,
+        connectTimeout: 15000,
+        requestTimeout: 20000,
+        cancelTimeout: 5000,
+        enableArithAbort: true,
+        abortTransactionOnError: false,
+      },
+    };
+
     const pool = new sql.ConnectionPool(sqlConfig);
     await pool.connect();
     const result = await pool.request().query('SELECT @@VERSION as version');
@@ -83,7 +287,7 @@ async function getMssqlPool(): Promise<sql.ConnectionPool | null> {
     return null;
   }
 
-  if (activeMssqlPool && activeMssqlPool.connected) {
+  if (activeMssqlPool && activeMssqlPool.connected && !activeMssqlPool.connecting) {
     return activeMssqlPool;
   }
 
@@ -106,16 +310,32 @@ async function getMssqlPool(): Promise<sql.ConnectionPool | null> {
     database: db.settings.mssqlDatabase,
     user: db.settings.mssqlUser,
     password: db.settings.mssqlPassword || process.env.MSSQL_PASSWORD || '',
+    connectionTimeout: 15000,
+    requestTimeout: 20000,
+    pool: {
+      max: 10,
+      min: 0,
+      idleTimeoutMillis: 30000,
+      acquireTimeoutMillis: 15000,
+    },
     options: {
       encrypt: db.settings.mssqlEncrypt ?? false,
       trustServerCertificate: true,
-      connectTimeout: 5000,
-      requestTimeout: 10000,
+      connectTimeout: 15000,
+      requestTimeout: 20000,
+      cancelTimeout: 5000,
+      enableArithAbort: true,
+      abortTransactionOnError: false,
     },
   };
 
   try {
     const pool = new sql.ConnectionPool(sqlConfig);
+    pool.on('error', (poolErr) => {
+      console.warn('[MSSQL Pool Error Handler]', poolErr?.message || poolErr);
+      activeMssqlPool = null;
+      db.settings.mssqlConnected = false;
+    });
     await pool.connect();
     activeMssqlPool = pool;
     db.settings.mssqlConnected = true;
@@ -180,7 +400,8 @@ async function ensureMssqlTables(pool: sql.ConnectionPool) {
               [createdAt] [datetime2](7) NULL,
               [OrderDetails] [nvarchar](max) NULL,
               [receiptID] [nvarchar](max) NULL,
-              [shippingMethod] [nvarchar](max) NULL,
+              [Carrier] [nvarchar](max) NULL,
+              [Service] [nvarchar](max) NULL,
               [trackingNumber] [nvarchar](max) NULL,
               [status] [nvarchar](max) NULL,
               [shippingCost] [decimal](18, 2) NULL,
@@ -193,10 +414,72 @@ async function ensureMssqlTables(pool: sql.ConnectionPool) {
               CONSTRAINT [PK_Shipping_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
           );
       END;
+    `);
 
+    // Add Carrier column if not exists
+    await pool.request().query(`
+      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'Carrier')
+      BEGIN
+          ALTER TABLE [dbo].[Shipping] ADD [Carrier] [nvarchar](max) NULL;
+      END;
+    `);
+
+    // Add Service column if not exists
+    await pool.request().query(`
+      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'Service')
+      BEGIN
+          ALTER TABLE [dbo].[Shipping] ADD [Service] [nvarchar](max) NULL;
+      END;
+    `);
+
+    // Add LabelData column if not exists
+    await pool.request().query(`
       IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'LabelData')
       BEGIN
           ALTER TABLE [dbo].[Shipping] ADD [LabelData] [varbinary](max) NULL;
+      END;
+    `);
+
+    // If legacy shippingMethod column exists, migrate values using dynamic SQL so it parses cleanly, drop dependent constraints, then drop shippingMethod
+    await pool.request().query(`
+      IF EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'shippingMethod')
+      BEGIN
+          EXEC(N'
+            UPDATE [dbo].[Shipping]
+            SET
+              [Carrier] = CASE
+                WHEN [Carrier] IS NOT NULL AND RTRIM(LTRIM([Carrier])) <> '''' THEN [Carrier]
+                WHEN UPPER([shippingMethod]) LIKE ''USPS%'' THEN ''USPS''
+                WHEN UPPER([shippingMethod]) LIKE ''UPS%'' THEN ''UPS''
+                WHEN UPPER([shippingMethod]) LIKE ''FEDEX%'' THEN ''FedEx''
+                WHEN UPPER([shippingMethod]) LIKE ''DHL%'' THEN ''DHL''
+                ELSE ''USPS''
+              END,
+              [Service] = CASE
+                WHEN [Service] IS NOT NULL AND RTRIM(LTRIM([Service])) <> '''' THEN [Service]
+                WHEN UPPER([shippingMethod]) LIKE ''USPS %'' THEN LTRIM(SUBSTRING([shippingMethod], 6, 255))
+                WHEN UPPER([shippingMethod]) LIKE ''UPS %'' THEN LTRIM(SUBSTRING([shippingMethod], 5, 255))
+                WHEN UPPER([shippingMethod]) LIKE ''FEDEX %'' THEN LTRIM(SUBSTRING([shippingMethod], 7, 255))
+                WHEN UPPER([shippingMethod]) LIKE ''DHL %'' THEN LTRIM(SUBSTRING([shippingMethod], 5, 255))
+                WHEN [shippingMethod] IS NOT NULL AND RTRIM(LTRIM([shippingMethod])) <> '''' THEN [shippingMethod]
+                ELSE ''Priority''
+              END
+            WHERE [shippingMethod] IS NOT NULL;
+          ');
+
+          -- Drop any default constraints or check constraints attached to shippingMethod
+          DECLARE @dropConstraintsSql nvarchar(max) = N'';
+          SELECT @dropConstraintsSql += N'ALTER TABLE [dbo].[Shipping] DROP CONSTRAINT [' + dc.name + N']; '
+          FROM sys.default_constraints dc
+          JOIN sys.columns c ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+          WHERE dc.parent_object_id = OBJECT_ID(N'[dbo].[Shipping]') AND c.name = 'shippingMethod';
+
+          IF LEN(@dropConstraintsSql) > 0
+          BEGIN
+              EXEC sp_executesql @dropConstraintsSql;
+          END;
+
+          EXEC(N'ALTER TABLE [dbo].[Shipping] DROP COLUMN [shippingMethod];');
       END;
     `);
 
@@ -460,8 +743,30 @@ async function fetchPackagesFromMssql(): Promise<PackageType[] | null> {
 async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrder) {
   try {
     const req = pool.request();
+    if (typeof (req as any).setTimeout === 'function') {
+      (req as any).setTimeout(20000);
+    }
+
     const numericId = parseInt(order.id, 10);
     const validNumId = !isNaN(numericId) && numericId > 0;
+
+    // Safely prepare label binary Buffer
+    let labelBuffer: Buffer | null = null;
+    if (order.labelBinary) {
+      if (Buffer.isBuffer(order.labelBinary)) {
+        labelBuffer = order.labelBinary;
+      } else if (typeof order.labelBinary === 'string') {
+        try {
+          labelBuffer = Buffer.from(order.labelBinary, 'base64');
+        } catch {
+          labelBuffer = null;
+        }
+      } else if (order.labelBinary instanceof Uint8Array || (order.labelBinary as any) instanceof ArrayBuffer) {
+        labelBuffer = Buffer.from(order.labelBinary as any);
+      }
+    }
+
+    const hasLabel = labelBuffer && labelBuffer.length > 0 ? 1 : 0;
 
     req.input('id', sql.Int, validNumId ? numericId : -1);
     req.input('name', sql.NVarChar(sql.MAX), order.recipientName);
@@ -479,11 +784,10 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
       : null;
     req.input('OrderDetails', sql.NVarChar(sql.MAX), orderDetailsString);
     req.input('receiptID', sql.NVarChar(sql.MAX), order.orderNumber);
-    req.input(
-      'shippingMethod',
-      sql.NVarChar(sql.MAX),
-      order.carrier ? `${order.carrier} ${order.serviceLevel || ''}`.trim() : order.serviceLevel || ''
-    );
+    const carrierVal = (order.carrier || 'USPS').trim();
+    const serviceVal = (order.serviceLevel || 'Priority').trim();
+    req.input('Carrier', sql.NVarChar(sql.MAX), carrierVal);
+    req.input('Service', sql.NVarChar(sql.MAX), serviceVal);
     req.input('trackingNumber', sql.NVarChar(sql.MAX), order.trackingNumber || null);
     req.input('status', sql.NVarChar(sql.MAX), order.status);
     req.input('shippingCost', sql.Decimal(18, 2), order.shippingCost || null);
@@ -492,7 +796,8 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
     req.input('TotalWeight', sql.Float, order.weightOz || 16);
     req.input('box', sql.VarChar(50), order.boxId || 'pkg_medium');
     req.input('easypostShipmentId', sql.NVarChar(64), order.easypostShipmentId || null);
-    req.input('LabelData', sql.VarBinary(sql.MAX), order.labelBinary || null);
+    req.input('hasLabel', sql.Bit, hasLabel);
+    req.input('LabelData', sql.VarBinary(sql.MAX), labelBuffer);
 
     await req.query(`
       IF (@id > 0 AND EXISTS (SELECT 1 FROM [dbo].[Shipping] WHERE [Id] = @id))
@@ -509,7 +814,8 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
               [email] = @email,
               [OrderDetails] = @OrderDetails,
               [receiptID] = @receiptID,
-              [shippingMethod] = @shippingMethod,
+              [Carrier] = @Carrier,
+              [Service] = @Service,
               [trackingNumber] = @trackingNumber,
               [status] = @status,
               [shippingCost] = @shippingCost,
@@ -518,7 +824,7 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
               [TotalWeight] = @TotalWeight,
               [box] = @box,
               [easypostShipmentId] = @easypostShipmentId,
-              [LabelData] = ISNULL(@LabelData, [LabelData])
+              [LabelData] = CASE WHEN @hasLabel = 1 THEN @LabelData ELSE [LabelData] END
           WHERE [Id] = @id;
       END
       ELSE IF (@receiptID IS NOT NULL AND EXISTS (SELECT 1 FROM [dbo].[Shipping] WHERE [receiptID] = @receiptID))
@@ -534,7 +840,8 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
               [phone] = @phone,
               [email] = @email,
               [OrderDetails] = @OrderDetails,
-              [shippingMethod] = @shippingMethod,
+              [Carrier] = @Carrier,
+              [Service] = @Service,
               [trackingNumber] = @trackingNumber,
               [status] = @status,
               [shippingCost] = @shippingCost,
@@ -543,26 +850,38 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
               [TotalWeight] = @TotalWeight,
               [box] = @box,
               [easypostShipmentId] = @easypostShipmentId,
-              [LabelData] = ISNULL(@LabelData, [LabelData])
+              [LabelData] = CASE WHEN @hasLabel = 1 THEN @LabelData ELSE [LabelData] END
           WHERE [receiptID] = @receiptID;
       END
       ELSE
       BEGIN
           INSERT INTO [dbo].[Shipping] (
               [name], [address1], [address2], [city], [state], [postalCode], [country],
-              [phone], [email], [createdAt], [OrderDetails], [receiptID], [shippingMethod],
+              [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
               [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
               [TotalWeight], [box], [easypostShipmentId], [LabelData]
           ) VALUES (
               @name, @address1, @address2, @city, @state, @postalCode, @country,
-              @phone, @email, @createdAt, @OrderDetails, @receiptID, @shippingMethod,
+              @phone, @email, @createdAt, @OrderDetails, @receiptID, @Carrier, @Service,
               @trackingNumber, @status, @shippingCost, @shippingDate, @platform,
               @TotalWeight, @box, @easypostShipmentId, @LabelData
           );
       END
     `);
-  } catch (err) {
-    console.error('[MSSQL] Error in saveOrderToMssqlPool:', err);
+  } catch (err: any) {
+    console.warn(`[MSSQL] Non-fatal save notice for order #${order.orderNumber}:`, err?.message || err);
+    // If request failed with timeout, connection error, or cancel failure, reset active pool so next attempt connects fresh
+    if (
+      err?.name === 'RequestError' ||
+      err?.code === 'ETIMEOUT' ||
+      err?.code === 'ECONNCLOSED' ||
+      err?.code === 'ECONNRESET' ||
+      String(err).includes('cancel request') ||
+      String(err).includes('timeout')
+    ) {
+      activeMssqlPool = null;
+      db.settings.mssqlConnected = false;
+    }
   }
 }
 
@@ -721,14 +1040,26 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
       const rawCountry = (row.country ? String(row.country) : 'US').trim().toUpperCase();
       const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
 
-      const defaultCarrierSetting = !isIntl ? (db.settings.defaultDomesticCarrier || 'USPS') : 'USPS';
-      const defaultServiceSetting = !isIntl ? (db.settings.defaultDomesticService || 'Priority') : 'Priority Mail International';
+      const defaultCarrierSetting = !isIntl
+        ? (db.settings.defaultDomesticCarrier || 'USPS')
+        : (db.settings.defaultInternationalCarrier || 'UPS');
+      const defaultServiceSetting = !isIntl
+        ? (db.settings.defaultDomesticService || 'Priority')
+        : (db.settings.defaultInternationalService || 'UPS Worldwide Expedited');
 
+      const rawCarrier = row.Carrier || row.carrier;
+      const rawService = row.Service || row.service;
       const rawShippingMethod = row.shippingMethod ? String(row.shippingMethod).trim() : '';
+
       let carrierVal: CarrierType = defaultCarrierSetting;
       let serviceLevelVal: string = defaultServiceSetting;
 
-      if (rawShippingMethod) {
+      if (rawCarrier && String(rawCarrier).trim()) {
+        carrierVal = normalizeCarrierName(String(rawCarrier).trim());
+        if (rawService && String(rawService).trim()) {
+          serviceLevelVal = String(rawService).trim();
+        }
+      } else if (rawShippingMethod) {
         const firstWord = rawShippingMethod.split(' ')[0].toUpperCase();
         const validCarriers: CarrierType[] = ['USPS', 'FedEx', 'UPS', 'DHL'];
         if (validCarriers.includes(firstWord as CarrierType)) {
@@ -737,6 +1068,8 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
         } else {
           serviceLevelVal = rawShippingMethod;
         }
+      } else if (rawService && String(rawService).trim()) {
+        serviceLevelVal = String(rawService).trim();
       }
 
       return {
@@ -902,6 +1235,9 @@ const initialSettings: AppSetting = {
   appPassword: process.env.APP_PASSWORD || 'shipstation123',
   defaultDomesticCarrier: 'USPS',
   defaultDomesticService: 'Priority',
+  defaultInternationalCarrier: 'UPS',
+  defaultInternationalService: 'UPS Worldwide Expedited',
+  defaultHsTariffCode: process.env.DEFAULT_HS_TARIFF_CODE || '610910',
 };
 
 // Seed realistic order dataset spanning active queue and historical months
@@ -1220,15 +1556,26 @@ function validateAddressWithEasyPost(address: {
   country: string;
 }) {
   const errors: string[] = [];
-  let suggested = { ...address };
+  const normCountry = normalizeCountryCode(address.country);
+  const normState = normalizeStateCode(address.state, normCountry);
+  const normZip = cleanZipCode(address.zip, normCountry);
+  const cleanStreet = (address.street1 || '').trim();
+
+  let suggested = {
+    ...address,
+    street1: cleanStreet,
+    country: normCountry,
+    state: normState || address.state,
+    zip: normZip,
+  };
   let isValid = true;
 
-  if (!address.street1 || address.street1.trim().length < 3) {
+  if (!cleanStreet || cleanStreet.length < 3) {
     errors.push('Street address is too short or missing.');
     isValid = false;
   }
 
-  if (address.street1.toLowerCase().includes('nonexistent') || address.street1.includes('9999')) {
+  if (cleanStreet.toLowerCase().includes('nonexistent') || cleanStreet.includes('9999')) {
     errors.push('EasyPost Address Error: Street address not found in USPS DPV database.');
     isValid = false;
   }
@@ -1238,19 +1585,14 @@ function validateAddressWithEasyPost(address: {
     isValid = false;
   }
 
-  if (!address.state || address.state.trim().length < 2) {
+  if (!normState || normState.trim().length < 2) {
     errors.push('State abbreviation is required (e.g. CA, NY, IL).');
     isValid = false;
   }
 
-  if (!address.zip || address.zip.trim() === '00000' || address.zip.length < 5) {
+  if (!normZip || normZip === '00000' || normZip.length < 5) {
     errors.push(`ZIP Code "${address.zip || ''}" is invalid or undeliverable.`);
     isValid = false;
-  } else {
-    // Append standard ZIP+4 formatting if clean
-    if (!address.zip.includes('-') && address.zip.length === 5) {
-      suggested.zip = `${address.zip}-1024`;
-    }
   }
 
   return {
@@ -1258,7 +1600,7 @@ function validateAddressWithEasyPost(address: {
     errors,
     suggestedAddress: isValid ? suggested : undefined,
     notes: isValid
-      ? `Verified via EasyPost CASC. Standardized ZIP: ${suggested.zip}`
+      ? `Verified via EasyPost CASC. Standardized: ${suggested.city}, ${suggested.state} ${suggested.zip}`
       : 'Address failed verification checks.',
   };
 }
@@ -1634,8 +1976,12 @@ app.post('/api/orders', async (req, res) => {
   const rawCountry = (country || 'US').trim().toUpperCase();
   const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
 
-  const defaultCarrier = !isIntl ? (db.settings.defaultDomesticCarrier || 'USPS') : 'USPS';
-  const defaultService = !isIntl ? (db.settings.defaultDomesticService || 'Priority') : 'Priority Mail International';
+  const defaultCarrier = !isIntl
+    ? (db.settings.defaultDomesticCarrier || 'USPS')
+    : (db.settings.defaultInternationalCarrier || 'UPS');
+  const defaultService = !isIntl
+    ? (db.settings.defaultDomesticService || 'Priority')
+    : (db.settings.defaultInternationalService || 'UPS Worldwide Expedited');
 
   const newOrder: ShippingOrder = {
     id: `ord_${Date.now()}`,
@@ -1919,6 +2265,7 @@ async function purchaseLabelWithEasyPost(
   easyPostLabelUrl: string;
   easypostShipmentId: string;
   labelPngBuffer?: Buffer;
+  carrierNotice?: string;
 }> {
   let apiKey = (settings.easyPostApiKey || '').trim();
   if (!apiKey || apiKey.length < 5 || apiKey === 'EZTK_TEST_99824_KEY') {
@@ -1930,73 +2277,107 @@ async function purchaseLabelWithEasyPost(
   }
 
   const box = db.packages.find((p) => p.id === order.boxId) || db.packages[0];
-  const rawCountry = (order.country || 'US').trim().toUpperCase();
-  const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
+  const isIntl = isInternationalOrder(order);
 
-  const defaultCarrier = !isIntl ? (settings.defaultDomesticCarrier || 'USPS') : 'USPS';
-  const defaultService = !isIntl ? (settings.defaultDomesticService || 'Priority') : 'Priority Mail International';
+  const defaultCarrier = !isIntl
+    ? (settings.defaultDomesticCarrier || 'USPS')
+    : (settings.defaultInternationalCarrier || 'UPS');
+  const defaultService = !isIntl
+    ? (settings.defaultDomesticService || 'Priority')
+    : (settings.defaultInternationalService || 'UPS Worldwide Expedited');
 
-  const targetCarrier = carrierOverride || order.carrier || defaultCarrier;
+  const rawCarrier = carrierOverride || order.carrier || defaultCarrier;
+  const targetCarrier = normalizeCarrierName(rawCarrier);
   const targetService = serviceOverride || order.serviceLevel || defaultService;
 
   const authHeader = `Basic ${Buffer.from(apiKey + ':').toString('base64')}`;
+
+  const ret = getReturnAddress(settings);
+  const toCountry = normalizeCountryCode(order.country);
+  const toState = normalizeStateCode(order.state, toCountry);
+  const toZip = cleanZipCode(order.zip, toCountry);
+  const fromCountry = normalizeCountryCode(ret.country);
+  const fromState = normalizeStateCode(ret.state, fromCountry);
+  const fromZip = cleanZipCode(ret.zip, fromCountry);
+
+  const recipientPhone = cleanPhone(order.phone) || cleanPhone(ret.phone) || '8005550199';
+  const senderPhone = cleanPhone(ret.phone) || '3125550144';
 
   // Step 1: Create Shipment in EasyPost
   const shipmentPayload: any = {
     shipment: {
       to_address: {
-        name: order.recipientName,
-        company: order.company || undefined,
-        street1: order.street1,
-        street2: order.street2 || undefined,
-        city: order.city,
-        state: order.state,
-        zip: order.zip,
-        country: order.country || 'US',
-        phone: order.phone || undefined,
-        email: order.email || undefined,
+        name: (order.recipientName || 'Valued Customer').trim(),
+        company: order.company ? order.company.trim() : undefined,
+        street1: (order.street1 || '123 Main St').trim(),
+        street2: order.street2 ? order.street2.trim() : undefined,
+        city: (order.city || 'Anytown').trim(),
+        state: toState || order.state,
+        zip: toZip,
+        country: toCountry,
+        phone: recipientPhone,
+        email: order.email ? order.email.trim() : undefined,
       },
       from_address: {
-        name: getReturnAddress(settings).name,
-        company: getReturnAddress(settings).company || undefined,
-        street1: getReturnAddress(settings).street1,
-        street2: getReturnAddress(settings).street2 || undefined,
-        city: getReturnAddress(settings).city,
-        state: getReturnAddress(settings).state,
-        zip: getReturnAddress(settings).zip,
-        country: getReturnAddress(settings).country || 'US',
-        phone: getReturnAddress(settings).phone || undefined,
+        name: (ret.name || 'Shipping Dept').trim(),
+        company: ret.company ? ret.company.trim() : undefined,
+        street1: (ret.street1 || '100 Bobbin Way').trim(),
+        street2: ret.street2 ? ret.street2.trim() : undefined,
+        city: (ret.city || 'Chicago').trim(),
+        state: fromState || ret.state,
+        zip: fromZip,
+        country: fromCountry,
+        phone: senderPhone,
       },
       parcel: {
-        length: box?.length || 10,
-        width: box?.width || 8,
-        height: box?.height || 4,
-        weight: Math.max(0.1, order.weightOz || 16),
+        length: Math.max(1, Number(box?.length) || 10),
+        width: Math.max(1, Number(box?.width) || 8),
+        height: Math.max(1, Number(box?.height) || 4),
+        weight: Math.max(0.1, Number(order.weightOz) || 16),
       },
+      options: {
+        label_size: '4x6',
+        label_format: 'PNG',
+      },
+      postage_label: {
+        label_size: '4x6',
+        label_format: 'PNG',
+      },
+    },
+    options: {
+      label_size: '4x6',
+      label_format: 'PNG',
+    },
+    postage_label: {
+      label_size: '4x6',
+      label_format: 'PNG',
     },
   };
 
   if (isIntl) {
+    const signerName = (ret.name || 'Shipping Manager').trim();
+    const rawItems = order.items && order.items.length > 0
+      ? order.items
+      : [{ sku: 'ITEM-1', name: 'Commercial Merchandise', quantity: 1, price: order.declaredValue || 20.0, weightOz: order.weightOz || 16 }];
+
     shipmentPayload.shipment.customs_info = {
       customs_certify: true,
-      customs_signer: settings.returnAddress?.name || 'Shipping Manager',
+      customs_signer: signerName,
       contents_type: 'merchandise',
       restriction_type: 'none',
       eel_pfc: 'NOEEI 30.37(a)',
-      customs_items: (order.items && order.items.length > 0
-        ? order.items
-        : [{ sku: 'ITEM-1', name: 'Commercial Merchandise', quantity: 1, price: order.declaredValue || 20.0, weightOz: order.weightOz || 16 }]
-      ).map((item) => ({
-        description: (item.name || 'Commercial Merchandise').substring(0, 50),
-        quantity: item.quantity || 1,
-        value: item.price || 10.0,
-        weight: item.weightOz || 8,
+      customs_items: rawItems.map((item) => ({
+        description: (item.name || 'Commercial Merchandise').substring(0, 50).trim() || 'Merchandise',
+        quantity: Math.max(1, Math.round(Number(item.quantity) || 1)),
+        value: Math.max(1.0, Number(item.price) || (Number(order.declaredValue) ? Number(order.declaredValue) / Math.max(1, rawItems.length) : 10.0)),
+        weight: Math.max(0.1, Number(item.weightOz) || (Number(order.weightOz) ? Number(order.weightOz) / Math.max(1, rawItems.length) : 8.0)),
+        hs_tariff_number: getHsTariffNumber(item, settings),
         origin_country: 'US',
       })),
     };
   }
 
-  console.log(`[EasyPost API] Posting shipment creation to EasyPost v2 for Order #${order.orderNumber}...`);
+  console.log(`[EasyPost API] Posting shipment creation to EasyPost v2 for Order #${order.orderNumber} (Target Carrier: ${targetCarrier}, Service: ${targetService})...`);
   const createRes = await fetch('https://api.easypost.com/v2/shipments', {
     method: 'POST',
     headers: {
@@ -2006,42 +2387,52 @@ async function purchaseLabelWithEasyPost(
     body: JSON.stringify(shipmentPayload),
   });
 
-  const createData = await createRes.json();
+  const createData = await createRes.json().catch(() => ({}));
   if (!createRes.ok || !createData.id) {
-    const errorMsg = createData.error?.message || createData.error?.errors?.[0]?.message || (typeof createData.error === 'string' ? createData.error : `HTTP ${createRes.status}`);
+    let errorMsg = createData.error?.message;
+    if (Array.isArray(createData.error?.errors) && createData.error.errors.length > 0) {
+      const detailed = createData.error.errors.map((e: any) => {
+        if (typeof e === 'string') return e;
+        return `${e.field ? e.field + ': ' : ''}${e.message || JSON.stringify(e)}`;
+      }).join('; ');
+      errorMsg = errorMsg ? `${errorMsg} (${detailed})` : detailed;
+    }
+    errorMsg = errorMsg || (typeof createData.error === 'string' ? createData.error : `HTTP ${createRes.status}`);
+    console.error('[EasyPost API Shipment Create Error]', JSON.stringify(createData, null, 2));
     throw new Error(`EasyPost Shipment Creation Failed: ${errorMsg}`);
   }
 
-  console.log(`[EasyPost API] Shipment created ID: ${createData.id}. Returned ${createData.rates?.length || 0} rate option(s).`);
-
-  // Step 2: Select Rate
+  // Step 2: Select Rate strictly respecting user selected carrier and service
   const rates = createData.rates || [];
   if (!Array.isArray(rates) || rates.length === 0) {
     throw new Error(`No shipping rates returned by EasyPost for Order #${order.orderNumber}. Please check address and package dimensions.`);
   }
 
-  let selectedRate = rates.find((r: any) => {
-    if (r.carrier?.toUpperCase() !== targetCarrier.toUpperCase()) return false;
-    const rService = (r.service || '').toLowerCase();
-    const tService = targetService.toLowerCase();
-    if (rService === tService) return true;
-    if (tService === 'priority') return rService.includes('priority') && !rService.includes('express');
-    if (tService === 'ground advantage') return rService.includes('groundadvantage') || rService.includes('ground_advantage');
-    if (tService === 'express') return rService.includes('express');
-    if (tService === 'ground') return rService.includes('ground');
-    if (tService === '2day') return rService.includes('2nd') || rService.includes('2day');
-    if (tService === 'nextday' || tService === 'priority overnight') return rService.includes('nextday') || rService.includes('overnight');
-    return rService.includes(tService);
-  });
+  console.log(`[EasyPost API] Shipment created ID: ${createData.id}. Rates returned (${rates.length}):`, rates.map((r: any) => `${r.carrier} - ${r.service} ($${r.rate}) [ID: ${r.id}]`).join(', '));
 
-  if (!selectedRate) {
-    selectedRate = rates.find((r: any) => r.carrier?.toUpperCase() === targetCarrier.toUpperCase());
-  }
-  if (!selectedRate) {
+  // Find all rates matching the target carrier
+  const matchingCarrierRates = rates.filter((r: any) => matchCarrier(r.carrier, targetCarrier));
+
+  let selectedRate: any = null;
+  let fallbackNotice: string | undefined = undefined;
+
+  if (matchingCarrierRates.length > 0) {
+    // Attempt exact or fuzzy service match within the matching carrier rates
+    selectedRate = matchingCarrierRates.find((r: any) => matchService(r.service, targetService));
+    // If no service match, select the lowest cost (cheapest) rate for that carrier
+    if (!selectedRate) {
+      const sortedByCost = [...matchingCarrierRates].sort((a: any, b: any) => (parseFloat(a.rate) || 0) - (parseFloat(b.rate) || 0));
+      selectedRate = sortedByCost[0];
+    }
+  } else {
+    // If EasyPost account does not have the requested carrier (e.g. UPS is not enabled on EasyPost or PO Box address)
+    const availableCarriers = Array.from(new Set(rates.map((r: any) => r.carrier))).join(', ');
     selectedRate = rates[0];
+    fallbackNotice = `Selected carrier "${targetCarrier}" was not returned by EasyPost (available: [${availableCarriers}]). Fulfilled with available carrier: ${selectedRate.carrier} (${selectedRate.service}).`;
+    console.warn(`[EasyPost API] ${fallbackNotice} for Order #${order.orderNumber}`);
   }
 
-  console.log(`[EasyPost API] Buying rate ID ${selectedRate.id} (${selectedRate.carrier} - ${selectedRate.service} @ $${selectedRate.rate})...`);
+  console.log(`[EasyPost API] Selected Rate -> ID: ${selectedRate.id} (Carrier: ${selectedRate.carrier}, Service: ${selectedRate.service}, Cost: $${selectedRate.rate}) for Order #${order.orderNumber}`);
 
   // Step 3: Buy Shipment
   const buyRes = await fetch(`https://api.easypost.com/v2/shipments/${createData.id}/buy`, {
@@ -2054,12 +2445,29 @@ async function purchaseLabelWithEasyPost(
       rate: {
         id: selectedRate.id,
       },
+      postage_label: {
+        label_size: '4x6',
+        label_format: 'PNG',
+      },
+      options: {
+        label_size: '4x6',
+        label_format: 'PNG',
+      },
     }),
   });
 
-  const buyData = await buyRes.json();
-  if (!buyRes.ok || !buyData) {
-    const buyErr = buyData.error?.message || buyData.error?.errors?.[0]?.message || (typeof buyData.error === 'string' ? buyData.error : `HTTP ${buyRes.status}`);
+  const buyData = await buyRes.json().catch(() => ({}));
+  if (!buyRes.ok || !buyData || buyData.error) {
+    let buyErr = buyData.error?.message;
+    if (Array.isArray(buyData.error?.errors) && buyData.error.errors.length > 0) {
+      const detailed = buyData.error.errors.map((e: any) => {
+        if (typeof e === 'string') return e;
+        return `${e.field ? e.field + ': ' : ''}${e.message || JSON.stringify(e)}`;
+      }).join('; ');
+      buyErr = buyErr ? `${buyErr} (${detailed})` : detailed;
+    }
+    buyErr = buyErr || (typeof buyData.error === 'string' ? buyData.error : `HTTP ${buyRes.status}`);
+    console.error('[EasyPost API Buy Error]', JSON.stringify(buyData, null, 2));
     throw new Error(`EasyPost Label Purchase Failed: ${buyErr}`);
   }
 
@@ -2092,10 +2500,9 @@ async function purchaseLabelWithEasyPost(
       const isPdf = rawBuffer.toString('utf8', 0, 4) === '%PDF';
       if (!isPdf) {
         labelPngBuffer = rawBuffer;
-        // Convert PNG label image into a 4x6 PDF page using jsPDF
+        // Convert PNG label image into a 4x6 PDF page using jsPDF with proportional centering
         const doc = new jsPDF({ unit: 'in', format: [4, 6], orientation: 'portrait' });
-        const base64Img = `data:image/png;base64,${rawBuffer.toString('base64')}`;
-        doc.addImage(base64Img, 'PNG', 0, 0, 4, 6);
+        await addLabelImageToDoc(doc, rawBuffer);
         labelBinary = Buffer.from(doc.output('arraybuffer'));
       } else {
         labelBinary = rawBuffer;
@@ -2106,10 +2513,10 @@ async function purchaseLabelWithEasyPost(
   }
 
   if (!labelBinary) {
-    labelBinary = generateSingleOrderLabelPdfBuffer(order, settings);
+    labelBinary = await generateSingleOrderLabelPdfBuffer(order, settings);
   }
 
-  const purchasedCarrier: CarrierType = (selectedRate.carrier?.toUpperCase() === 'UPS' ? 'UPS' : 'USPS') as CarrierType;
+  const purchasedCarrier: CarrierType = normalizeCarrierName(selectedRate.carrier || targetCarrier);
   const purchasedService = selectedRate.service || targetService;
   const purchasedCost = parseFloat(selectedRate.rate) || 0;
 
@@ -2122,8 +2529,147 @@ async function purchaseLabelWithEasyPost(
     easyPostLabelUrl: rawLabelUrl,
     easypostShipmentId: buyData.id || createData.id,
     labelPngBuffer,
+    carrierNotice: fallbackNotice,
   };
 }
+
+// Fetch Live EasyPost Rates for an Order Endpoint
+app.get('/api/orders/:id/live-rates', async (req, res) => {
+  const { id } = req.params;
+  const order = db.orders.find((o) => o.id === id || o.orderNumber === id);
+  if (!order) {
+    return res.status(404).json({ error: 'Order not found.' });
+  }
+
+  const apiKey = (db.settings.easyPostApiKey || process.env.EASYPOST_API_KEY || '').trim();
+  if (!apiKey) {
+    return res.status(400).json({ error: 'EasyPost API Key not configured.' });
+  }
+
+  const box = db.packages.find((p) => p.id === order.boxId) || db.packages[0];
+  const authHeader = `Basic ${Buffer.from(apiKey + ':').toString('base64')}`;
+
+  const ret = typeof db.settings.returnAddress === 'string'
+    ? JSON.parse(db.settings.returnAddress)
+    : (db.settings.returnAddress || {});
+
+  const isIntl = isInternationalOrder(order);
+  const toCountry = normalizeCountryCode(order.country);
+  const toState = normalizeStateCode(order.state, toCountry);
+  const toZip = cleanZipCode(order.zip, toCountry);
+  const fromCountry = normalizeCountryCode(ret.country);
+  const fromState = normalizeStateCode(ret.state, fromCountry);
+  const fromZip = cleanZipCode(ret.zip, fromCountry);
+  const recipientPhone = cleanPhone(order.phone) || cleanPhone(ret.phone) || '8005550199';
+  const senderPhone = cleanPhone(ret.phone) || '3125550144';
+
+  const shipmentPayload: any = {
+    shipment: {
+      to_address: {
+        name: (order.recipientName || 'Valued Customer').trim(),
+        company: order.company ? order.company.trim() : undefined,
+        street1: (order.street1 || '123 Main St').trim(),
+        street2: order.street2 ? order.street2.trim() : undefined,
+        city: (order.city || 'Anytown').trim(),
+        state: toState || order.state,
+        zip: toZip,
+        country: toCountry,
+        phone: recipientPhone,
+      },
+      from_address: {
+        name: (ret.name || 'Shipping Dept').trim(),
+        company: ret.company ? ret.company.trim() : undefined,
+        street1: (ret.street1 || '100 Bobbin Way').trim(),
+        city: (ret.city || 'Chicago').trim(),
+        state: fromState || ret.state,
+        zip: fromZip,
+        country: fromCountry,
+        phone: senderPhone,
+      },
+      parcel: {
+        length: Math.max(1, Number(box?.length) || 10),
+        width: Math.max(1, Number(box?.width) || 8),
+        height: Math.max(1, Number(box?.height) || 4),
+        weight: Math.max(0.1, Number(order.weightOz) || 16),
+      },
+      options: {
+        label_size: '4x6',
+        label_format: 'PNG',
+      },
+      postage_label: {
+        label_size: '4x6',
+        label_format: 'PNG',
+      },
+    },
+    options: {
+      label_size: '4x6',
+      label_format: 'PNG',
+    },
+    postage_label: {
+      label_size: '4x6',
+      label_format: 'PNG',
+    },
+  };
+
+  if (isIntl) {
+    const signerName = (ret.name || 'Shipping Manager').trim();
+    const rawItems = order.items && order.items.length > 0
+      ? order.items
+      : [{ sku: 'ITEM-1', name: 'Commercial Merchandise', quantity: 1, price: order.declaredValue || 20.0, weightOz: order.weightOz || 16 }];
+
+    shipmentPayload.shipment.customs_info = {
+      customs_certify: true,
+      customs_signer: signerName,
+      contents_type: 'merchandise',
+      restriction_type: 'none',
+      eel_pfc: 'NOEEI 30.37(a)',
+      customs_items: rawItems.map((item) => ({
+        description: (item.name || 'Commercial Merchandise').substring(0, 50).trim() || 'Merchandise',
+        quantity: Math.max(1, Math.round(Number(item.quantity) || 1)),
+        value: Math.max(1.0, Number(item.price) || 10.0),
+        weight: Math.max(0.1, Number(item.weightOz) || 8.0),
+        hs_tariff_number: getHsTariffNumber(item, db.settings),
+        origin_country: 'US',
+      })),
+    };
+  }
+
+  try {
+    const createRes = await fetch('https://api.easypost.com/v2/shipments', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': authHeader,
+      },
+      body: JSON.stringify(shipmentPayload),
+    });
+
+    const createData = await createRes.json().catch(() => ({}));
+    if (!createRes.ok || !createData.rates) {
+      return res.status(400).json({
+        error: createData.error?.message || 'Failed to fetch live rates from EasyPost.',
+      });
+    }
+
+    const rates = (createData.rates || []).map((r: any) => ({
+      id: r.id,
+      carrier: normalizeCarrierName(r.carrier),
+      rawCarrier: r.carrier,
+      serviceLevel: r.service,
+      rate: parseFloat(r.rate) || 0,
+      deliveryDays: r.delivery_days ? `${r.delivery_days} Business Days` : undefined,
+      estDeliveryDate: r.est_delivery_days ? `${r.est_delivery_days} days` : undefined,
+    }));
+
+    res.json({
+      success: true,
+      shipmentId: createData.id,
+      rates,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to communicate with EasyPost.' });
+  }
+});
 
 // Single Order EasyPost Label Purchase Endpoint
 app.post('/api/orders/:id/purchase-label', async (req, res) => {
@@ -2176,10 +2722,13 @@ app.post('/api/orders/:id/purchase-label', async (req, res) => {
 
     res.json({
       success: true,
-      message: `Successfully purchased EasyPost shipping label for Order #${order.orderNumber}! Saved binary label to database.`,
+      message: result.carrierNotice
+        ? `Purchased shipping label for Order #${order.orderNumber} via ${order.carrier} (${order.serviceLevel}) - $${order.shippingCost.toFixed(2)}. ${result.carrierNotice}`
+        : `Successfully purchased EasyPost shipping label for Order #${order.orderNumber}! Saved binary label to database.`,
       order,
       labelUrl: order.labelUrl,
       trackingNumber: order.trackingNumber,
+      carrierNotice: result.carrierNotice,
     });
   } catch (err: any) {
     console.error('[EasyPost Purchase Error]', err);
@@ -2256,26 +2805,53 @@ app.post('/api/orders/batch-purchase-labels', async (req, res) => {
 });
 
 // Helper: Generate 4x6 Thermal Label PDF Buffer using jsPDF
-function generateSingleOrderLabelPdfBuffer(order: ShippingOrder, settings: AppSetting): Buffer {
+async function generateSingleOrderLabelPdfBuffer(order: ShippingOrder, settings: AppSetting): Promise<Buffer> {
   const doc = new jsPDF({
     unit: 'in',
     format: [4, 6],
     orientation: 'portrait',
   });
 
-  // Check if order has real label image
+  const isIntl = isInternationalOrder(order);
+
+  // Check if order has real label image (PNG base64, buffer, or easyPostLabelUrl)
+  let rawImageBuffer: Buffer | undefined;
   const pngBase64 = order.labelPngBase64 || (order.labelPngData ? order.labelPngData.replace(/^data:image\/png;base64,/, '') : undefined);
   if (pngBase64) {
     try {
-      doc.addImage(`data:image/png;base64,${pngBase64}`, 'PNG', 0, 0, 4, 6);
-      return Buffer.from(doc.output('arraybuffer'));
-    } catch (e) {
-      console.warn(`[Label PDF] Failed embedding pngBase64 for Order #${order.orderNumber}:`, e);
+      rawImageBuffer = Buffer.from(pngBase64, 'base64');
+    } catch {}
+  } else if (order.labelBinary && Buffer.isBuffer(order.labelBinary)) {
+    const isPng = order.labelBinary.toString('utf8', 1, 4) === 'PNG' || order.labelBinary.slice(0, 8).includes(Buffer.from('PNG', 'ascii'));
+    if (isPng) {
+      rawImageBuffer = order.labelBinary;
     }
   }
 
-  const rawCountry = (order.country || 'US').trim().toUpperCase();
-  const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
+  if (!rawImageBuffer && order.easyPostLabelUrl && order.easyPostLabelUrl.startsWith('http')) {
+    try {
+      const dlRes = await fetch(order.easyPostLabelUrl);
+      if (dlRes.ok) {
+        const ab = await dlRes.arrayBuffer();
+        const buf = Buffer.from(ab);
+        if (buf.toString('utf8', 0, 4) !== '%PDF') {
+          rawImageBuffer = buf;
+        }
+      }
+    } catch (e) {
+      console.warn(`[Label PDF] Failed fetching easyPostLabelUrl for Order #${order.orderNumber}:`, e);
+    }
+  }
+
+  if (rawImageBuffer) {
+    try {
+      await addLabelImageToDoc(doc, rawImageBuffer);
+      return Buffer.from(doc.output('arraybuffer'));
+    } catch (e) {
+      console.warn(`[Label PDF] Failed embedding png for Order #${order.orderNumber}:`, e);
+    }
+  }
+
   const displayCarrier = isIntl ? (order.carrier || 'USPS INTERNATIONAL') : (order.carrier || 'USPS');
   const displayService = order.serviceLevel || (isIntl ? 'PRIORITY MAIL INTERNATIONAL' : 'PRIORITY MAIL 2-DAY');
   const ret = getReturnAddress(settings);
@@ -2397,28 +2973,73 @@ function generateSingleOrderLabelPdfBuffer(order: ShippingOrder, settings: AppSe
   return Buffer.from(doc.output('arraybuffer'));
 }
 
-// Download/View PDF Label for Order Stored in Database
-app.get('/api/orders/:id/label.pdf', (req, res) => {
+// Download/View PNG Label Image for Order
+app.get('/api/orders/:id/label.png', async (req, res) => {
   const { id } = req.params;
   const order = db.orders.find((o) => o.id === id || o.orderNumber === id);
   if (!order) {
     return res.status(404).send('Order not found');
   }
 
-  if (!order.labelBinary && !order.trackingNumber) {
+  let rawBuffer: Buffer | null = null;
+
+  const pngBase64 = order.labelPngBase64 || (order.labelPngData ? order.labelPngData.replace(/^data:image\/png;base64,/, '') : undefined);
+  if (pngBase64) {
+    try {
+      rawBuffer = Buffer.from(pngBase64, 'base64');
+    } catch {}
+  } else if (order.labelBinary && Buffer.isBuffer(order.labelBinary)) {
+    const isPng = order.labelBinary.toString('utf8', 1, 4) === 'PNG' || order.labelBinary.slice(0, 8).includes(Buffer.from('PNG', 'ascii'));
+    if (isPng) {
+      rawBuffer = order.labelBinary;
+    }
+  }
+
+  if (!rawBuffer && order.easyPostLabelUrl && order.easyPostLabelUrl.startsWith('http')) {
+    try {
+      const dlRes = await fetch(order.easyPostLabelUrl);
+      if (dlRes.ok) {
+        const ab = await dlRes.arrayBuffer();
+        const buf = Buffer.from(ab);
+        if (buf.toString('utf8', 0, 4) !== '%PDF') {
+          rawBuffer = buf;
+        }
+      }
+    } catch {}
+  }
+
+  if (rawBuffer) {
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.send(rawBuffer);
+  }
+
+  return res.status(404).send('No PNG label image available for this order.');
+});
+
+// Download/View PDF Label for Order Stored in Database
+app.get('/api/orders/:id/label.pdf', async (req, res) => {
+  const { id } = req.params;
+  const order = db.orders.find((o) => o.id === id || o.orderNumber === id);
+  if (!order) {
+    return res.status(404).send('Order not found');
+  }
+
+  if (!order.labelBinary && !order.trackingNumber && !order.easyPostLabelUrl) {
     return res.status(400).send('Postage label has not been purchased from EasyPost for this order yet. Please purchase the label first.');
   }
 
   try {
     let pdfBuffer = order.labelBinary;
-    if (!pdfBuffer) {
-      pdfBuffer = generateSingleOrderLabelPdfBuffer(order, db.settings);
+    if (!pdfBuffer || (Buffer.isBuffer(pdfBuffer) && pdfBuffer.toString('utf8', 0, 4) !== '%PDF')) {
+      pdfBuffer = await generateSingleOrderLabelPdfBuffer(order, db.settings);
       order.labelBinary = pdfBuffer;
     }
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="EasyPost_Label_${order.orderNumber}.pdf"`);
     res.send(pdfBuffer);
   } catch (err: any) {
+    console.error('[Label PDF] Error delivering label PDF:', err);
     res.status(500).send('Error generating PDF label');
   }
 });
@@ -2653,11 +3274,13 @@ app.get('/api/orders/batch-labels.pdf', async (req, res) => {
 
       // Check if order has real label image (PNG base64 or easyPostLabelUrl or labelBinary)
       let renderedRealLabel = false;
+      const isIntl = isInternationalOrder(order);
 
       const pngBase64 = order.labelPngBase64 || (order.labelPngData ? order.labelPngData.replace(/^data:image\/png;base64,/, '') : undefined);
       if (pngBase64) {
         try {
-          doc.addImage(`data:image/png;base64,${pngBase64}`, 'PNG', 0, 0, 4, 6);
+          const rawBuf = Buffer.from(pngBase64, 'base64');
+          await addLabelImageToDoc(doc, rawBuf);
           renderedRealLabel = true;
         } catch (e) {
           console.warn(`[Batch Labels PDF] Failed embedding labelPngBase64 for Order #${order.orderNumber}:`, e);
@@ -2668,8 +3291,7 @@ app.get('/api/orders/batch-labels.pdf', async (req, res) => {
         const isPng = order.labelBinary.toString('utf8', 1, 4) === 'PNG' || order.labelBinary.slice(0, 8).includes(Buffer.from('PNG', 'ascii'));
         if (isPng) {
           try {
-            const base64Img = `data:image/png;base64,${order.labelBinary.toString('base64')}`;
-            doc.addImage(base64Img, 'PNG', 0, 0, 4, 6);
+            await addLabelImageToDoc(doc, order.labelBinary);
             renderedRealLabel = true;
           } catch (e) {
             console.warn(`[Batch Labels PDF] Failed embedding labelBinary for Order #${order.orderNumber}:`, e);
@@ -2686,8 +3308,7 @@ app.get('/api/orders/batch-labels.pdf', async (req, res) => {
             const buf = Buffer.from(arrayBuffer);
             const isPdf = buf.toString('utf8', 0, 4) === '%PDF';
             if (!isPdf) {
-              const base64Img = `data:image/png;base64,${buf.toString('base64')}`;
-              doc.addImage(base64Img, 'PNG', 0, 0, 4, 6);
+              await addLabelImageToDoc(doc, buf);
               renderedRealLabel = true;
             }
           }
@@ -3514,7 +4135,8 @@ BEGIN
         [createdAt] [datetime2](7) NULL,
         [OrderDetails] [nvarchar](max) NULL,
         [receiptID] [nvarchar](max) NULL,
-        [shippingMethod] [nvarchar](max) NULL,
+        [Carrier] [nvarchar](max) NULL,
+        [Service] [nvarchar](max) NULL,
         [trackingNumber] [nvarchar](max) NULL,
         [status] [nvarchar](max) NULL,
         [shippingCost] [decimal](18, 2) NULL,

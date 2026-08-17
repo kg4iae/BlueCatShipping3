@@ -243,7 +243,10 @@ export const CompareRatesModal: React.FC<CompareRatesModalProps> = ({
   onSelectRate,
   onPurchaseLabel,
 }) => {
-  const rates = getCalculatedRatesForOrder(order, settings?.defaultDomesticCarrier, settings?.defaultDomesticService);
+  const defaultRates = getCalculatedRatesForOrder(order, settings?.defaultDomesticCarrier, settings?.defaultDomesticService);
+  const [rates, setRates] = useState<RateOption[]>(defaultRates);
+  const [isLive, setIsLive] = useState<boolean>(false);
+  const [loadingLive, setLoadingLive] = useState<boolean>(false);
   const countryFlag = getCountryFlag(order.country);
   const rawCountry = (order.country || 'US').trim().toUpperCase();
   const isInternational =
@@ -254,13 +257,64 @@ export const CompareRatesModal: React.FC<CompareRatesModalProps> = ({
 
   // Find initial selected, recommended default, or cheapest
   const initialOption =
-    rates.find((r) => r.carrier === order.carrier && r.serviceLevel === order.serviceLevel) ||
-    rates.find((r) => r.isRecommended && !r.disabled) ||
-    rates.find((r) => r.isCheapest && !r.disabled) ||
-    rates[0];
+    defaultRates.find((r) => r.carrier === order.carrier && r.serviceLevel === order.serviceLevel) ||
+    defaultRates.find((r) => r.isRecommended && !r.disabled) ||
+    defaultRates.find((r) => r.isCheapest && !r.disabled) ||
+    defaultRates[0];
 
   const [selectedRate, setSelectedRate] = useState<RateOption>(initialOption);
   const [saving, setSaving] = useState(false);
+
+  const fetchLiveRates = async () => {
+    setLoadingLive(true);
+    try {
+      const res = await fetch(`/api/orders/${order.id}/live-rates`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && Array.isArray(data.rates) && data.rates.length > 0) {
+          const liveOptions: RateOption[] = data.rates.map((r: any) => ({
+            carrier: r.carrier as CarrierType,
+            serviceLevel: r.serviceLevel,
+            rate: r.rate,
+            deliveryDays: r.deliveryDays || r.estDeliveryDate || 'Standard Transit',
+            isCheapest: false,
+            isFastest: false,
+            isRecommended: false,
+            notes: `Live EasyPost rate for account (${r.rawCarrier})`,
+          }));
+
+          // Mark lowest cost
+          const minRate = Math.min(...liveOptions.map((o) => o.rate));
+          liveOptions.forEach((o) => {
+            if (o.rate === minRate) o.isCheapest = true;
+          });
+
+          // Match initial or recommended
+          const exactMatch = liveOptions.find((o) => o.carrier === order.carrier && o.serviceLevel.toLowerCase() === (order.serviceLevel || '').toLowerCase());
+          const carrierMatch = liveOptions.find((o) => o.carrier === order.carrier);
+          const currentMatch = exactMatch || carrierMatch;
+          if (currentMatch) {
+            currentMatch.isRecommended = true;
+            setSelectedRate(currentMatch);
+          } else {
+            liveOptions[0].isRecommended = true;
+            setSelectedRate(liveOptions[0]);
+          }
+
+          setRates(liveOptions);
+          setIsLive(true);
+        }
+      }
+    } catch (err) {
+      console.warn('Could not fetch live rates from EasyPost:', err);
+    } finally {
+      setLoadingLive(false);
+    }
+  };
+
+  React.useEffect(() => {
+    fetchLiveRates();
+  }, [order.id]);
 
   const box = packages.find((p) => p.id === order.boxId);
 
@@ -315,15 +369,32 @@ export const CompareRatesModal: React.FC<CompareRatesModalProps> = ({
           <div className="w-10 h-10 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 shrink-0">
             <DollarSign className="w-6 h-6" />
           </div>
-          <div>
-            <div className="flex items-center space-x-2">
-              <h2 className="text-lg font-extrabold text-slate-900">Carrier Rate Comparison</h2>
-              <span className="bg-slate-100 text-slate-700 font-mono text-xs font-bold px-2 py-0.5 rounded border border-slate-200">
-                #{formatOrderId(order.orderNumber)}
-              </span>
+          <div className="flex-1">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <h2 className="text-lg font-extrabold text-slate-900">Carrier Rate Comparison</h2>
+                <span className="bg-slate-100 text-slate-700 font-mono text-xs font-bold px-2 py-0.5 rounded border border-slate-200">
+                  #{formatOrderId(order.orderNumber)}
+                </span>
+                {isLive && (
+                  <span className="bg-emerald-100 text-emerald-800 text-[10px] font-extrabold px-2 py-0.5 rounded-full border border-emerald-300 flex items-center space-x-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span>Live EasyPost Rates</span>
+                  </span>
+                )}
+              </div>
+              <button
+                onClick={fetchLiveRates}
+                disabled={loadingLive}
+                className="text-xs text-indigo-600 hover:text-indigo-800 flex items-center space-x-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2.5 py-1 rounded-lg font-semibold transition-colors cursor-pointer mr-6 disabled:opacity-50"
+                title="Refresh live shipping rates from EasyPost"
+              >
+                <RefreshCw className={`w-3 h-3 ${loadingLive ? 'animate-spin' : ''}`} />
+                <span>{loadingLive ? 'Fetching...' : 'Refresh Live Rates'}</span>
+              </button>
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
-              Compare real-time EasyPost shipping rates between <strong>USPS</strong> and <strong>UPS</strong>.
+              Compare real-time EasyPost shipping rates across active carriers (<strong>USPS</strong>, <strong>UPS</strong>, <strong>FedEx</strong>).
             </p>
           </div>
         </div>
@@ -371,7 +442,7 @@ export const CompareRatesModal: React.FC<CompareRatesModalProps> = ({
             <div>
               <div className="font-bold">🌐 International Rate Match (USPS vs UPS)</div>
               <p className="text-blue-800 text-[11px] mt-0.5">
-                International shipments allow choosing between <strong>USPS</strong> and <strong>UPS</strong> based on rates, delivery time, and customs brokerage. Select your preferred option below.
+                International shipments allow choosing between <strong>USPS</strong> and <strong>UPS</strong>. Customs HS Tariff Code: <code className="bg-blue-100 text-blue-900 px-1.5 py-0.5 rounded font-mono font-bold">{settings?.defaultHsTariffCode || '610910'}</code>
               </p>
             </div>
           </div>

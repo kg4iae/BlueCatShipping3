@@ -813,9 +813,10 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
               {/* --- 2. 4x6 SHIPPING LABEL --- */}
               {(viewMode === 'both' || viewMode === 'labels') && (() => {
                 const realLabelSrc =
-                  order.easyPostLabelUrl ||
                   order.labelPngData ||
-                  (order.labelPngBase64 ? `data:image/png;base64,${order.labelPngBase64}` : null);
+                  (order.labelPngBase64 ? `data:image/png;base64,${order.labelPngBase64}` : null) ||
+                  (order.id ? `/api/orders/${order.id}/label.png` : null) ||
+                  order.easyPostLabelUrl;
 
                 if (realLabelSrc) {
                   return (

@@ -30,6 +30,7 @@ import {
   Users,
   UserPlus,
   KeyRound,
+  Globe,
 } from 'lucide-react';
 
 import {
@@ -54,7 +55,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   onCreatePackage,
   onDeletePackage,
 }) => {
-  const [activeSection, setActiveSection] = useState<'returnAddress' | 'carrierDefaults' | 'qztray' | 'packingslip' | 'easypost' | 'packages' | 'mssql' | 'security'>('returnAddress');
+  const [activeSection, setActiveSection] = useState<'returnAddress' | 'carrierDefaults' | 'internationalCustoms' | 'qztray' | 'packingslip' | 'easypost' | 'packages' | 'mssql' | 'security'>('returnAddress');
 
   // Business / FROM Address Form states
   const [companyName, setCompanyName] = useState(settings.companyName || 'BlueCat Bobbins Shipping');
@@ -71,6 +72,11 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   // Carrier & Rates defaults state
   const [defaultDomesticCarrier, setDefaultDomesticCarrier] = useState<CarrierType>(settings.defaultDomesticCarrier || 'USPS');
   const [defaultDomesticService, setDefaultDomesticService] = useState<string>(settings.defaultDomesticService || 'Priority');
+  const [defaultInternationalCarrier, setDefaultInternationalCarrier] = useState<CarrierType>(settings.defaultInternationalCarrier || 'UPS');
+  const [defaultInternationalService, setDefaultInternationalService] = useState<string>(settings.defaultInternationalService || 'UPS Worldwide Expedited');
+
+  // International Harmonized System (HS) Harmony Code State
+  const [defaultHsTariffCode, setDefaultHsTariffCode] = useState<string>(settings.defaultHsTariffCode || '610910');
 
   // QZ Tray Direct Web Printing states
   const [qzPrinterLabel, setQzPrinterLabel] = useState<string>(settings.qzPrinterLabel || '');
@@ -299,6 +305,22 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     await onUpdateSettings({
       defaultDomesticCarrier,
       defaultDomesticService,
+      defaultInternationalCarrier,
+      defaultInternationalService,
+      defaultHsTariffCode: defaultHsTariffCode.replace(/[^0-9]/g, '') || '610910',
+    });
+    setSaving(false);
+    triggerSuccess();
+  };
+
+  const handleSaveInternationalCustoms = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    const cleaned = defaultHsTariffCode.replace(/[^0-9]/g, '');
+    const codeToSave = cleaned.length >= 6 ? cleaned.slice(0, 10) : '610910';
+    setDefaultHsTariffCode(codeToSave);
+    await onUpdateSettings({
+      defaultHsTariffCode: codeToSave,
     });
     setSaving(false);
     triggerSuccess();
@@ -552,6 +574,18 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
           >
             <Truck className="w-4 h-4" />
             <span>Domestic Carrier &amp; Rates</span>
+          </button>
+
+          <button
+            onClick={() => setActiveSection('internationalCustoms')}
+            className={`w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+              activeSection === 'internationalCustoms'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <Globe className="w-4 h-4" />
+            <span>International &amp; Customs (HS Code)</span>
           </button>
 
           <button
@@ -898,12 +932,88 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   </div>
                 </div>
 
+                {/* International Carrier & Service Defaults */}
+                <div className="pt-4 border-t border-slate-200">
+                  <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider mb-3">
+                    International Order Defaults
+                  </h4>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+                        Default International Carrier
+                      </label>
+                      <select
+                        value={defaultInternationalCarrier}
+                        onChange={(e) => {
+                          const val = e.target.value as CarrierType;
+                          setDefaultInternationalCarrier(val);
+                          if (val === 'UPS') setDefaultInternationalService('UPS Worldwide Expedited');
+                          else if (val === 'USPS') setDefaultInternationalService('Priority Mail International');
+                          else if (val === 'FedEx') setDefaultInternationalService('FedEx International Priority');
+                          else if (val === 'DHL') setDefaultInternationalService('DHL Express Worldwide');
+                        }}
+                        className="w-full bg-slate-50 border border-slate-300 text-slate-900 rounded-xl px-3.5 py-2.5 text-xs font-semibold focus:ring-2 focus:ring-indigo-500 focus:bg-white"
+                      >
+                        <option value="UPS">UPS (United Parcel Service - Recommended for International)</option>
+                        <option value="USPS">USPS (United States Postal Service)</option>
+                        <option value="FedEx">FedEx (Federal Express)</option>
+                        <option value="DHL">DHL Express</option>
+                      </select>
+                      <p className="text-[11px] text-slate-500 mt-1.5">
+                        Primary carrier assigned to foreign/cross-border international orders.
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+                        Default International Service Level
+                      </label>
+                      <select
+                        value={defaultInternationalService}
+                        onChange={(e) => setDefaultInternationalService(e.target.value)}
+                        className="w-full bg-slate-50 border border-slate-300 text-slate-900 rounded-xl px-3.5 py-2.5 text-xs font-semibold focus:ring-2 focus:ring-indigo-500 focus:bg-white"
+                      >
+                        {defaultInternationalCarrier === 'UPS' && (
+                          <>
+                            <option value="UPS Worldwide Expedited">UPS Worldwide Expedited (2-5 Days)</option>
+                            <option value="UPS Worldwide Saver">UPS Worldwide Saver (1-3 Days)</option>
+                            <option value="UPS Standard">UPS Standard (Canada/Mexico)</option>
+                            <option value="UPS Worldwide Express">UPS Worldwide Express</option>
+                          </>
+                        )}
+                        {defaultInternationalCarrier === 'USPS' && (
+                          <>
+                            <option value="Priority Mail International">USPS Priority Mail International (6-10 Days)</option>
+                            <option value="First-Class Package International">USPS First-Class Package International (Economy)</option>
+                            <option value="Priority Mail Express International">USPS Priority Mail Express International</option>
+                          </>
+                        )}
+                        {defaultInternationalCarrier === 'FedEx' && (
+                          <>
+                            <option value="FedEx International Priority">FedEx International Priority</option>
+                            <option value="FedEx International Economy">FedEx International Economy</option>
+                            <option value="FedEx International Connect Plus">FedEx International Connect Plus</option>
+                          </>
+                        )}
+                        {defaultInternationalCarrier === 'DHL' && (
+                          <>
+                            <option value="DHL Express Worldwide">DHL Express Worldwide</option>
+                          </>
+                        )}
+                      </select>
+                      <p className="text-[11px] text-slate-500 mt-1.5">
+                        Default service level selected when fulfilling cross-border shipments.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
                 <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 flex items-start space-x-3 text-xs text-indigo-900">
                   <Sparkles className="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" />
                   <div>
                     <div className="font-bold">Scope &amp; Custom Overrides</div>
                     <p className="text-indigo-800 text-[11px] mt-0.5">
-                      This setting updates default rates and label purchasing for domestic orders. You can still compare live rates or manually pick a different carrier on any order at any time.
+                      These settings establish your default carrier and rate tier for domestic and international orders. You can still compare live rates or manually pick a different carrier on any order at any time.
                     </p>
                   </div>
                 </div>
@@ -916,6 +1026,103 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   >
                     <Save className="w-4 h-4" />
                     <span>{saving ? 'Saving...' : 'Save Carrier & Rate Defaults'}</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {/* SECTION: INTERNATIONAL SHIPPING & CUSTOMS HS CODE */}
+          {activeSection === 'internationalCustoms' && (
+            <div className="bg-white border border-slate-200 rounded-xl p-6 shadow-sm space-y-6">
+              <div className="border-b border-slate-100 pb-4">
+                <h3 className="text-base font-bold text-slate-900 flex items-center space-x-2">
+                  <Globe className="w-5 h-5 text-indigo-600" />
+                  <span>International Shipping &amp; Customs (Harmony Code)</span>
+                </h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Configure the global Harmonized System (HS / HTS) Tariff Code for international shipments. This code will automatically be applied to all international orders for EasyPost customs documentation.
+                </p>
+              </div>
+
+              <form onSubmit={handleSaveInternationalCustoms} className="space-y-6">
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+                      Harmonized System (HS / HTS) Tariff Code (Global Harmony Code)
+                    </label>
+                    <div className="relative max-w-md">
+                      <input
+                        type="text"
+                        value={defaultHsTariffCode}
+                        onChange={(e) => setDefaultHsTariffCode(e.target.value)}
+                        placeholder="e.g. 610910"
+                        className="w-full bg-slate-50 border border-slate-300 text-slate-900 rounded-xl px-4 py-2.5 text-sm font-mono font-bold focus:ring-2 focus:ring-indigo-500 focus:bg-white"
+                      />
+                      <span className="absolute right-3 top-2.5 text-xs text-slate-400 font-mono font-normal">
+                        6-10 digits
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-1.5">
+                      Enter the 6 to 10-digit Harmonized Tariff Schedule (HTS / HS) code describing your goods (e.g., <code className="text-indigo-600 font-mono font-bold">610910</code> for Cotton T-Shirts, <code className="text-indigo-600 font-mono font-bold">847330</code> for Bobbins/Machine Parts). Non-digits and dots are automatically handled.
+                    </p>
+                  </div>
+
+                  {/* Common Preset Helper Chips */}
+                  <div>
+                    <span className="text-[11px] font-bold text-slate-600 uppercase tracking-wider block mb-1.5">Quick Presets:</span>
+                    <div className="flex flex-wrap gap-2">
+                      {[
+                        { label: '610910 (Cotton Apparel / Shirts)', code: '610910' },
+                        { label: '482020 (Paper / Bobbins / Stationery)', code: '482020' },
+                        { label: '847330 (Machinery Parts / Accessories)', code: '847330' },
+                        { label: '392690 (Plastic Commercial Articles)', code: '392690' },
+                        { label: '620462 (Woven Goods)', code: '620462' },
+                      ].map((preset) => (
+                        <button
+                          key={preset.code}
+                          type="button"
+                          onClick={() => setDefaultHsTariffCode(preset.code)}
+                          className={`text-xs px-2.5 py-1 rounded-lg border font-medium transition-colors cursor-pointer ${
+                            defaultHsTariffCode.replace(/[^0-9]/g, '') === preset.code
+                              ? 'bg-indigo-100 text-indigo-800 border-indigo-300 font-bold'
+                              : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                          }`}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Customs Integration Info Box */}
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center space-x-2 text-xs font-bold text-slate-800">
+                    <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                    <span>How This Applies To All International Orders</span>
+                  </div>
+                  <ul className="text-xs text-slate-600 space-y-1.5 list-disc list-inside">
+                    <li>
+                      <strong>Uniform Application:</strong> Whenever an order is shipped outside the US (Canada, UK, Europe, Australia, etc.), this code is automatically attached to each customs item under <code className="font-mono text-indigo-700 bg-indigo-50 px-1 py-0.5 rounded">hs_tariff_number</code>.
+                    </li>
+                    <li>
+                      <strong>Commercial Invoices &amp; Customs Clearance:</strong> Customs authorities (USPS International, UPS Worldwide, FedEx International) use this code to determine import duties, taxes, and clearance routing.
+                    </li>
+                    <li>
+                      <strong>EasyPost API Compliance:</strong> Meets EasyPost's mandatory <code className="font-mono text-indigo-700 bg-indigo-50 px-1 py-0.5 rounded">customs_items.hs_tariff_number</code> requirement to prevent API purchase failures.
+                    </li>
+                  </ul>
+                </div>
+
+                <div className="flex justify-end pt-2">
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-5 py-2.5 rounded-xl shadow-sm flex items-center space-x-2 transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>{saving ? 'Saving...' : 'Save International Harmony Code'}</span>
                   </button>
                 </div>
               </form>
@@ -1463,6 +1670,31 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                     </div>
                   </div>
                 )}
+
+                {/* Carrier Accounts Info Box */}
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center space-x-2 text-xs font-bold text-slate-800">
+                    <Truck className="w-4 h-4 text-indigo-600" />
+                    <span>EasyPost Carrier Accounts (USPS vs UPS DAP)</span>
+                  </div>
+                  <div className="text-xs text-slate-600 space-y-2">
+                    <p>
+                      <strong>USPS:</strong> Enabled by default for all EasyPost accounts. Provides commercial discounted rates for Priority Mail, Ground Advantage, and Express Mail.
+                    </p>
+                    <p>
+                      <strong>UPS (UPS Digital Access Program):</strong> To generate native UPS labels and receive live UPS discounted rates, enable <strong>UPS DAP</strong> in your{' '}
+                      <a
+                        href="https://www.easypost.com/account/carrier-accounts"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-indigo-600 font-bold underline hover:text-indigo-800 inline-flex items-center space-x-0.5"
+                      >
+                        <span>EasyPost Dashboard &gt; Carrier Accounts</span>
+                        <ExternalLink className="w-3 h-3 ml-0.5 inline" />
+                      </a>. If UPS is not enabled on your EasyPost account, orders will automatically fulfill via USPS.
+                    </p>
+                  </div>
+                </div>
 
                 <div className="pt-2 flex items-center justify-between">
                   <button

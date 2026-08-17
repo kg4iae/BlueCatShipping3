@@ -17,6 +17,8 @@ export interface OrderItem {
   quantity: number;
   price: number;
   weightOz?: number;
+  hsTariffNumber?: string;
+  hs_tariff_number?: string;
 }
 
 export interface ShippingOrder {
@@ -105,6 +107,9 @@ export interface AppSetting {
   appPassword?: string;
   defaultDomesticCarrier?: CarrierType;
   defaultDomesticService?: string;
+  defaultInternationalCarrier?: CarrierType;
+  defaultInternationalService?: string;
+  defaultHsTariffCode?: string;
   qzPrinterLabel?: string;
   qzPrinterPackingSlip?: string;
   qzAutoPrintOnPurchase?: boolean;
