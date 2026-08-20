@@ -70,6 +70,7 @@ interface DashboardProps {
   onUpdateOrderBox: (orderId: string, boxId: string) => Promise<void>;
   onValidateAddresses: (orderIds?: string[]) => Promise<void>;
   onOpenAddressFixModal: (order: ShippingOrder) => void;
+  onOpenWeightCorrectionModal?: (order: ShippingOrder) => void;
   onOpenCompareRatesModal?: (order: ShippingOrder) => void;
   onOpenOrderDetailModal?: (order: ShippingOrder) => void;
   onGenerateBatchLabels: (selectedOrderIds: string[]) => Promise<void>;
@@ -77,6 +78,7 @@ interface DashboardProps {
   onRefreshData: () => Promise<void>;
   onSyncMssql?: (action?: 'pull' | 'push') => Promise<void>;
   onOpenScanFormModal?: () => void;
+  onToggleAppEnv?: (targetEnv: 'dev' | 'prod') => Promise<void>;
   loading: boolean;
 }
 
@@ -87,6 +89,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onUpdateOrderBox,
   onValidateAddresses,
   onOpenAddressFixModal,
+  onOpenWeightCorrectionModal,
   onOpenCompareRatesModal,
   onOpenOrderDetailModal,
   onGenerateBatchLabels,
@@ -94,6 +97,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onRefreshData,
   onSyncMssql,
   onOpenScanFormModal,
+  onToggleAppEnv,
   loading,
 }) => {
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -421,8 +425,19 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             </span>
                           )}
                         </div>
-                        <div className="text-[10px] text-slate-400 font-sans mt-0.5">
-                          {new Date(order.orderDate).toLocaleDateString()}
+                        <div className="flex items-center space-x-1.5 mt-0.5">
+                          <span className="text-[10px] text-slate-400 font-sans">
+                            {new Date(order.orderDate).toLocaleDateString()}
+                          </span>
+                          <span className={`text-[9px] font-mono px-1 py-0.2 rounded border font-semibold ${
+                            (order.sourceTable?.includes('shippingdev') || order.env === 'dev' || (!order.sourceTable && settings.appEnv === 'dev'))
+                              ? 'bg-amber-50 text-amber-800 border-amber-200'
+                              : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                          }`}>
+                            {(order.sourceTable?.includes('shippingdev') || order.env === 'dev' || (!order.sourceTable && settings.appEnv === 'dev'))
+                              ? 'shippingdev'
+                              : 'Shipping'}
+                          </span>
                         </div>
                       </td>
 
@@ -477,12 +492,31 @@ export const Dashboard: React.FC<DashboardProps> = ({
                           <div className="text-slate-400 text-xs italic">Standard Order Item</div>
                         )}
                         {order.weightOz === 0 ? (
-                          <div className="text-xs text-rose-600 font-bold flex items-center space-x-1 mt-1 bg-rose-50 border border-rose-200 px-1.5 py-0.5 rounded w-max">
-                            <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
-                            <span>Weight: 0 oz (Needs Correction)</span>
-                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onOpenWeightCorrectionModal && onOpenWeightCorrectionModal(order);
+                            }}
+                            className="text-xs text-rose-600 font-bold flex items-center space-x-1.5 mt-1 bg-rose-50 hover:bg-rose-100 border border-rose-200 hover:border-rose-300 px-2 py-0.5 rounded w-max cursor-pointer transition-all shadow-2xs group"
+                            title="Click to correct package weight (Required for shipping labels)"
+                          >
+                            <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0 group-hover:scale-110 transition-transform" />
+                            <span className="underline decoration-rose-300 underline-offset-2">Weight: 0 oz (Click to correct)</span>
+                          </button>
                         ) : (
-                          <div className="text-xs text-slate-500 font-medium mt-1">Weight: <strong className="text-slate-900">{order.weightOz} oz</strong></div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onOpenWeightCorrectionModal && onOpenWeightCorrectionModal(order);
+                            }}
+                            className="text-xs text-slate-500 hover:text-indigo-700 font-medium mt-1 inline-flex items-center space-x-1 hover:bg-slate-100 px-1.5 py-0.5 rounded cursor-pointer transition-colors group"
+                            title="Click to adjust package weight"
+                          >
+                            <span>Weight: <strong className="text-slate-900 group-hover:text-indigo-700">{order.weightOz} oz</strong></span>
+                            <span className="text-[10px] text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity">✏️</span>
+                          </button>
                         )}
                       </td>
 
@@ -584,7 +618,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         {order.status === 'address_error' && (
                           <span className="inline-flex items-center gap-1 text-rose-700 font-bold text-[10px] uppercase tracking-wide bg-rose-50 border border-rose-200 px-2 py-0.5 rounded">
                             <AlertTriangle className="w-3 h-3 text-rose-600" />
-                            <span>Issue</span>
+                            <span>{order.weightOz <= 0 && (!order.validationErrors || order.validationErrors.every((e) => e.toLowerCase().includes('weight'))) ? 'Weight Req' : 'Issue'}</span>
                           </span>
                         )}
                       </td>
@@ -592,12 +626,21 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       {/* Action */}
                       <td className="py-3 px-3 text-right">
                         {order.status === 'address_error' ? (
-                          <button
-                            onClick={() => onOpenAddressFixModal(order)}
-                            className="text-rose-600 font-semibold text-xs hover:underline cursor-pointer"
-                          >
-                            Fix Address
-                          </button>
+                          order.weightOz <= 0 && (!order.validationErrors || order.validationErrors.every((e) => e.toLowerCase().includes('weight'))) ? (
+                            <button
+                              onClick={() => onOpenWeightCorrectionModal && onOpenWeightCorrectionModal(order)}
+                              className="text-rose-600 font-semibold text-xs hover:underline cursor-pointer"
+                            >
+                              Correct Weight
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => onOpenAddressFixModal(order)}
+                              className="text-rose-600 font-semibold text-xs hover:underline cursor-pointer"
+                            >
+                              Fix Address
+                            </button>
+                          )
                         ) : Boolean(order.hasLabelData || (order.LabelData !== null && order.LabelData !== undefined && order.LabelData !== false) || order.labelBinary) ? (
                           <a
                             href={`/api/orders/${order.id}/label.pdf`}

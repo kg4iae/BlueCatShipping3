@@ -14,6 +14,9 @@ import {
   Sparkles,
   FileText,
   User,
+  Layers,
+  ShieldCheck,
+  Code2,
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -26,6 +29,8 @@ interface NavbarProps {
   readyToShipCount: number;
   mssqlConnected: boolean;
   easyPostMode: string;
+  appEnv?: 'dev' | 'prod';
+  onToggleAppEnv?: (newEnv: 'dev' | 'prod') => void;
   onLogout: () => void;
   onSyncMssql?: () => Promise<void>;
   currentUser?: { username: string; fullName?: string; role?: string } | null;
@@ -41,12 +46,13 @@ export const Navbar: React.FC<NavbarProps> = ({
   readyToShipCount,
   mssqlConnected,
   easyPostMode,
+  appEnv = 'dev',
+  onToggleAppEnv,
   onLogout,
   onSyncMssql,
   currentUser,
 }) => {
   const [isSyncing, setIsSyncing] = React.useState(false);
-
 
   const handleSyncClick = async () => {
     if (!onSyncMssql) return;
@@ -56,14 +62,48 @@ export const Navbar: React.FC<NavbarProps> = ({
   };
   return (
     <header className="bg-slate-900 border-b border-slate-800 text-white sticky top-0 z-30 shadow-sm">
-      {/* Top Banner with System Statuses */}
+      {/* Top Banner with System Statuses & Dev/Prod Switch */}
       <div className="bg-slate-950 px-4 py-1.5 text-xs text-slate-400 border-b border-slate-800/80 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center space-x-4">
-          <div className="flex items-center space-x-1.5">
-            <Database className={`w-3.5 h-3.5 ${mssqlConnected ? 'text-emerald-400' : 'text-rose-400'}`} />
+        <div className="flex items-center space-x-3 sm:space-x-4 flex-wrap">
+          {/* Dev / Production Switch */}
+          <div className="flex items-center space-x-1.5 bg-slate-900 border border-slate-700/80 rounded-lg p-0.5">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 pl-1.5 pr-1 hidden sm:inline">
+              ENV:
+            </span>
+            <button
+              type="button"
+              onClick={() => onToggleAppEnv && onToggleAppEnv('dev')}
+              className={`px-2 py-0.5 rounded text-[11px] font-bold transition-all cursor-pointer flex items-center space-x-1 ${
+                appEnv === 'dev'
+                  ? 'bg-amber-500 text-slate-950 shadow-sm'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+              title="Development Mode: Uses [dbo].[shippingdev] table & EasyPost Test API Key"
+            >
+              <Code2 className="w-3 h-3" />
+              <span>DEV</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onToggleAppEnv && onToggleAppEnv('prod')}
+              className={`px-2 py-0.5 rounded text-[11px] font-bold transition-all cursor-pointer flex items-center space-x-1 ${
+                appEnv === 'prod'
+                  ? 'bg-emerald-500 text-slate-950 shadow-sm'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+              title="Production Mode: Uses [dbo].[Shipping] table & EasyPost Production API Key"
+            >
+              <ShieldCheck className="w-3 h-3" />
+              <span>PROD</span>
+            </button>
+          </div>
+
+          {/* Active Table Badge */}
+          <div className="flex items-center space-x-1.5 bg-slate-900/90 px-2 py-0.5 rounded border border-slate-800 text-[11px]">
+            <Database className={`w-3.5 h-3.5 ${appEnv === 'prod' ? 'text-emerald-400' : 'text-amber-400'}`} />
             <span>
-              MSSQL DB: <strong className={mssqlConnected ? 'text-emerald-300 font-medium' : 'text-rose-300'}>
-                {mssqlConnected ? 'Connected (Live DB)' : 'Disconnected'}
+              Table: <strong className={appEnv === 'prod' ? 'text-emerald-300 font-mono' : 'text-amber-300 font-mono'}>
+                {appEnv === 'prod' ? '[dbo].[Shipping]' : '[dbo].[shippingdev]'}
               </strong>
             </span>
             {mssqlConnected && onSyncMssql && (
@@ -71,18 +111,23 @@ export const Navbar: React.FC<NavbarProps> = ({
                 type="button"
                 onClick={handleSyncClick}
                 disabled={isSyncing}
-                className="ml-1 bg-emerald-950 hover:bg-emerald-900 border border-emerald-700/60 text-emerald-300 text-[10px] font-semibold px-2 py-0.5 rounded cursor-pointer transition-colors disabled:opacity-50"
+                className="ml-1 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-[10px] font-semibold px-1.5 py-0.2 rounded cursor-pointer transition-colors disabled:opacity-50"
                 title="Sync orders directly with MS SQL database"
               >
-                {isSyncing ? 'Syncing...' : 'Sync MS SQL'}
+                {isSyncing ? 'Syncing...' : 'Sync'}
               </button>
             )}
           </div>
-          <span className="text-slate-800">|</span>
-          <div className="flex items-center space-x-1.5">
+
+          <span className="text-slate-800 hidden md:inline">|</span>
+
+          {/* EasyPost Key Badge */}
+          <div className="flex items-center space-x-1.5 text-[11px]">
             <Truck className="w-3.5 h-3.5 text-indigo-400" />
             <span>
-              EasyPost API: <strong className="text-indigo-300 font-medium">Ready ({easyPostMode.toUpperCase()})</strong>
+              EasyPost: <strong className={appEnv === 'prod' ? 'text-emerald-300 font-medium' : 'text-indigo-300 font-medium'}>
+                {appEnv === 'prod' ? 'PRODUCTION KEY' : 'TEST KEY'}
+              </strong>
             </span>
           </div>
         </div>
@@ -114,7 +159,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             <LogOut className="w-3.5 h-3.5" />
             <span>Logout</span>
           </button>
-
         </div>
       </div>
 

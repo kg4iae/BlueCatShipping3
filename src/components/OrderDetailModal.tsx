@@ -226,6 +226,19 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
                   Re-Shipment
                 </span>
               )}
+
+              <span
+                className={`border px-2.5 py-0.5 rounded-full text-xs font-bold flex items-center space-x-1 ${
+                  order.marketplacenotified === 'Yes'
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                    : order.marketplacenotified === 'Pending'
+                    ? 'bg-amber-50 text-amber-800 border-amber-300'
+                    : 'bg-slate-100 text-slate-700 border-slate-300'
+                }`}
+                title={`Marketplace Notified: ${order.marketplacenotified || 'No'}`}
+              >
+                <span>Marketplace Notified: {order.marketplacenotified || 'No'}</span>
+              </span>
             </div>
 
             <p className="text-xs text-slate-500 mt-1 flex items-center space-x-2">

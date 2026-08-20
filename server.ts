@@ -353,6 +353,128 @@ function hashPassword(password: string): string {
   return crypto.createHash('sha256').update((password || '') + '_salt_bluecat_2026').digest('hex');
 }
 
+// Helper: Get active environment ('dev' | 'prod')
+function getActiveAppEnv(settings: AppSetting = db.settings): 'dev' | 'prod' {
+  if (settings && settings.appEnv) return settings.appEnv;
+  return settings && settings.easyPostMode === 'production' ? 'prod' : 'dev';
+}
+
+// Helper: Get active MSSQL table for shipping orders ('[dbo].[Shipping]' in Prod vs '[dbo].[shippingdev]' in Dev)
+function getShippingTableName(settings: AppSetting = db.settings): string {
+  const isProd = getActiveAppEnv(settings) === 'prod';
+  return isProd ? '[dbo].[Shipping]' : '[dbo].[shippingdev]';
+}
+
+// Helper: Get active EasyPost API Key based on Dev/Prod mode
+function getActiveEasyPostKey(settings: AppSetting = db.settings): string {
+  const isProd = getActiveAppEnv(settings) === 'prod';
+  if (isProd) {
+    const prodKey = (settings?.easyPostProdApiKey || process.env.EASYPOST_PROD_API_KEY || '').trim();
+    if (prodKey) return prodKey;
+    return (settings?.easyPostApiKey || process.env.EASYPOST_API_KEY || '').trim();
+  } else {
+    const testKey = (settings?.easyPostTestApiKey || settings?.easyPostApiKey || process.env.EASYPOST_TEST_API_KEY || process.env.EASYPOST_API_KEY || '').trim();
+    return testKey;
+  }
+}
+
+// Helper: Clone [dbo].[Shipping] into [dbo].[shippingdev]
+async function cloneShippingToDevTable(pool: sql.ConnectionPool): Promise<{ success: boolean; message: string; rowCount?: number }> {
+  try {
+    // 1. Ensure structure of shippingdev exists
+    await pool.request().query(`
+      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'shippingdev')
+      BEGIN
+          CREATE TABLE [dbo].[shippingdev](
+              [Id] [int] IDENTITY(1,1) NOT NULL,
+              [name] [nvarchar](max) NULL,
+              [address1] [nvarchar](max) NULL,
+              [address2] [nvarchar](max) NULL,
+              [city] [nvarchar](max) NULL,
+              [state] [nvarchar](max) NULL,
+              [postalCode] [nvarchar](max) NULL,
+              [country] [nvarchar](max) NULL,
+              [phone] [nvarchar](max) NULL,
+              [email] [nvarchar](max) NULL,
+              [createdAt] [datetime2](7) NULL,
+              [OrderDetails] [nvarchar](max) NULL,
+              [receiptID] [nvarchar](max) NULL,
+              [Carrier] [nvarchar](max) NULL,
+              [Service] [nvarchar](max) NULL,
+              [trackingNumber] [nvarchar](max) NULL,
+              [status] [nvarchar](max) NULL,
+              [shippingCost] [decimal](18, 2) NULL,
+              [shippingDate] [datetime2](7) NULL,
+              [platform] [nvarchar](max) NULL,
+              [TotalWeight] [float] NOT NULL DEFAULT 16,
+              [box] [varchar](50) NULL,
+              [easypostShipmentId] [nvarchar](64) NULL,
+              [LabelData] [varbinary](max) NULL,
+              [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No',
+              CONSTRAINT [PK_shippingdev_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
+          );
+      END;
+    `);
+
+    // Ensure all columns exist in [dbo].[shippingdev]
+    await pool.request().query(`
+      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'marketplacenotified')
+      BEGIN
+          ALTER TABLE [dbo].[shippingdev] ADD [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No';
+      END;
+      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'Carrier')
+      BEGIN
+          ALTER TABLE [dbo].[shippingdev] ADD [Carrier] [nvarchar](max) NULL;
+      END;
+      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'Service')
+      BEGIN
+          ALTER TABLE [dbo].[shippingdev] ADD [Service] [nvarchar](max) NULL;
+      END;
+      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'LabelData')
+      BEGIN
+          ALTER TABLE [dbo].[shippingdev] ADD [LabelData] [varbinary](max) NULL;
+      END;
+    `);
+
+    // 2. Clone data from [dbo].[Shipping] into [dbo].[shippingdev]
+    await pool.request().query(`
+      DELETE FROM [dbo].[shippingdev];
+      IF EXISTS (SELECT * FROM sys.tables WHERE name = 'Shipping')
+      BEGIN
+          SET IDENTITY_INSERT [dbo].[shippingdev] ON;
+          INSERT INTO [dbo].[shippingdev] (
+              [Id], [name], [address1], [address2], [city], [state], [postalCode], [country],
+              [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
+              [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
+              [TotalWeight], [box], [easypostShipmentId], [marketplacenotified], [LabelData]
+          )
+          SELECT
+              [Id], [name], [address1], [address2], [city], [state], [postalCode], [country],
+              [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
+              [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
+              [TotalWeight], [box], [easypostShipmentId], [marketplacenotified], [LabelData]
+          FROM [dbo].[Shipping];
+          SET IDENTITY_INSERT [dbo].[shippingdev] OFF;
+      END;
+    `);
+
+    const countRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[shippingdev]');
+    const rowCount = countRes.recordset[0]?.cnt || 0;
+    console.log(`[MSSQL] Cloned [dbo].[Shipping] -> [dbo].[shippingdev] (${rowCount} rows).`);
+    return {
+      success: true,
+      message: `Successfully cloned ${rowCount} records from [dbo].[Shipping] into [dbo].[shippingdev].`,
+      rowCount,
+    };
+  } catch (err: any) {
+    console.error('[MSSQL] Error in cloneShippingToDevTable:', err);
+    return {
+      success: false,
+      message: `Failed to clone table: ${err?.message || String(err)}`,
+    };
+  }
+}
+
 // Ensure Database Tables Exist in MS SQL Server
 async function ensureMssqlTables(pool: sql.ConnectionPool) {
   try {
@@ -382,7 +504,7 @@ async function ensureMssqlTables(pool: sql.ConnectionPool) {
       }
     }
 
-    // 2. Exact user Shipping orders table
+    // 2. Exact user Shipping orders table (Production: [dbo].[Shipping])
     await pool.request().query(`
       IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Shipping')
       BEGIN
@@ -411,79 +533,84 @@ async function ensureMssqlTables(pool: sql.ConnectionPool) {
               [box] [varchar](50) NULL,
               [easypostShipmentId] [nvarchar](64) NULL,
               [LabelData] [varbinary](max) NULL,
+              [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No',
               CONSTRAINT [PK_Shipping_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
           );
       END;
     `);
 
-    // Add Carrier column if not exists
+    // Add required columns to [dbo].[Shipping] if they do not exist
     await pool.request().query(`
+      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'marketplacenotified')
+      BEGIN
+          ALTER TABLE [dbo].[Shipping] ADD [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No';
+      END;
       IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'Carrier')
       BEGIN
           ALTER TABLE [dbo].[Shipping] ADD [Carrier] [nvarchar](max) NULL;
       END;
-    `);
-
-    // Add Service column if not exists
-    await pool.request().query(`
       IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'Service')
       BEGIN
           ALTER TABLE [dbo].[Shipping] ADD [Service] [nvarchar](max) NULL;
       END;
-    `);
-
-    // Add LabelData column if not exists
-    await pool.request().query(`
       IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'LabelData')
       BEGIN
           ALTER TABLE [dbo].[Shipping] ADD [LabelData] [varbinary](max) NULL;
       END;
     `);
 
-    // If legacy shippingMethod column exists, migrate values using dynamic SQL so it parses cleanly, drop dependent constraints, then drop shippingMethod
+    // 2b. Development Shipping Table (Dev: [dbo].[shippingdev]) - Ensure schema exists without automatic cloning
     await pool.request().query(`
-      IF EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'shippingMethod')
+      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'shippingdev')
       BEGIN
-          EXEC(N'
-            UPDATE [dbo].[Shipping]
-            SET
-              [Carrier] = CASE
-                WHEN [Carrier] IS NOT NULL AND RTRIM(LTRIM([Carrier])) <> '''' THEN [Carrier]
-                WHEN UPPER([shippingMethod]) LIKE ''USPS%'' THEN ''USPS''
-                WHEN UPPER([shippingMethod]) LIKE ''UPS%'' THEN ''UPS''
-                WHEN UPPER([shippingMethod]) LIKE ''FEDEX%'' THEN ''FedEx''
-                WHEN UPPER([shippingMethod]) LIKE ''DHL%'' THEN ''DHL''
-                ELSE ''USPS''
-              END,
-              [Service] = CASE
-                WHEN [Service] IS NOT NULL AND RTRIM(LTRIM([Service])) <> '''' THEN [Service]
-                WHEN UPPER([shippingMethod]) LIKE ''USPS %'' THEN LTRIM(SUBSTRING([shippingMethod], 6, 255))
-                WHEN UPPER([shippingMethod]) LIKE ''UPS %'' THEN LTRIM(SUBSTRING([shippingMethod], 5, 255))
-                WHEN UPPER([shippingMethod]) LIKE ''FEDEX %'' THEN LTRIM(SUBSTRING([shippingMethod], 7, 255))
-                WHEN UPPER([shippingMethod]) LIKE ''DHL %'' THEN LTRIM(SUBSTRING([shippingMethod], 5, 255))
-                WHEN [shippingMethod] IS NOT NULL AND RTRIM(LTRIM([shippingMethod])) <> '''' THEN [shippingMethod]
-                ELSE ''Priority''
-              END
-            WHERE [shippingMethod] IS NOT NULL;
-          ');
-
-          -- Drop any default constraints or check constraints attached to shippingMethod
-          DECLARE @dropConstraintsSql nvarchar(max) = N'';
-          SELECT @dropConstraintsSql += N'ALTER TABLE [dbo].[Shipping] DROP CONSTRAINT [' + dc.name + N']; '
-          FROM sys.default_constraints dc
-          JOIN sys.columns c ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
-          WHERE dc.parent_object_id = OBJECT_ID(N'[dbo].[Shipping]') AND c.name = 'shippingMethod';
-
-          IF LEN(@dropConstraintsSql) > 0
-          BEGIN
-              EXEC sp_executesql @dropConstraintsSql;
-          END;
-
-          EXEC(N'ALTER TABLE [dbo].[Shipping] DROP COLUMN [shippingMethod];');
+          CREATE TABLE [dbo].[shippingdev](
+              [Id] [int] IDENTITY(1,1) NOT NULL,
+              [name] [nvarchar](max) NULL,
+              [address1] [nvarchar](max) NULL,
+              [address2] [nvarchar](max) NULL,
+              [city] [nvarchar](max) NULL,
+              [state] [nvarchar](max) NULL,
+              [postalCode] [nvarchar](max) NULL,
+              [country] [nvarchar](max) NULL,
+              [phone] [nvarchar](max) NULL,
+              [email] [nvarchar](max) NULL,
+              [createdAt] [datetime2](7) NULL,
+              [OrderDetails] [nvarchar](max) NULL,
+              [receiptID] [nvarchar](max) NULL,
+              [Carrier] [nvarchar](max) NULL,
+              [Service] [nvarchar](max) NULL,
+              [trackingNumber] [nvarchar](max) NULL,
+              [status] [nvarchar](max) NULL,
+              [shippingCost] [decimal](18, 2) NULL,
+              [shippingDate] [datetime2](7) NULL,
+              [platform] [nvarchar](max) NULL,
+              [TotalWeight] [float] NOT NULL DEFAULT 16,
+              [box] [varchar](50) NULL,
+              [easypostShipmentId] [nvarchar](64) NULL,
+              [LabelData] [varbinary](max) NULL,
+              [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No',
+              CONSTRAINT [PK_shippingdev_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
+          );
+      END;
+      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'marketplacenotified')
+      BEGIN
+          ALTER TABLE [dbo].[shippingdev] ADD [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No';
+      END;
+      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'Carrier')
+      BEGIN
+          ALTER TABLE [dbo].[shippingdev] ADD [Carrier] [nvarchar](max) NULL;
+      END;
+      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'Service')
+      BEGIN
+          ALTER TABLE [dbo].[shippingdev] ADD [Service] [nvarchar](max) NULL;
+      END;
+      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'LabelData')
+      BEGIN
+          ALTER TABLE [dbo].[shippingdev] ADD [LabelData] [varbinary](max) NULL;
       END;
     `);
 
-    // 3. Configuration / Settings Table
+    // 3. Configuration / Settings Table (Shared across environments)
     await pool.request().query(`
       IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Configuration')
       BEGIN
@@ -494,11 +621,12 @@ async function ensureMssqlTables(pool: sql.ConnectionPool) {
       END;
     `);
 
-    // Check count in Shipping table; if empty and we have seed orders, populate MS SQL
-    const countRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Shipping]');
+    // Check count in active table; if empty and we have seed orders, populate MS SQL
+    const activeTable = getShippingTableName();
+    const countRes = await pool.request().query(`SELECT COUNT(*) as cnt FROM ${activeTable}`);
     const orderCount = countRes.recordset[0]?.cnt || 0;
     if (orderCount === 0 && db.orders.length > 0) {
-      console.log('[MSSQL] Table [dbo].[Shipping] empty. Seeding initial orders into MS SQL database...');
+      console.log(`[MSSQL] Table ${activeTable} empty. Seeding initial orders into MS SQL database...`);
       for (const order of db.orders) {
         await saveOrderToMssqlPool(pool, order);
       }
@@ -512,7 +640,7 @@ async function ensureMssqlTables(pool: sql.ConnectionPool) {
       await saveSettingsToMssqlPool(pool, db.settings);
     }
 
-    // 4. Users Credentials Security Table
+    // 4. Users Credentials Security Table (Shared across environments)
     await pool.request().query(`
       IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Users')
       BEGIN
@@ -640,7 +768,7 @@ async function fetchSettingsFromMssql(): Promise<Partial<AppSetting> | null> {
 
       if (val === 'true') val = true;
       else if (val === 'false') val = false;
-      else if (!isNaN(Number(val)) && val !== '' && key !== 'easyPostApiKey' && key !== 'appPassword') val = Number(val);
+      else if (!isNaN(Number(val)) && val !== '' && key !== 'easyPostApiKey' && key !== 'easyPostTestApiKey' && key !== 'easyPostProdApiKey' && key !== 'appPassword' && key !== 'appEnv' && key !== 'easyPostMode') val = Number(val);
       else if (val && (val.startsWith('{') || val.startsWith('['))) {
         try {
           val = JSON.parse(val);
@@ -739,9 +867,10 @@ async function fetchPackagesFromMssql(): Promise<PackageType[] | null> {
   }
 }
 
-// Save or Update a single order in MS SQL Server [dbo].[Shipping]
+// Save or Update a single order in MS SQL Server ([dbo].[Shipping] or [dbo].[shippingdev])
 async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrder) {
   try {
+    const tableName = getShippingTableName();
     const req = pool.request();
     if (typeof (req as any).setTimeout === 'function') {
       (req as any).setTimeout(20000);
@@ -796,13 +925,14 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
     req.input('TotalWeight', sql.Float, order.weightOz || 16);
     req.input('box', sql.VarChar(50), order.boxId || 'pkg_medium');
     req.input('easypostShipmentId', sql.NVarChar(64), order.easypostShipmentId || null);
+    req.input('marketplacenotified', sql.NVarChar(50), order.marketplacenotified || 'No');
     req.input('hasLabel', sql.Bit, hasLabel);
     req.input('LabelData', sql.VarBinary(sql.MAX), labelBuffer);
 
     await req.query(`
-      IF (@id > 0 AND EXISTS (SELECT 1 FROM [dbo].[Shipping] WHERE [Id] = @id))
+      IF (@id > 0 AND EXISTS (SELECT 1 FROM ${tableName} WHERE [Id] = @id))
       BEGIN
-          UPDATE [dbo].[Shipping] SET
+          UPDATE ${tableName} SET
               [name] = @name,
               [address1] = @address1,
               [address2] = @address2,
@@ -824,12 +954,13 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
               [TotalWeight] = @TotalWeight,
               [box] = @box,
               [easypostShipmentId] = @easypostShipmentId,
+              [marketplacenotified] = @marketplacenotified,
               [LabelData] = CASE WHEN @hasLabel = 1 THEN @LabelData ELSE [LabelData] END
           WHERE [Id] = @id;
       END
-      ELSE IF (@receiptID IS NOT NULL AND EXISTS (SELECT 1 FROM [dbo].[Shipping] WHERE [receiptID] = @receiptID))
+      ELSE IF (@receiptID IS NOT NULL AND EXISTS (SELECT 1 FROM ${tableName} WHERE [receiptID] = @receiptID))
       BEGIN
-          UPDATE [dbo].[Shipping] SET
+          UPDATE ${tableName} SET
               [name] = @name,
               [address1] = @address1,
               [address2] = @address2,
@@ -850,21 +981,22 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
               [TotalWeight] = @TotalWeight,
               [box] = @box,
               [easypostShipmentId] = @easypostShipmentId,
+              [marketplacenotified] = @marketplacenotified,
               [LabelData] = CASE WHEN @hasLabel = 1 THEN @LabelData ELSE [LabelData] END
           WHERE [receiptID] = @receiptID;
       END
       ELSE
       BEGIN
-          INSERT INTO [dbo].[Shipping] (
+          INSERT INTO ${tableName} (
               [name], [address1], [address2], [city], [state], [postalCode], [country],
               [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
               [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
-              [TotalWeight], [box], [easypostShipmentId], [LabelData]
+              [TotalWeight], [box], [easypostShipmentId], [marketplacenotified], [LabelData]
           ) VALUES (
               @name, @address1, @address2, @city, @state, @postalCode, @country,
               @phone, @email, @createdAt, @OrderDetails, @receiptID, @Carrier, @Service,
               @trackingNumber, @status, @shippingCost, @shippingDate, @platform,
-              @TotalWeight, @box, @easypostShipmentId, @LabelData
+              @TotalWeight, @box, @easypostShipmentId, @marketplacenotified, @LabelData
           );
       END
     `);
@@ -997,21 +1129,38 @@ function parseOrderDetailsString(rawDetails: string | null | undefined): { items
   return { items, parseError };
 }
 
-// Fetch Orders directly from MS SQL Server [dbo].[Shipping] table
+// Fetch Orders directly from MS SQL Server ([dbo].[Shipping] or [dbo].[shippingdev])
 async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
   const pool = await getMssqlPool();
   if (!pool) return null;
 
   try {
     await ensureMssqlTables(pool);
+    const tableName = getShippingTableName();
     const result = await pool.request().query(`
       SELECT *
-      FROM [dbo].[Shipping]
+      FROM ${tableName}
       ORDER BY [Id] DESC
     `);
 
     const orders: ShippingOrder[] = result.recordset.map((row: any) => {
       const validationErrors: string[] = [];
+
+      const rawCountry = (row.country ? String(row.country) : 'US').trim().toUpperCase();
+      const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
+
+      const street1 = row.address1 ? String(row.address1) : '';
+      const street2 = row.address2 ? String(row.address2) : '';
+      const city = row.city ? String(row.city) : '';
+      const state = row.state ? String(row.state) : '';
+      const zip = row.postalCode ? String(row.postalCode) : '';
+      const country = row.country ? String(row.country) : 'US';
+
+      // Validate address syntax
+      const addrVal = validateAddressWithEasyPost({ street1, street2, city, state, zip, country });
+      if (!addrVal.isValid) {
+        validationErrors.push(...addrVal.errors);
+      }
 
       // Check Total Weight
       const rawWeight = row.TotalWeight !== null && row.TotalWeight !== undefined ? Number(row.TotalWeight) : 16;
@@ -1033,12 +1182,11 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
         statusVal = 'shipped';
       }
 
-      if (validationErrors.length > 0 && statusVal !== 'shipped') {
+      if (validationErrors.length > 0 && statusVal !== 'shipped' && statusVal !== 'cancelled') {
         statusVal = 'address_error';
+      } else if (validationErrors.length === 0 && (statusVal === 'pending_validation' || statusVal === 'address_error')) {
+        statusVal = 'ready_to_ship';
       }
-
-      const rawCountry = (row.country ? String(row.country) : 'US').trim().toUpperCase();
-      const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
 
       const defaultCarrierSetting = !isIntl
         ? (db.settings.defaultDomesticCarrier || 'USPS')
@@ -1105,18 +1253,26 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
         shippingCost: row.shippingCost !== null && row.shippingCost !== undefined ? Number(row.shippingCost) : undefined,
         shippingDate: row.shippingDate ? new Date(row.shippingDate).toISOString() : undefined,
         easypostShipmentId: row.easypostShipmentId ? String(row.easypostShipmentId) : undefined,
+        marketplacenotified: row.marketplacenotified ? String(row.marketplacenotified) : 'No',
         labelUrl: `/api/orders/${String(row.Id)}/label.pdf`,
         labelBinary: row.LabelData ? Buffer.from(row.LabelData) : undefined,
         hasLabelData: Boolean(row.LabelData && (Buffer.isBuffer(row.LabelData) ? row.LabelData.length > 0 : true)),
         LabelData: row.LabelData ? true : null,
+        sourceTable: tableName,
+        env: getActiveAppEnv(),
         items,
       };
     });
 
     db.orders = orders;
+    if (getActiveAppEnv() === 'dev') {
+      db.devOrders = orders;
+    } else {
+      db.prodOrders = orders;
+    }
     return orders;
   } catch (err: any) {
-    console.error('[MSSQL] Error fetching orders from MS SQL [dbo].[Shipping]:', err);
+    console.error('[MSSQL] Error fetching orders from MS SQL:', err);
     return null;
   }
 }
@@ -1125,6 +1281,8 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
 interface DatabaseSchema {
   packages: PackageType[];
   orders: ShippingOrder[];
+  devOrders: ShippingOrder[];
+  prodOrders: ShippingOrder[];
   settings: AppSetting;
   scanForms: ScanFormType[];
   users: User[];
@@ -1211,7 +1369,10 @@ const initialSettings: AppSetting = {
   packingSlipContent:
     'Thank you for your order! All items have been quality-inspected before shipment. For returns, missing items, or warranty questions within 30 days, please contact support@acmesupply.com or call (800) 555-0199 quoting your Order Number. Please retain this packing slip for your records.',
   easyPostApiKey: process.env.EASYPOST_API_KEY || 'EZTK_TEST_99824_KEY',
+  easyPostTestApiKey: process.env.EASYPOST_TEST_API_KEY || process.env.EASYPOST_API_KEY || 'EZTK_TEST_99824_KEY',
+  easyPostProdApiKey: process.env.EASYPOST_PROD_API_KEY || '',
   easyPostMode: (process.env.EASYPOST_MODE as 'test' | 'production') || 'test',
+  appEnv: (process.env.APP_ENV as 'dev' | 'prod') || (process.env.EASYPOST_MODE === 'production' ? 'prod' : 'dev'),
   mssqlServer: process.env.MSSQL_SERVER || 'sql-east.internal.company.net',
   mssqlPort: process.env.MSSQL_PORT ? parseInt(process.env.MSSQL_PORT, 10) : 1433,
   mssqlDatabase: process.env.MSSQL_DATABASE || 'ShippingProductionDB',
@@ -1243,6 +1404,459 @@ const initialSettings: AppSetting = {
 // Seed realistic order dataset spanning active queue and historical months
 const savedDiskSettings = loadSettingsFromFile();
 
+// Seed realistic development (dev) order dataset ([dbo].[shippingdev])
+const initialDevOrders: ShippingOrder[] = [
+  {
+    id: 'dev_101',
+    orderNumber: 'DEV-8821',
+    recipientName: '[Sandbox] Sarah Jenkins',
+    marketplace: 'Etsy',
+    street1: '742 Evergreen Terrace',
+    city: 'Springfield',
+    state: 'OR',
+    zip: '97477',
+    country: 'US',
+    phone: '541-555-0182',
+    email: 'sjenkins@apexdesign.com',
+    orderDate: '2026-08-06T14:22:00Z',
+    status: 'pending_validation',
+    boxId: 'pkg_medium',
+    boxName: 'Medium Flat Rate Box',
+    items: [
+      { sku: 'HDW-401', name: 'Titanium Precision Caliper', quantity: 1, price: 68.50, weightOz: 12 },
+      { sku: 'TOOL-102', name: 'Micro-Screwdriver Set', quantity: 2, price: 18.25, weightOz: 6 },
+    ],
+    weightOz: 28,
+    declaredValue: 105.00,
+    addressValidated: false,
+    marketplacenotified: 'No',
+    sourceTable: '[dbo].[shippingdev]',
+    env: 'dev',
+  },
+  {
+    id: 'dev_102',
+    orderNumber: 'DEV-8822',
+    recipientName: '[Sandbox] Marcus Vance',
+    marketplace: 'Shopify',
+    street1: '1200 Market Street',
+    street2: 'Apt 4B',
+    city: 'San Francisco',
+    state: 'CA',
+    zip: '94102',
+    country: 'US',
+    phone: '415-555-0199',
+    email: 'mvance@sfbay.net',
+    orderDate: '2026-08-06T15:10:00Z',
+    status: 'ready_to_ship',
+    boxId: 'pkg_padded_env',
+    boxName: 'Padded Flat Rate Envelope',
+    items: [
+      { sku: 'CLO-201', name: 'Thermal Softshell Jacket (L)', quantity: 1, price: 129.00, weightOz: 18 },
+    ],
+    weightOz: 19.5,
+    declaredValue: 129.00,
+    addressValidated: true,
+    addressNotes: 'Address verified via EasyPost CASC (USPS DPV match)',
+    marketplacenotified: 'No',
+    sourceTable: '[dbo].[shippingdev]',
+    env: 'dev',
+  },
+  {
+    id: 'dev_103',
+    orderNumber: 'DEV-8823',
+    recipientName: '[Sandbox] David Miller',
+    marketplace: 'Amazon',
+    street1: '555 Industrial Pkwy',
+    city: 'Detroit',
+    state: 'MI',
+    zip: '00000',
+    country: 'US',
+    phone: '313-555-0120',
+    email: 'dmiller@millerparts.com',
+    orderDate: '2026-08-07T09:00:00Z',
+    status: 'address_error',
+    boxId: 'pkg_custom_lg',
+    boxName: 'Custom Heavy Freight Box',
+    items: [
+      { sku: 'AUT-880', name: 'Heavy Duty Alternator 12V', quantity: 1, price: 210.00, weightOz: 160 },
+    ],
+    weightOz: 174,
+    declaredValue: 210.00,
+    addressValidated: false,
+    validationErrors: [
+      'ZIP Code "00000" is invalid for Detroit, MI.',
+      'EasyPost Error: Undeliverable address record. Correct postal code to 48209 or 48210.',
+    ],
+    marketplacenotified: 'No',
+    sourceTable: '[dbo].[shippingdev]',
+    env: 'dev',
+  },
+  {
+    id: 'dev_104',
+    orderNumber: 'DEV-8824',
+    recipientName: '[Sandbox] Elena Rostova',
+    marketplace: 'eBay',
+    street1: '100 Technology Square',
+    street2: 'Fl 8',
+    city: 'Cambridge',
+    state: 'MA',
+    zip: '02139',
+    country: 'US',
+    phone: '617-555-0155',
+    email: 'elena@quantumdyn.io',
+    orderDate: '2026-08-07T10:30:00Z',
+    status: 'ready_to_ship',
+    boxId: 'pkg_small',
+    boxName: 'Small Flat Rate Box',
+    items: [
+      { sku: 'ELEC-901', name: 'Microcontroller Sensor Pack', quantity: 3, price: 45.00, weightOz: 8 },
+    ],
+    weightOz: 10,
+    declaredValue: 135.00,
+    addressValidated: true,
+    addressNotes: 'Address validated with ZIP+4: 02139-3502',
+    marketplacenotified: 'No',
+    sourceTable: '[dbo].[shippingdev]',
+    env: 'dev',
+  },
+  {
+    id: 'dev_105',
+    orderNumber: 'DEV-8825',
+    recipientName: '[Sandbox] Robert Sterling',
+    marketplace: 'Etsy',
+    street1: '450 Peachtree St NE',
+    city: 'Atlanta',
+    state: 'GA',
+    zip: '30308',
+    country: 'US',
+    phone: '404-555-0111',
+    email: 'rsterling@atltech.org',
+    orderDate: '2026-08-07T11:15:00Z',
+    status: 'pending_validation',
+    boxId: 'pkg_custom_sm',
+    boxName: 'Custom Small Corrugated Box',
+    items: [
+      { sku: 'MED-101', name: 'Ergonomic Wrist Support Guard', quantity: 2, price: 24.99, weightOz: 12 },
+    ],
+    weightOz: 14.5,
+    declaredValue: 49.98,
+    addressValidated: false,
+    marketplacenotified: 'No',
+    sourceTable: '[dbo].[shippingdev]',
+    env: 'dev',
+  },
+  {
+    id: 'dev_106',
+    orderNumber: 'DEV-8826',
+    recipientName: '[Sandbox] Claire Tremblay',
+    marketplace: 'Etsy',
+    street1: '1234 Rue Sainte-Catherine',
+    city: 'Montreal',
+    state: 'QC',
+    zip: 'H3B 1A1',
+    country: 'CA',
+    phone: '514-555-0199',
+    email: 'ctremblay@mtlbobbin.ca',
+    orderDate: '2026-08-07T13:00:00Z',
+    status: 'ready_to_ship',
+    boxId: 'pkg_medium',
+    boxName: 'Medium Flat Rate Box',
+    items: [
+      { sku: 'BOB-800', name: 'Precision Wooden Bobbins (100pk)', quantity: 2, price: 89.00, weightOz: 36 },
+    ],
+    weightOz: 40,
+    declaredValue: 178.00,
+    addressValidated: true,
+    addressNotes: 'International Canada Destination - USPS Priority Mail International Selected',
+    marketplacenotified: 'No',
+    sourceTable: '[dbo].[shippingdev]',
+    env: 'dev',
+  },
+  {
+    id: 'dev_107',
+    orderNumber: 'DEV-8827',
+    recipientName: '[Sandbox] Oliver Smith',
+    marketplace: 'Shopify',
+    street1: '45 Baker Street',
+    city: 'London',
+    state: 'ENG',
+    zip: 'W1U 8ED',
+    country: 'GB',
+    phone: '+44 20 7946 0912',
+    email: 'osmith@thamestextile.co.uk',
+    orderDate: '2026-08-07T14:15:00Z',
+    status: 'ready_to_ship',
+    boxId: 'pkg_small',
+    boxName: 'Small Flat Rate Box',
+    items: [
+      { sku: 'BOB-901', name: 'Industrial Bobbin Winder Accessories', quantity: 1, price: 145.00, weightOz: 18 },
+    ],
+    weightOz: 20,
+    declaredValue: 145.00,
+    addressValidated: true,
+    addressNotes: 'International UK Destination - USPS Priority Mail International Selected',
+    marketplacenotified: 'No',
+    sourceTable: '[dbo].[shippingdev]',
+    env: 'dev',
+  },
+  {
+    id: 'dev_1001',
+    orderNumber: 'DEV-8790',
+    recipientName: '[Sandbox] Jonathan Hayes',
+    marketplace: 'WooCommerce',
+    street1: '880 17th Street',
+    city: 'Denver',
+    state: 'CO',
+    zip: '80202',
+    country: 'US',
+    phone: '303-555-0812',
+    email: 'jhayes@hayesdental.com',
+    orderDate: '2026-07-15T10:00:00Z',
+    status: 'shipped',
+    boxId: 'pkg_medium',
+    boxName: 'Medium Flat Rate Box',
+    items: [
+      { sku: 'DEN-110', name: 'Impression Trays Pack', quantity: 5, price: 32.00, weightOz: 24 },
+    ],
+    weightOz: 28,
+    declaredValue: 160.00,
+    addressValidated: true,
+    trackingNumber: 'EZ1000000001',
+    carrier: 'USPS',
+    serviceLevel: 'PriorityMail',
+    shippingCost: 14.35,
+    shippingDate: '2026-07-15T14:30:00Z',
+    labelUrl: 'https://easypost-files.s3.amazonaws.com/labels/usps_priority_sample1.pdf',
+    hasLabelData: true,
+    LabelData: true,
+    marketplacenotified: 'Yes',
+    sourceTable: '[dbo].[shippingdev]',
+    env: 'dev',
+  },
+];
+
+// Seed realistic production (prod) order dataset ([dbo].[Shipping])
+const initialProdOrders: ShippingOrder[] = [
+  {
+    id: 'prod_201',
+    orderNumber: 'ORD-9001',
+    recipientName: 'Eleanor Roosevelt Design Studio',
+    company: 'Roosevelt Textile Atelier',
+    marketplace: 'Shopify',
+    street1: '350 Fifth Avenue',
+    street2: 'Suite 4400',
+    city: 'New York',
+    state: 'NY',
+    zip: '10118',
+    country: 'US',
+    phone: '212-555-0144',
+    email: 'orders@rooseveltdesign.com',
+    orderDate: '2026-08-18T10:00:00Z',
+    status: 'ready_to_ship',
+    boxId: 'pkg_large',
+    boxName: 'Large Flat Rate Box',
+    items: [
+      { sku: 'PROD-300', name: 'Industrial Silk Spindles (50pk)', quantity: 2, price: 198.00, weightOz: 32 },
+      { sku: 'PROD-305', name: 'Tension Springs Commercial Grade', quantity: 4, price: 24.50, weightOz: 8 },
+    ],
+    weightOz: 46,
+    declaredValue: 494.00,
+    addressValidated: true,
+    addressNotes: 'Address verified via EasyPost (Commercial Highrise DPV)',
+    marketplacenotified: 'No',
+    carrier: 'USPS',
+    serviceLevel: 'Priority',
+    sourceTable: '[dbo].[Shipping]',
+    env: 'prod',
+  },
+  {
+    id: 'prod_202',
+    orderNumber: 'ORD-9002',
+    recipientName: 'Benjamin Hayes Manufacturing',
+    company: 'Apex Industrial Parts LLC',
+    marketplace: 'Amazon',
+    street1: '1600 Amphitheatre Pkwy',
+    city: 'Mountain View',
+    state: 'CA',
+    zip: '94043',
+    country: 'US',
+    phone: '650-555-0199',
+    email: 'purchasing@apexindparts.com',
+    orderDate: '2026-08-18T11:30:00Z',
+    status: 'ready_to_ship',
+    boxId: 'pkg_custom_lg',
+    boxName: 'Custom Heavy Freight Box',
+    items: [
+      { sku: 'PROD-401', name: 'Heavy Duty Bobbin Winder V2', quantity: 1, price: 289.00, weightOz: 64 },
+    ],
+    weightOz: 78,
+    declaredValue: 289.00,
+    addressValidated: true,
+    addressNotes: 'Verified via EasyPost CASC',
+    marketplacenotified: 'No',
+    carrier: 'UPS',
+    serviceLevel: 'Ground',
+    sourceTable: '[dbo].[Shipping]',
+    env: 'prod',
+  },
+  {
+    id: 'prod_203',
+    orderNumber: 'ORD-9003',
+    recipientName: 'Sophia Martinez',
+    company: 'Martinez Custom Quilting',
+    marketplace: 'Etsy',
+    street1: '701 Brickell Avenue',
+    city: 'Miami',
+    state: 'FL',
+    zip: '33131',
+    country: 'US',
+    phone: '305-555-0177',
+    email: 'smartinez@martinezquilts.com',
+    orderDate: '2026-08-18T14:15:00Z',
+    status: 'ready_to_ship',
+    boxId: 'pkg_padded_env',
+    boxName: 'Padded Flat Rate Envelope',
+    items: [
+      { sku: 'PROD-105', name: 'Premium Mercerized Cotton Thread Set (12 Colors)', quantity: 3, price: 42.50, weightOz: 18 },
+    ],
+    weightOz: 19.5,
+    declaredValue: 127.50,
+    addressValidated: true,
+    marketplacenotified: 'No',
+    carrier: 'USPS',
+    serviceLevel: 'Priority',
+    sourceTable: '[dbo].[Shipping]',
+    env: 'prod',
+  },
+  {
+    id: 'prod_204',
+    orderNumber: 'ORD-9004',
+    recipientName: 'Alexander Wright',
+    company: 'Wright Precision Instruments',
+    marketplace: 'WooCommerce',
+    street1: '200 E Randolph St',
+    street2: 'Suite 2200',
+    city: 'Chicago',
+    state: 'IL',
+    zip: '60601',
+    country: 'US',
+    phone: '312-555-0188',
+    email: 'awright@wrightinstruments.com',
+    orderDate: '2026-08-19T08:45:00Z',
+    status: 'pending_validation',
+    boxId: 'pkg_medium',
+    boxName: 'Medium Flat Rate Box',
+    items: [
+      { sku: 'PROD-220', name: 'Precision Tension Calibrator', quantity: 1, price: 145.00, weightOz: 18 },
+    ],
+    weightOz: 22,
+    declaredValue: 145.00,
+    addressValidated: false,
+    marketplacenotified: 'No',
+    carrier: 'USPS',
+    serviceLevel: 'Priority',
+    sourceTable: '[dbo].[Shipping]',
+    env: 'prod',
+  },
+  {
+    id: 'prod_205',
+    orderNumber: 'ORD-9005',
+    recipientName: 'Victoria Sterling',
+    company: 'Sterling Atelier',
+    marketplace: 'Shopify',
+    street1: '100 Main St',
+    city: 'Seattle',
+    state: 'WA',
+    zip: '98101',
+    country: 'US',
+    phone: '206-555-0133',
+    email: 'vsterling@sterlingatelier.com',
+    orderDate: '2026-08-19T09:10:00Z',
+    status: 'ready_to_ship',
+    boxId: 'pkg_small',
+    boxName: 'Small Flat Rate Box',
+    items: [
+      { sku: 'PROD-510', name: 'Specialty Embroidery Bobbin Kit', quantity: 2, price: 65.00, weightOz: 12 },
+    ],
+    weightOz: 14,
+    declaredValue: 130.00,
+    addressValidated: true,
+    addressNotes: 'Address verified with ZIP+4: 98101-2005',
+    marketplacenotified: 'No',
+    carrier: 'USPS',
+    serviceLevel: 'Priority',
+    sourceTable: '[dbo].[Shipping]',
+    env: 'prod',
+  },
+  {
+    id: 'prod_1001',
+    orderNumber: 'ORD-8790',
+    recipientName: 'Jonathan Hayes',
+    marketplace: 'WooCommerce',
+    street1: '880 17th Street',
+    city: 'Denver',
+    state: 'CO',
+    zip: '80202',
+    country: 'US',
+    phone: '303-555-0812',
+    email: 'jhayes@hayesdental.com',
+    orderDate: '2026-07-15T10:00:00Z',
+    status: 'shipped',
+    boxId: 'pkg_medium',
+    boxName: 'Medium Flat Rate Box',
+    items: [
+      { sku: 'DEN-110', name: 'Impression Trays Pack', quantity: 5, price: 32.00, weightOz: 24 },
+    ],
+    weightOz: 28,
+    declaredValue: 160.00,
+    addressValidated: true,
+    trackingNumber: '9400111202482390199021',
+    carrier: 'USPS',
+    serviceLevel: 'PriorityMail',
+    shippingCost: 14.35,
+    shippingDate: '2026-07-15T14:30:00Z',
+    labelUrl: 'https://easypost-files.s3.amazonaws.com/labels/usps_priority_sample1.pdf',
+    hasLabelData: true,
+    LabelData: true,
+    marketplacenotified: 'Yes',
+    sourceTable: '[dbo].[Shipping]',
+    env: 'prod',
+  },
+  {
+    id: 'prod_1002',
+    orderNumber: 'ORD-8791',
+    recipientName: 'Karen Bishop',
+    street1: '320 Michigan Ave',
+    city: 'Chicago',
+    state: 'IL',
+    zip: '60604',
+    country: 'US',
+    phone: '312-555-0177',
+    email: 'kbishop@gmail.com',
+    orderDate: '2026-07-18T11:20:00Z',
+    status: 'shipped',
+    boxId: 'pkg_padded_env',
+    boxName: 'Padded Flat Rate Envelope',
+    items: [
+      { sku: 'BOK-300', name: 'Hardcover Engineering Manual', quantity: 1, price: 89.00, weightOz: 32 },
+    ],
+    weightOz: 33.5,
+    declaredValue: 89.00,
+    addressValidated: true,
+    trackingNumber: '1Z9999999999999999',
+    carrier: 'UPS',
+    serviceLevel: 'Ground',
+    shippingCost: 9.80,
+    shippingDate: '2026-07-18T16:00:00Z',
+    labelUrl: 'https://easypost-files.s3.amazonaws.com/labels/ups_ground_sample1.pdf',
+    hasLabelData: true,
+    LabelData: true,
+    marketplacenotified: 'Yes',
+    sourceTable: '[dbo].[Shipping]',
+    env: 'prod',
+  },
+];
+
 const db: DatabaseSchema = {
   packages: [...initialPackages],
   settings: { ...initialSettings, ...(savedDiskSettings || {}) },
@@ -1257,290 +1871,11 @@ const db: DatabaseSchema = {
       createdAt: new Date().toISOString(),
     },
   ],
-  orders: [
-    {
-      id: 'ord_101',
-      orderNumber: 'ORD-8821',
-      recipientName: 'Sarah Jenkins',
-      marketplace: 'Etsy',
-      street1: '742 Evergreen Terrace',
-      city: 'Springfield',
-      state: 'OR',
-      zip: '97477',
-      country: 'US',
-      phone: '541-555-0182',
-      email: 'sjenkins@apexdesign.com',
-      orderDate: '2026-08-06T14:22:00Z',
-      status: 'pending_validation',
-      boxId: 'pkg_medium',
-      boxName: 'Medium Flat Rate Box',
-      items: [
-        { sku: 'HDW-401', name: 'Titanium Precision Caliper', quantity: 1, price: 68.50, weightOz: 12 },
-        { sku: 'TOOL-102', name: 'Micro-Screwdriver Set', quantity: 2, price: 18.25, weightOz: 6 },
-      ],
-      weightOz: 28,
-      declaredValue: 105.00,
-      addressValidated: false,
-    },
-    {
-      id: 'ord_102',
-      orderNumber: 'ORD-8822',
-      recipientName: 'Marcus Vance',
-      marketplace: 'Shopify',
-      street1: '1200 Market Street',
-      street2: 'Apt 4B',
-      city: 'San Francisco',
-      state: 'CA',
-      zip: '94102',
-      country: 'US',
-      phone: '415-555-0199',
-      email: 'mvance@sfbay.net',
-      orderDate: '2026-08-06T15:10:00Z',
-      status: 'ready_to_ship',
-      boxId: 'pkg_padded_env',
-      boxName: 'Padded Flat Rate Envelope',
-      items: [
-        { sku: 'CLO-201', name: 'Thermal Softshell Jacket (L)', quantity: 1, price: 129.00, weightOz: 18 },
-      ],
-      weightOz: 19.5,
-      declaredValue: 129.00,
-      addressValidated: true,
-      addressNotes: 'Address verified via EasyPost CASC (USPS DPV match)',
-    },
-    {
-      id: 'ord_103',
-      orderNumber: 'ORD-8823',
-      recipientName: 'David Miller',
-      marketplace: 'Amazon',
-      street1: '555 Industrial Pkwy', // Invalid Zip intentionally
-      city: 'Detroit',
-      state: 'MI',
-      zip: '00000',
-      country: 'US',
-      phone: '313-555-0120',
-      email: 'dmiller@millerparts.com',
-      orderDate: '2026-08-07T09:00:00Z',
-      status: 'address_error',
-      boxId: 'pkg_custom_lg',
-      boxName: 'Custom Heavy Freight Box',
-      items: [
-        { sku: 'AUT-880', name: 'Heavy Duty Alternator 12V', quantity: 1, price: 210.00, weightOz: 160 },
-      ],
-      weightOz: 174,
-      declaredValue: 210.00,
-      addressValidated: false,
-      validationErrors: [
-        'ZIP Code "00000" is invalid for Detroit, MI.',
-        'EasyPost Error: Undeliverable address record. Correct postal code to 48209 or 48210.',
-      ],
-    },
-    {
-      id: 'ord_104',
-      orderNumber: 'ORD-8824',
-      recipientName: 'Elena Rostova',
-      marketplace: 'eBay',
-      street1: '100 Technology Square',
-      street2: 'Fl 8',
-      city: 'Cambridge',
-      state: 'MA',
-      zip: '02139',
-      country: 'US',
-      phone: '617-555-0155',
-      email: 'elena@quantumdyn.io',
-      orderDate: '2026-08-07T10:30:00Z',
-      status: 'ready_to_ship',
-      boxId: 'pkg_small',
-      boxName: 'Small Flat Rate Box',
-      items: [
-        { sku: 'ELEC-901', name: 'Microcontroller Sensor Pack', quantity: 3, price: 45.00, weightOz: 8 },
-      ],
-      weightOz: 10,
-      declaredValue: 135.00,
-      addressValidated: true,
-      addressNotes: 'Address validated with ZIP+4: 02139-3502',
-    },
-    {
-      id: 'ord_105',
-      orderNumber: 'ORD-8825',
-      recipientName: 'Robert Sterling',
-      marketplace: 'Etsy',
-      street1: '450 Peachtree St NE',
-      city: 'Atlanta',
-      state: 'GA',
-      zip: '30308',
-      country: 'US',
-      phone: '404-555-0111',
-      email: 'rsterling@atltech.org',
-      orderDate: '2026-08-07T11:15:00Z',
-      status: 'pending_validation',
-      boxId: 'pkg_custom_sm',
-      boxName: 'Custom Small Corrugated Box',
-      items: [
-        { sku: 'MED-101', name: 'Ergonomic Wrist Support Guard', quantity: 2, price: 24.99, weightOz: 12 },
-      ],
-      weightOz: 14.5,
-      declaredValue: 49.98,
-      addressValidated: false,
-    },
-    {
-      id: 'ord_106',
-      orderNumber: 'ORD-8826',
-      recipientName: 'Claire Tremblay',
-      marketplace: 'Etsy',
-      street1: '1234 Rue Sainte-Catherine',
-      city: 'Montreal',
-      state: 'QC',
-      zip: 'H3B 1A1',
-      country: 'CA',
-      phone: '514-555-0199',
-      email: 'ctremblay@mtlbobbin.ca',
-      orderDate: '2026-08-07T13:00:00Z',
-      status: 'ready_to_ship',
-      boxId: 'pkg_medium',
-      boxName: 'Medium Flat Rate Box',
-      items: [
-        { sku: 'BOB-800', name: 'Precision Wooden Bobbins (100pk)', quantity: 2, price: 89.00, weightOz: 36 },
-      ],
-      weightOz: 40,
-      declaredValue: 178.00,
-      addressValidated: true,
-      addressNotes: 'International Canada Destination - USPS Priority Mail International Selected',
-    },
-    {
-      id: 'ord_107',
-      orderNumber: 'ORD-8827',
-      recipientName: 'Oliver Smith',
-      marketplace: 'Shopify',
-      street1: '45 Baker Street',
-      city: 'London',
-      state: 'ENG',
-      zip: 'W1U 8ED',
-      country: 'GB',
-      phone: '+44 20 7946 0912',
-      email: 'osmith@thamestextile.co.uk',
-      orderDate: '2026-08-07T14:15:00Z',
-      status: 'ready_to_ship',
-      boxId: 'pkg_small',
-      boxName: 'Small Flat Rate Box',
-      items: [
-        { sku: 'BOB-901', name: 'Industrial Bobbin Winder Accessories', quantity: 1, price: 145.00, weightOz: 18 },
-      ],
-      weightOz: 20,
-      declaredValue: 145.00,
-      addressValidated: true,
-      addressNotes: 'International UK Destination - USPS Priority Mail International Selected',
-    },
-    // Historical Shipped Orders for Search & Reports
-    {
-      id: 'ord_1001',
-      orderNumber: 'ORD-8790',
-      recipientName: 'Jonathan Hayes',
-      marketplace: 'WooCommerce',
-      street1: '880 17th Street',
-      city: 'Denver',
-      state: 'CO',
-      zip: '80202',
-      country: 'US',
-      phone: '303-555-0812',
-      email: 'jhayes@hayesdental.com',
-      orderDate: '2026-07-15T10:00:00Z',
-      status: 'shipped',
-      boxId: 'pkg_medium',
-      boxName: 'Medium Flat Rate Box',
-      items: [
-        { sku: 'DEN-110', name: 'Impression Trays Pack', quantity: 5, price: 32.00, weightOz: 24 },
-      ],
-      weightOz: 28,
-      declaredValue: 160.00,
-      addressValidated: true,
-      trackingNumber: '9400111202482390199021',
-      carrier: 'USPS',
-      serviceLevel: 'PriorityMail',
-      shippingCost: 14.35,
-      shippingDate: '2026-07-15T14:30:00Z',
-      labelUrl: 'https://easypost-files.s3.amazonaws.com/labels/usps_priority_sample1.pdf',
-      hasLabelData: true,
-      LabelData: true,
-    },
-    {
-      id: 'ord_1002',
-      orderNumber: 'ORD-8791',
-      recipientName: 'Karen Bishop',
-      street1: '320 Michigan Ave',
-      city: 'Chicago',
-      state: 'IL',
-      zip: '60604',
-      country: 'US',
-      phone: '312-555-0177',
-      email: 'kbishop@gmail.com',
-      orderDate: '2026-07-18T11:20:00Z',
-      status: 'shipped',
-      boxId: 'pkg_padded_env',
-      boxName: 'Padded Flat Rate Envelope',
-      items: [
-        { sku: 'BOK-300', name: 'Hardcover Engineering Manual', quantity: 1, price: 89.00, weightOz: 32 },
-      ],
-      weightOz: 33.5,
-      declaredValue: 89.00,
-      addressValidated: true,
-      trackingNumber: '1Z9999999999999999',
-      carrier: 'UPS',
-      serviceLevel: 'Ground',
-      shippingCost: 9.80,
-      shippingDate: '2026-07-18T16:00:00Z',
-      labelUrl: 'https://easypost-files.s3.amazonaws.com/labels/ups_ground_sample1.pdf',
-      hasLabelData: true,
-      LabelData: true,
-    },
-    {
-      id: 'ord_1003',
-      orderNumber: 'ORD-8750',
-      recipientName: 'Michael Chang',
-      street1: '900 Pacific Ave',
-      city: 'Seattle',
-      state: 'WA',
-      zip: '98101',
-      country: 'US',
-      orderDate: '2026-06-10T08:00:00Z',
-      status: 'shipped',
-      boxId: 'pkg_large',
-      boxName: 'Large Flat Rate Box',
-      items: [
-        { sku: 'KIT-501', name: 'Gourmet Chef Knife Block Set', quantity: 1, price: 249.00, weightOz: 88 },
-      ],
-      weightOz: 94,
-      declaredValue: 249.00,
-      addressValidated: true,
-      trackingNumber: '782910482910',
-      carrier: 'FedEx',
-      serviceLevel: 'HomeDelivery',
-      shippingCost: 21.50,
-      shippingDate: '2026-06-10T12:00:00Z',
-    },
-    {
-      id: 'ord_1004',
-      orderNumber: 'ORD-8710',
-      recipientName: 'Amanda Vance',
-      street1: '1400 Broadway',
-      city: 'New York',
-      state: 'NY',
-      zip: '10018',
-      country: 'US',
-      orderDate: '2026-05-22T09:30:00Z',
-      status: 'shipped',
-      boxId: 'pkg_small',
-      boxName: 'Small Flat Rate Box',
-      items: [{ sku: 'JEW-10', name: 'Sterling Silver Bracelet', quantity: 1, price: 110.00, weightOz: 4 }],
-      weightOz: 6,
-      declaredValue: 110.00,
-      addressValidated: true,
-      trackingNumber: '9400111202482390199088',
-      carrier: 'USPS',
-      serviceLevel: 'FirstClass',
-      shippingCost: 5.60,
-      shippingDate: '2026-05-22T15:10:00Z',
-    },
-  ],
+  devOrders: [...initialDevOrders],
+  prodOrders: [...initialProdOrders],
+  orders: (initialSettings.appEnv === 'prod' || savedDiskSettings?.appEnv === 'prod')
+    ? [...initialProdOrders]
+    : [...initialDevOrders],
 };
 
 // Sessions store
@@ -1931,6 +2266,10 @@ app.get('/api/orders', async (req, res) => {
     if (liveOrders) {
       db.orders = liveOrders;
     }
+  } else {
+    // Keep in-memory dataset in sync with active environment
+    const activeEnv = getActiveAppEnv(db.settings);
+    db.orders = activeEnv === 'prod' ? db.prodOrders : db.devOrders;
   }
 
   let result = [...db.orders];
@@ -2016,6 +2355,7 @@ app.post('/api/orders', async (req, res) => {
     addressValidated: validation.isValid,
     addressNotes: validation.notes,
     validationErrors: validation.errors.length > 0 ? validation.errors : undefined,
+    marketplacenotified: 'No',
   };
 
   db.orders.unshift(newOrder);
@@ -2046,27 +2386,53 @@ app.put('/api/orders/:id', async (req, res) => {
     }
   }
 
-  // If address fields updated, re-validate address
-  if (updates.street1 || updates.city || updates.state || updates.zip) {
-    const street1 = updates.street1 ?? current.street1;
-    const street2 = updates.street2 ?? current.street2;
-    const city = updates.city ?? current.city;
-    const state = updates.state ?? current.state;
-    const zip = updates.zip ?? current.zip;
-    const country = updates.country ?? current.country;
+  // Determine effective order values
+  const effectiveStreet1 = updates.street1 ?? current.street1 ?? '';
+  const effectiveStreet2 = updates.street2 ?? current.street2 ?? '';
+  const effectiveCity = updates.city ?? current.city ?? '';
+  const effectiveState = updates.state ?? current.state ?? '';
+  const effectiveZip = updates.zip ?? current.zip ?? '';
+  const effectiveCountry = updates.country ?? current.country ?? 'US';
+  const effectiveWeight = updates.weightOz !== undefined ? Number(updates.weightOz) : Number(current.weightOz);
 
-    const val = validateAddressWithEasyPost({ street1, street2, city, state, zip, country });
-    updates.addressValidated = val.isValid;
-    updates.addressNotes = val.notes;
-    updates.validationErrors = val.errors.length > 0 ? val.errors : undefined;
+  // Validate address syntax
+  const val = validateAddressWithEasyPost({
+    street1: effectiveStreet1,
+    street2: effectiveStreet2,
+    city: effectiveCity,
+    state: effectiveState,
+    zip: effectiveZip,
+    country: effectiveCountry,
+  });
 
-    if (val.isValid && current.status === 'address_error') {
+  const allErrors: string[] = [];
+  if (!val.isValid) {
+    allErrors.push(...val.errors);
+  }
+  if (effectiveWeight <= 0) {
+    allErrors.push('Total Weight is set to 0 oz - Needs weight correction');
+  }
+
+  updates.addressValidated = val.isValid;
+  updates.addressNotes = val.notes;
+  updates.validationErrors = allErrors.length > 0 ? allErrors : undefined;
+
+  // If order is not shipped or cancelled, update status based on validation
+  const baseStatus = updates.status ?? current.status;
+  if (baseStatus !== 'shipped' && baseStatus !== 'cancelled') {
+    if (allErrors.length === 0) {
       updates.status = 'ready_to_ship';
+    } else {
+      updates.status = 'address_error';
     }
   }
 
   const updatedOrder = { ...current, ...updates, updatedAt: new Date().toISOString() };
   db.orders[index] = updatedOrder;
+  const devIdx = db.devOrders.findIndex((o) => o.id === id);
+  if (devIdx !== -1) db.devOrders[devIdx] = updatedOrder;
+  const prodIdx = db.prodOrders.findIndex((o) => o.id === id);
+  if (prodIdx !== -1) db.prodOrders[prodIdx] = updatedOrder;
 
   // Sync to MS SQL Server
   const pool = await getMssqlPool();
@@ -2128,11 +2494,11 @@ app.post('/api/orders/validate-addresses', async (req, res) => {
 
 // Test EasyPost API Connection Endpoint
 app.post('/api/easypost/test-connection', async (req, res) => {
-  const apiKey = (req.body.apiKey || db.settings.easyPostApiKey || '').trim();
+  const apiKey = (req.body.apiKey || getActiveEasyPostKey(db.settings) || '').trim();
   if (!apiKey || apiKey.length < 5) {
     return res.status(400).json({
       success: false,
-      message: 'Please enter an EasyPost API Key to test (starts with EZTK_ or EZAK_).',
+      message: 'Please enter an EasyPost API Key to test (starts with EZTK_ for Test/Dev or EZAK_ for Production).',
     });
   }
 
@@ -2208,6 +2574,7 @@ app.post('/api/orders/create-labels-batch', async (req, res) => {
       const result = await purchaseLabelWithEasyPost(order, db.settings);
 
       order.status = 'shipped';
+      order.marketplacenotified = 'Pending';
       order.trackingNumber = result.trackingNumber;
       order.carrier = result.carrier;
       order.serviceLevel = result.serviceLevel;
@@ -2267,13 +2634,11 @@ async function purchaseLabelWithEasyPost(
   labelPngBuffer?: Buffer;
   carrierNotice?: string;
 }> {
-  let apiKey = (settings.easyPostApiKey || '').trim();
-  if (!apiKey || apiKey.length < 5 || apiKey === 'EZTK_TEST_99824_KEY') {
-    apiKey = (process.env.EASYPOST_API_KEY || '').trim();
-  }
+  let apiKey = getActiveEasyPostKey(settings);
 
   if (!apiKey || apiKey.length < 5) {
-    throw new Error('EasyPost API Key is missing or invalid. Please open Settings -> EasyPost API Integration and enter your valid EasyPost Secret API Key (starts with EZTK_ for Test mode or EZAK_ for Production mode).');
+    const envLabel = (settings.appEnv || 'dev') === 'prod' ? 'Production' : 'Development/Test';
+    throw new Error(`EasyPost API Key is missing or invalid for ${envLabel} mode. Please open Settings -> EasyPost API Integration and enter your valid EasyPost Secret API Key.`);
   }
 
   const box = db.packages.find((p) => p.id === order.boxId) || db.packages[0];
@@ -2541,9 +2906,9 @@ app.get('/api/orders/:id/live-rates', async (req, res) => {
     return res.status(404).json({ error: 'Order not found.' });
   }
 
-  const apiKey = (db.settings.easyPostApiKey || process.env.EASYPOST_API_KEY || '').trim();
+  const apiKey = getActiveEasyPostKey(db.settings);
   if (!apiKey) {
-    return res.status(400).json({ error: 'EasyPost API Key not configured.' });
+    return res.status(400).json({ error: 'EasyPost API Key not configured for current environment.' });
   }
 
   const box = db.packages.find((p) => p.id === order.boxId) || db.packages[0];
@@ -2699,6 +3064,7 @@ app.post('/api/orders/:id/purchase-label', async (req, res) => {
     const result = await purchaseLabelWithEasyPost(order, db.settings, carrier, serviceLevel);
 
     order.status = 'shipped';
+    order.marketplacenotified = 'Pending';
     order.trackingNumber = result.trackingNumber;
     order.carrier = result.carrier;
     order.serviceLevel = result.serviceLevel;
@@ -2764,6 +3130,7 @@ app.post('/api/orders/batch-purchase-labels', async (req, res) => {
       const result = await purchaseLabelWithEasyPost(order, db.settings);
 
       order.status = 'shipped';
+      order.marketplacenotified = 'Pending';
       order.trackingNumber = result.trackingNumber;
       order.carrier = result.carrier;
       order.serviceLevel = result.serviceLevel;
@@ -3487,6 +3854,7 @@ app.post('/api/orders/:id/reship', (req, res) => {
     isReshipment: true,
     reshippedFromOrderNumber: originalOrder.orderNumber,
     reshipReason: reason || 'Replacement for lost or damaged shipment',
+    marketplacenotified: 'No',
   };
 
   db.orders.unshift(replacementOrder);
@@ -3557,14 +3925,11 @@ app.post('/api/scan-forms/create', async (req, res) => {
       serviceBreakdown[service] = (serviceBreakdown[service] || 0) + 1;
     });
 
-    let apiKey = (db.settings.easyPostApiKey || '').trim();
-    if (!apiKey || apiKey.length < 5 || apiKey === 'EZTK_TEST_99824_KEY') {
-      apiKey = (process.env.EASYPOST_API_KEY || '').trim();
-    }
+    let apiKey = getActiveEasyPostKey(db.settings);
 
     if (!apiKey || apiKey.length < 5) {
       return res.status(400).json({
-        error: 'EasyPost API Key is missing or invalid. Please open Settings -> EasyPost API Integration and configure your Secret API Key.',
+        error: 'EasyPost API Key is missing or invalid for current environment. Please open Settings -> EasyPost API Integration and configure your Secret API Key.',
       });
     }
 
@@ -3974,6 +4339,72 @@ app.put('/api/settings', async (req, res) => {
   res.json({ success: true, settings: safeSettings });
 });
 
+// Environment Switcher Endpoint (Dev [dbo].[shippingdev] vs Prod [dbo].[Shipping])
+app.post('/api/settings/environment', async (req, res) => {
+  const targetEnv: 'dev' | 'prod' = req.body.env === 'prod' ? 'prod' : 'dev';
+  db.settings.appEnv = targetEnv;
+  db.settings.easyPostMode = targetEnv === 'prod' ? 'production' : 'test';
+
+  saveSettingsToFile(db.settings);
+
+  const pool = await getMssqlPool();
+  if (pool) {
+    await saveSettingsToMssqlPool(pool, db.settings);
+    const freshOrders = await fetchOrdersFromMssql();
+    if (freshOrders) {
+      db.orders = freshOrders;
+    }
+  } else {
+    // In-memory dataset isolation
+    db.orders = targetEnv === 'prod' ? db.prodOrders : db.devOrders;
+  }
+
+  const { appPassword, mssqlPassword, ...safeSettings } = db.settings;
+  const activeTable = getShippingTableName();
+  const activeKeyType = targetEnv === 'prod' ? 'Production Key' : 'Test Key';
+
+  console.log(`[ENV] Switched to ${targetEnv.toUpperCase()}. Active Table: ${activeTable}, Orders Count: ${db.orders.length}`);
+
+  res.json({
+    success: true,
+    message: `Switched environment to ${targetEnv.toUpperCase()}. Active Database Table: ${activeTable}, EasyPost API Key: ${activeKeyType}`,
+    settings: safeSettings,
+    orders: db.orders,
+    activeTable,
+  });
+});
+
+// Explicit Clone Table Endpoint ([dbo].[Shipping] -> [dbo].[shippingdev])
+app.post('/api/mssql/clone-dev-table', async (req, res) => {
+  const pool = await getMssqlPool();
+  if (!pool) {
+    return res.status(400).json({
+      success: false,
+      message: db.settings.mssqlError || 'Could not establish connection to MS SQL Server.',
+    });
+  }
+
+  try {
+    await cloneShippingToDevTable(pool);
+    if (db.settings.appEnv === 'dev') {
+      const freshOrders = await fetchOrdersFromMssql();
+      if (freshOrders) {
+        db.orders = freshOrders;
+      }
+    }
+    res.json({
+      success: true,
+      message: 'Successfully cloned table [dbo].[Shipping] to [dbo].[shippingdev] with all structure and data.',
+      orders: db.orders,
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      message: `Failed to clone table: ${err?.message || err}`,
+    });
+  }
+});
+
 // Explicit MS SQL Connection Test Route
 app.post('/api/mssql/test', async (req, res) => {
   const { server, port, database, user, password, encrypt } = req.body;
@@ -4145,6 +4576,7 @@ BEGIN
         [TotalWeight] [float] NOT NULL DEFAULT 16,
         [box] [varchar](50) NULL,
         [easypostShipmentId] [nvarchar](64) NULL,
+        [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No',
         CONSTRAINT [PK_Shipping_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
     );
 END;

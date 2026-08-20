@@ -6,6 +6,7 @@ import { Dashboard } from './components/Dashboard';
 import { AddressFixModal } from './components/AddressFixModal';
 import { CompareRatesModal } from './components/CompareRatesModal';
 import { OrderDetailModal } from './components/OrderDetailModal';
+import { WeightCorrectionModal } from './components/WeightCorrectionModal';
 import { ManualOrderModal } from './components/ManualOrderModal';
 import { BatchPrintModal } from './components/BatchPrintModal';
 import { LabelPrintDialog } from './components/LabelPrintDialog';
@@ -37,6 +38,7 @@ export default function App() {
 
   // Modals state
   const [addressFixOrder, setAddressFixOrder] = useState<ShippingOrder | null>(null);
+  const [weightCorrectionOrder, setWeightCorrectionOrder] = useState<ShippingOrder | null>(null);
   const [compareRatesOrder, setCompareRatesOrder] = useState<ShippingOrder | null>(null);
   const [orderDetailOrder, setOrderDetailOrder] = useState<ShippingOrder | null>(null);
   const [showManualOrderModal, setShowManualOrderModal] = useState<boolean>(false);
@@ -165,6 +167,25 @@ export default function App() {
       showToast(`Order #${updated.orderNumber} updated & saved to database!`, 'success');
     } catch (err) {
       showToast('Error saving order updates to database.', 'error');
+    }
+  };
+
+  // Dedicated Save Order Weight Handler
+  const handleSaveOrderWeight = async (orderId: string, weightOz: number) => {
+    try {
+      const res = await fetch(`/api/orders/${orderId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ weightOz }),
+      });
+      const updated = await res.json();
+      setOrders((prev) => prev.map((o) => (o.id === orderId ? updated : o)));
+      if (orderDetailOrder?.id === orderId) {
+        setOrderDetailOrder(updated);
+      }
+      showToast(`Updated weight for Order #${updated.orderNumber} to ${weightOz} oz!`, 'success');
+    } catch (err) {
+      showToast('Error saving order weight to database.', 'error');
     }
   };
 
@@ -325,6 +346,33 @@ export default function App() {
     }
   };
 
+  // Environment Switch Handler
+  const handleToggleAppEnv = async (targetEnv: 'dev' | 'prod') => {
+    try {
+      setLoading(true);
+      const res = await fetch('/api/settings/environment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ env: targetEnv }),
+      });
+      const data = await res.json();
+      if (data.settings) {
+        setSettings(data.settings);
+      }
+      if (data.orders) {
+        setOrders(data.orders);
+      }
+      showToast(
+        data.message || `Switched to ${targetEnv.toUpperCase()} mode (Table: ${data.activeTable || (targetEnv === 'prod' ? '[dbo].[Shipping]' : '[dbo].[shippingdev]')})`,
+        'info'
+      );
+    } catch (err) {
+      showToast('Failed to switch environment mode.', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Settings & Package Handlers
   const handleUpdateSettings = async (updated: Partial<AppSetting>) => {
     try {
@@ -442,6 +490,8 @@ export default function App() {
         readyToShipCount={readyCount}
         mssqlConnected={settings?.mssqlConnected ?? true}
         easyPostMode={settings?.easyPostMode ?? 'test'}
+        appEnv={settings?.appEnv || (settings?.easyPostMode === 'production' ? 'prod' : 'dev')}
+        onToggleAppEnv={handleToggleAppEnv}
         onLogout={() => setIsAuthenticated(false)}
         onSyncMssql={handleSyncMssql}
         currentUser={currentUser}
@@ -458,6 +508,7 @@ export default function App() {
             onUpdateOrderBox={handleUpdateOrderBox}
             onValidateAddresses={handleValidateAddresses}
             onOpenAddressFixModal={(order) => setAddressFixOrder(order)}
+            onOpenWeightCorrectionModal={(order) => setWeightCorrectionOrder(order)}
             onOpenCompareRatesModal={(order) => setCompareRatesOrder(order)}
             onOpenOrderDetailModal={(order) => setOrderDetailOrder(order)}
             onGenerateBatchLabels={handleGenerateBatchLabels}
@@ -465,6 +516,7 @@ export default function App() {
             onRefreshData={refreshAllData}
             onSyncMssql={handleSyncMssql}
             onOpenScanFormModal={() => setShowScanFormModal(true)}
+            onToggleAppEnv={handleToggleAppEnv}
             loading={loading}
           />
         )}
@@ -504,6 +556,14 @@ export default function App() {
           order={addressFixOrder}
           onClose={() => setAddressFixOrder(null)}
           onSaveAddress={handleSaveFixedAddress}
+        />
+      )}
+
+      {weightCorrectionOrder && (
+        <WeightCorrectionModal
+          order={weightCorrectionOrder}
+          onClose={() => setWeightCorrectionOrder(null)}
+          onSaveWeight={handleSaveOrderWeight}
         />
       )}
 

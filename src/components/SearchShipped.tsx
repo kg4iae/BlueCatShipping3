@@ -194,6 +194,18 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
                           );
                         })()}
                         <span className="font-semibold text-slate-600 text-[11px]">{order.marketplace || 'Etsy'}</span>
+                        <span
+                          className={`text-[10px] font-bold px-1.5 py-0.2 rounded border ${
+                            order.marketplacenotified === 'Yes'
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              : order.marketplacenotified === 'Pending'
+                              ? 'bg-amber-50 text-amber-700 border-amber-200'
+                              : 'bg-slate-100 text-slate-600 border-slate-200'
+                          }`}
+                          title={`Marketplace Notified: ${order.marketplacenotified || 'No'}`}
+                        >
+                          Notified: {order.marketplacenotified || 'No'}
+                        </span>
                       </div>
                       <div className="text-slate-500 text-[10px] mt-0.5">
                         {order.street1}, {order.city}, {order.state} {order.zip}

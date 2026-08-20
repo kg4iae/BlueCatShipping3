@@ -61,8 +61,11 @@ export interface ShippingOrder {
   reshippedFromOrderNumber?: string;
   reshipReason?: string;
   marketplace?: string;
+  marketplacenotified?: 'Pending' | 'Yes' | 'No' | string;
   createdAt?: string;
   updatedAt?: string;
+  sourceTable?: string;
+  env?: 'dev' | 'prod';
 }
 
 export interface PackageType {
@@ -93,7 +96,10 @@ export interface ReturnAddress {
 export interface AppSetting {
   packingSlipContent: string;
   easyPostApiKey: string;
+  easyPostTestApiKey?: string;
+  easyPostProdApiKey?: string;
   easyPostMode: 'test' | 'production';
+  appEnv?: 'dev' | 'prod';
   mssqlServer: string;
   mssqlPort?: number;
   mssqlDatabase: string;

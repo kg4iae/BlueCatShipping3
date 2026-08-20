@@ -76,7 +76,13 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   const [defaultInternationalService, setDefaultInternationalService] = useState<string>(settings.defaultInternationalService || 'UPS Worldwide Expedited');
 
   // International Harmonized System (HS) Harmony Code State
-  const [defaultHsTariffCode, setDefaultHsTariffCode] = useState<string>(settings.defaultHsTariffCode || '610910');
+  const [defaultHsTariffCode, setDefaultHsTariffCode] = useState<string>(String(settings.defaultHsTariffCode ?? '610910'));
+
+  useEffect(() => {
+    if (settings.defaultHsTariffCode !== undefined && settings.defaultHsTariffCode !== null) {
+      setDefaultHsTariffCode(String(settings.defaultHsTariffCode));
+    }
+  }, [settings.defaultHsTariffCode]);
 
   // QZ Tray Direct Web Printing states
   const [qzPrinterLabel, setQzPrinterLabel] = useState<string>(settings.qzPrinterLabel || '');
@@ -92,7 +98,10 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   // Form states
   const [packingSlipContent, setPackingSlipContent] = useState(settings.packingSlipContent || '');
   const [easyPostApiKey, setEasyPostApiKey] = useState(settings.easyPostApiKey || '');
+  const [easyPostTestApiKey, setEasyPostTestApiKey] = useState(settings.easyPostTestApiKey || settings.easyPostApiKey || '');
+  const [easyPostProdApiKey, setEasyPostProdApiKey] = useState(settings.easyPostProdApiKey || '');
   const [easyPostMode, setEasyPostMode] = useState<'test' | 'production'>(settings.easyPostMode || 'test');
+  const [appEnv, setAppEnv] = useState<'dev' | 'prod'>(settings.appEnv || (settings.easyPostMode === 'production' ? 'prod' : 'dev'));
   const [mssqlServer, setMssqlServer] = useState(settings.mssqlServer || '');
   const [mssqlPort, setMssqlPort] = useState<string>(String(settings.mssqlPort || 1433));
   const [mssqlDatabase, setMssqlDatabase] = useState(settings.mssqlDatabase || '');
@@ -100,6 +109,10 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   const [mssqlPassword, setMssqlPassword] = useState(settings.mssqlPassword || '');
   const [mssqlEncrypt, setMssqlEncrypt] = useState<boolean>(settings.mssqlEncrypt || false);
   const [appPassword, setAppPassword] = useState('');
+
+  // Table Cloning state
+  const [cloningTable, setCloningTable] = useState<boolean>(false);
+  const [cloneResult, setCloneResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // Package Form state
   const [newPkgName, setNewPkgName] = useState('');
@@ -244,30 +257,57 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
 
   // EasyPost Connection test state
   const [testingEasyPost, setTestingEasyPost] = useState(false);
+  const [testingKeyTarget, setTestingKeyTarget] = useState<'test' | 'prod' | 'active'>('active');
+  const [easyPostTestResult, setEasyPostTestResult] = useState<{ success: boolean; message: string; target?: string } | null>(null);
 
-  const [easyPostTestResult, setEasyPostTestResult] = useState<{ success: boolean; message: string } | null>(null);
-
-  const handleTestEasyPost = async () => {
+  const handleTestEasyPost = async (specificKey?: string, targetLabel?: 'test' | 'prod' | 'active') => {
     setTestingEasyPost(true);
+    setTestingKeyTarget(targetLabel || 'active');
     setEasyPostTestResult(null);
     try {
+      const activeKey = specificKey ?? (appEnv === 'prod' ? (easyPostProdApiKey || easyPostApiKey) : (easyPostTestApiKey || easyPostApiKey));
       const res = await fetch('/api/easypost/test-connection', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: easyPostApiKey }),
+        body: JSON.stringify({ apiKey: activeKey }),
       });
       const data = await res.json();
       setEasyPostTestResult({
         success: res.ok && data.success,
         message: data.message || (res.ok ? 'EasyPost API Key is valid!' : 'EasyPost connection failed.'),
+        target: targetLabel || 'active',
       });
     } catch (err: any) {
       setEasyPostTestResult({
         success: false,
         message: `Network error testing EasyPost API: ${err?.message || err}`,
+        target: targetLabel || 'active',
       });
     } finally {
       setTestingEasyPost(false);
+    }
+  };
+
+  const handleCloneDevTable = async () => {
+    if (!window.confirm('Clone [dbo].[Shipping] to [dbo].[shippingdev]?\n\nThis will create or overwrite [dbo].[shippingdev] with the complete schema and current rows from [dbo].[Shipping].')) {
+      return;
+    }
+    setCloningTable(true);
+    setCloneResult(null);
+    try {
+      const res = await fetch('/api/mssql/clone-dev-table', { method: 'POST' });
+      const data = await res.json();
+      setCloneResult({
+        success: res.ok && data.success,
+        message: data.message || (res.ok ? 'Cloned successfully!' : 'Failed to clone table.'),
+      });
+    } catch (err: any) {
+      setCloneResult({
+        success: false,
+        message: `Error cloning table: ${err?.message || err}`,
+      });
+    } finally {
+      setCloningTable(false);
     }
   };
 
@@ -307,7 +347,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
       defaultDomesticService,
       defaultInternationalCarrier,
       defaultInternationalService,
-      defaultHsTariffCode: defaultHsTariffCode.replace(/[^0-9]/g, '') || '610910',
+      defaultHsTariffCode: String(defaultHsTariffCode || '').replace(/[^0-9]/g, '') || '610910',
     });
     setSaving(false);
     triggerSuccess();
@@ -316,7 +356,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   const handleSaveInternationalCustoms = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
-    const cleaned = defaultHsTariffCode.replace(/[^0-9]/g, '');
+    const cleaned = String(defaultHsTariffCode || '').replace(/[^0-9]/g, '');
     const codeToSave = cleaned.length >= 6 ? cleaned.slice(0, 10) : '610910';
     setDefaultHsTariffCode(codeToSave);
     await onUpdateSettings({
@@ -431,7 +471,14 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   const handleSaveEasyPost = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
-    await onUpdateSettings({ easyPostApiKey, easyPostMode });
+    const activeKey = appEnv === 'prod' ? (easyPostProdApiKey || easyPostApiKey) : (easyPostTestApiKey || easyPostApiKey);
+    await onUpdateSettings({
+      easyPostApiKey: activeKey,
+      easyPostTestApiKey,
+      easyPostProdApiKey,
+      easyPostMode: appEnv === 'prod' ? 'production' : 'test',
+      appEnv,
+    });
     setSaving(false);
     triggerSuccess();
   };
@@ -573,7 +620,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
             }`}
           >
             <Truck className="w-4 h-4" />
-            <span>Domestic Carrier &amp; Rates</span>
+            <span>Carrier &amp; Rates</span>
           </button>
 
           <button
@@ -856,7 +903,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
               <div className="border-b border-slate-100 pb-4">
                 <h3 className="text-base font-bold text-slate-900 flex items-center space-x-2">
                   <Truck className="w-5 h-5 text-indigo-600" />
-                  <span>Domestic Carrier &amp; Rates Configuration</span>
+                  <span>Carrier &amp; Rates Configuration</span>
                 </h3>
                 <p className="text-xs text-slate-500 mt-1">
                   Configure your default domestic carrier and rate/service tier for US shipments. International orders continue to compare USPS vs. UPS dynamically.
@@ -1084,7 +1131,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                           type="button"
                           onClick={() => setDefaultHsTariffCode(preset.code)}
                           className={`text-xs px-2.5 py-1 rounded-lg border font-medium transition-colors cursor-pointer ${
-                            defaultHsTariffCode.replace(/[^0-9]/g, '') === preset.code
+                            String(defaultHsTariffCode || '').replace(/[^0-9]/g, '') === preset.code
                               ? 'bg-indigo-100 text-indigo-800 border-indigo-300 font-bold'
                               : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
                           }`}
@@ -1616,37 +1663,181 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
               <div>
                 <h3 className="text-base font-bold text-slate-900 flex items-center space-x-2">
                   <Truck className="w-5 h-5 text-indigo-600" />
-                  <span>EasyPost API Integration</span>
+                  <span>EasyPost API Integration &amp; Environment Keys</span>
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Powers address validation, USPS/UPS/FedEx rate lookups, and postage label creation.
+                  Powers address validation, USPS/UPS/FedEx rate lookups, and postage label creation with separate keys for Dev (Test) and Production environments.
                 </p>
               </div>
 
-              <form onSubmit={handleSaveEasyPost} className="space-y-4">
+              {/* Active Environment Banner */}
+              <div className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs ${
+                appEnv === 'prod'
+                  ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
+                  : 'bg-amber-50 border-amber-300 text-amber-950'
+              }`}>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">EasyPost API Secret Key</label>
-                  <input
-                    type="password"
-                    value={easyPostApiKey}
-                    onChange={(e) => setEasyPostApiKey(e.target.value)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2.5 text-xs text-slate-800 font-mono focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
-                  />
-                  <p className="text-[11px] text-slate-500 mt-1">
-                    API Key starts with <code className="text-indigo-600 font-mono">EZTK_</code> or <code className="text-indigo-600 font-mono">EZAK_</code>. Automatically provided in test demo mode.
+                  <div className="flex items-center space-x-2">
+                    <span className={`px-2 py-0.5 rounded text-[11px] font-bold uppercase tracking-wider ${
+                      appEnv === 'prod' ? 'bg-emerald-600 text-white' : 'bg-amber-600 text-white'
+                    }`}>
+                      {appEnv === 'prod' ? 'Production Mode Active' : 'Development Mode Active'}
+                    </span>
+                    <span className="font-semibold text-slate-800">
+                      Active Table: <code className="font-mono bg-white/80 px-1.5 py-0.5 rounded border border-slate-300 text-indigo-700">{appEnv === 'prod' ? '[dbo].[Shipping]' : '[dbo].[shippingdev]'}</code>
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-600">
+                    {appEnv === 'prod'
+                      ? 'Live postage purchases using Production API Key. Orders saved directly to [dbo].[Shipping].'
+                      : 'Safe sandbox testing using Test API Key. Orders saved to isolated [dbo].[shippingdev] table.'}
                   </p>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1">Environment Mode</label>
-                  <select
-                    value={easyPostMode}
-                    onChange={(e) => setEasyPostMode(e.target.value as 'test' | 'production')}
-                    className="w-full bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none cursor-pointer"
+                <div className="flex items-center space-x-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={handleCloneDevTable}
+                    disabled={cloningTable}
+                    className="bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 text-xs font-semibold px-3 py-1.5 rounded-lg flex items-center space-x-1.5 cursor-pointer shadow-sm disabled:opacity-50"
+                    title="Clone [dbo].[Shipping] structure and data into [dbo].[shippingdev]"
                   >
-                    <option value="test">Test Mode (Safe Sandbox Labels &amp; Addresses)</option>
-                    <option value="production">Production Mode (Live Carrier Postage Purchase)</option>
-                  </select>
+                    <Database className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>{cloningTable ? 'Cloning Table...' : 'Clone Shipping to Dev'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {cloneResult && (
+                <div className={`p-3 rounded-lg text-xs font-medium ${
+                  cloneResult.success ? 'bg-emerald-50 border border-emerald-200 text-emerald-900' : 'bg-rose-50 border border-rose-200 text-rose-900'
+                }`}>
+                  {cloneResult.success ? '✅ ' : '❌ '}
+                  {cloneResult.message}
+                </div>
+              )}
+
+              <form onSubmit={handleSaveEasyPost} className="space-y-5">
+                {/* Environment Mode Selector */}
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                    Active System Environment
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <label className={`flex items-start p-3.5 rounded-xl border cursor-pointer transition-all ${
+                      appEnv === 'dev'
+                        ? 'border-indigo-600 bg-indigo-50/60 ring-2 ring-indigo-500/20'
+                        : 'border-slate-200 bg-slate-50 hover:bg-slate-100'
+                    }`}>
+                      <input
+                        type="radio"
+                        name="appEnvSelection"
+                        value="dev"
+                        checked={appEnv === 'dev'}
+                        onChange={() => setAppEnv('dev')}
+                        className="mt-0.5 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      <div className="ml-3 text-xs">
+                        <span className="font-bold text-slate-900 block">Development (Dev) Mode</span>
+                        <span className="text-slate-500 text-[11px] block mt-0.5">
+                          Uses <strong>Test API Key (EZTK_...)</strong> &amp; isolated database table <code className="text-indigo-600 font-mono">[dbo].[shippingdev]</code>.
+                        </span>
+                      </div>
+                    </label>
+
+                    <label className={`flex items-start p-3.5 rounded-xl border cursor-pointer transition-all ${
+                      appEnv === 'prod'
+                        ? 'border-emerald-600 bg-emerald-50/60 ring-2 ring-emerald-500/20'
+                        : 'border-slate-200 bg-slate-50 hover:bg-slate-100'
+                    }`}>
+                      <input
+                        type="radio"
+                        name="appEnvSelection"
+                        value="prod"
+                        checked={appEnv === 'prod'}
+                        onChange={() => setAppEnv('prod')}
+                        className="mt-0.5 text-emerald-600 focus:ring-emerald-500"
+                      />
+                      <div className="ml-3 text-xs">
+                        <span className="font-bold text-slate-900 block">Production (Live) Mode</span>
+                        <span className="text-slate-500 text-[11px] block mt-0.5">
+                          Uses <strong>Production API Key (EZAK_...)</strong> &amp; live production table <code className="text-emerald-700 font-mono">[dbo].[Shipping]</code>.
+                        </span>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+
+                {/* Test API Key Field */}
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-800">
+                        EasyPost API Key — Test / Development Mode
+                      </label>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Test key starts with <code className="text-indigo-600 font-mono font-bold">EZTK_</code> for generating test sandbox shipping labels.
+                      </p>
+                    </div>
+                    {appEnv === 'dev' && (
+                      <span className="bg-indigo-100 text-indigo-800 text-[10px] font-bold px-2 py-0.5 rounded-full border border-indigo-200">
+                        Currently Active
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="password"
+                      value={easyPostTestApiKey}
+                      onChange={(e) => setEasyPostTestApiKey(e.target.value)}
+                      placeholder="EZTK_..."
+                      className="flex-1 bg-white border border-slate-300 rounded-lg px-3.5 py-2 text-xs text-slate-800 font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleTestEasyPost(easyPostTestApiKey, 'test')}
+                      disabled={testingEasyPost && testingKeyTarget === 'test'}
+                      className="bg-slate-200 hover:bg-slate-300 text-slate-800 font-semibold text-xs px-3.5 py-2 rounded-lg shrink-0 cursor-pointer disabled:opacity-50 transition-colors"
+                    >
+                      {testingEasyPost && testingKeyTarget === 'test' ? 'Testing...' : 'Test Key'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Production API Key Field */}
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-800">
+                        EasyPost API Key — Production Mode
+                      </label>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Production key starts with <code className="text-emerald-700 font-mono font-bold">EZAK_</code> for live carrier postage purchases.
+                      </p>
+                    </div>
+                    {appEnv === 'prod' && (
+                      <span className="bg-emerald-100 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full border border-emerald-200">
+                        Currently Active
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="password"
+                      value={easyPostProdApiKey}
+                      onChange={(e) => setEasyPostProdApiKey(e.target.value)}
+                      placeholder="EZAK_..."
+                      className="flex-1 bg-white border border-slate-300 rounded-lg px-3.5 py-2 text-xs text-slate-800 font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleTestEasyPost(easyPostProdApiKey, 'prod')}
+                      disabled={testingEasyPost && testingKeyTarget === 'prod'}
+                      className="bg-slate-200 hover:bg-slate-300 text-slate-800 font-semibold text-xs px-3.5 py-2 rounded-lg shrink-0 cursor-pointer disabled:opacity-50 transition-colors"
+                    >
+                      {testingEasyPost && testingKeyTarget === 'prod' ? 'Testing...' : 'Test Key'}
+                    </button>
+                  </div>
                 </div>
 
                 {easyPostTestResult && (
@@ -1665,7 +1856,11 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                       )}
                     </div>
                     <div>
-                      <p className="font-bold">{easyPostTestResult.success ? 'EasyPost Connected Successfully!' : 'EasyPost Connection Failed'}</p>
+                      <p className="font-bold">
+                        {easyPostTestResult.success
+                          ? `EasyPost (${easyPostTestResult.target?.toUpperCase() || 'KEY'}) Connected Successfully!`
+                          : `EasyPost (${easyPostTestResult.target?.toUpperCase() || 'KEY'}) Connection Failed`}
+                      </p>
                       <p className="font-normal text-[11px] mt-0.5 whitespace-pre-wrap">{easyPostTestResult.message}</p>
                     </div>
                   </div>
@@ -1699,12 +1894,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                 <div className="pt-2 flex items-center justify-between">
                   <button
                     type="button"
-                    onClick={handleTestEasyPost}
-                    disabled={testingEasyPost}
+                    onClick={() => handleTestEasyPost()}
+                    disabled={testingEasyPost && testingKeyTarget === 'active'}
                     className="bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-xs px-4 py-2.5 rounded-lg border border-slate-300 flex items-center space-x-2 cursor-pointer disabled:opacity-50"
                   >
                     <Truck className="w-4 h-4 text-indigo-600" />
-                    <span>{testingEasyPost ? 'Testing API Key...' : 'Test EasyPost Connection'}</span>
+                    <span>{testingEasyPost && testingKeyTarget === 'active' ? 'Testing Active Key...' : 'Test Active EasyPost Key'}</span>
                   </button>
 
                   <button
@@ -1911,6 +2106,56 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                     <strong>Environment Variables:</strong> You can also set <code className="bg-slate-200 px-1 py-0.5 rounded text-slate-800">MSSQL_SERVER</code>, <code className="bg-slate-200 px-1 py-0.5 rounded text-slate-800">MSSQL_DATABASE</code>, <code className="bg-slate-200 px-1 py-0.5 rounded text-slate-800">MSSQL_USER</code>, and <code className="bg-slate-200 px-1 py-0.5 rounded text-slate-800">MSSQL_PASSWORD</code> in your environment.
                   </li>
                 </ul>
+              </div>
+
+              {/* Dev / Production Table Isolation & Clone Card */}
+              <div className="bg-indigo-50/50 border border-indigo-200 rounded-xl p-4 space-y-3 text-xs">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <h4 className="font-bold text-indigo-950 flex items-center space-x-2">
+                    <Database className="w-4 h-4 text-indigo-600" />
+                    <span>Database Environment Table Isolation</span>
+                  </h4>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider w-fit ${
+                    appEnv === 'prod' ? 'bg-emerald-600 text-white' : 'bg-amber-600 text-white'
+                  }`}>
+                    Currently in {appEnv.toUpperCase()} Mode
+                  </span>
+                </div>
+                <p className="text-slate-600 text-[11px] leading-relaxed">
+                  The application dynamically selects the shipping table depending on the active environment switch:
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                  <div className="p-2.5 rounded-lg bg-white border border-indigo-100">
+                    <span className="font-bold text-slate-800 block">Development Table</span>
+                    <code className="text-indigo-600 font-mono font-bold block mt-0.5">[dbo].[shippingdev]</code>
+                    <span className="text-slate-500 text-[10px]">All other tables ([dbo].[Packages], [dbo].[Configuration], etc.) remain shared.</span>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-white border border-indigo-100">
+                    <span className="font-bold text-slate-800 block">Production Table</span>
+                    <code className="text-emerald-700 font-mono font-bold block mt-0.5">[dbo].[Shipping]</code>
+                    <span className="text-slate-500 text-[10px]">Live shipping order records and label fulfillment tracking.</span>
+                  </div>
+                </div>
+                <div className="pt-1 flex items-center justify-between">
+                  <span className="text-[11px] text-slate-500">Need to clone latest production data into dev?</span>
+                  <button
+                    type="button"
+                    onClick={handleCloneDevTable}
+                    disabled={cloningTable}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-3 py-1.5 rounded-lg flex items-center space-x-1.5 cursor-pointer shadow-sm disabled:opacity-50 text-xs"
+                  >
+                    <Database className="w-3.5 h-3.5" />
+                    <span>{cloningTable ? 'Cloning Table...' : 'Clone [Shipping] to [shippingdev]'}</span>
+                  </button>
+                </div>
+                {cloneResult && (
+                  <div className={`p-2.5 rounded-lg text-xs font-medium ${
+                    cloneResult.success ? 'bg-emerald-100 text-emerald-900 border border-emerald-300' : 'bg-rose-100 text-rose-900 border border-rose-300'
+                  }`}>
+                    {cloneResult.success ? '✅ ' : '❌ '}
+                    {cloneResult.message}
+                  </div>
+                )}
               </div>
 
               {/* SQL DDL Code Snippet Box */}
