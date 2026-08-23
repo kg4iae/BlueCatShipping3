@@ -656,7 +656,7 @@ async function ensureMssqlTables(pool: sql.ConnectionPool) {
       END;
     `);
 
-    // Check count in Users table; if empty, seed default admin user
+      // Check count in Users table; if empty, seed default admin user
     const userCountRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Users]');
     const userCount = userCountRes.recordset[0]?.cnt || 0;
     if (userCount === 0) {
@@ -671,6 +671,13 @@ async function ensureMssqlTables(pool: sql.ConnectionPool) {
           INSERT INTO [dbo].[Users] ([Username], [PasswordHash], [FullName], [Role], [CreatedAt])
           VALUES (@usr, @hash, @fn, @role, GETDATE());
         `);
+    } else {
+      // Migrate any legacy roles to Staff
+      await pool.request().query(`
+        UPDATE [dbo].[Users] 
+        SET [Role] = 'Staff' 
+        WHERE [Role] IN ('Shipping Manager', 'Warehouse Operator', 'shipping manager', 'warehouse operator');
+      `).catch(() => {});
     }
 
   } catch (err) {
@@ -1946,6 +1953,12 @@ function validateAddressWithEasyPost(address: {
 
 const activeSessionsMap = new Map<string, { username: string; fullName: string; role: string; loginTime: string }>();
 
+function normalizeRole(role?: string): 'Admin' | 'Staff' {
+  const r = (role || '').trim().toLowerCase();
+  if (r === 'admin') return 'Admin';
+  return 'Staff';
+}
+
 async function findUser(username: string): Promise<User | null> {
   const normUsername = (username || '').trim().toLowerCase();
   if (!normUsername) return null;
@@ -1963,7 +1976,7 @@ async function findUser(username: string): Promise<User | null> {
           username: row.Username,
           passwordHash: row.PasswordHash,
           fullName: row.FullName || row.Username,
-          role: row.Role || 'Admin',
+          role: normalizeRole(row.Role),
           createdAt: row.CreatedAt ? new Date(row.CreatedAt).toISOString() : undefined,
           lastLoginAt: row.LastLoginAt ? new Date(row.LastLoginAt).toISOString() : undefined,
         };
@@ -1975,7 +1988,13 @@ async function findUser(username: string): Promise<User | null> {
 
   // Fallback to in-memory db
   const memUser = db.users.find((u) => u.username.toLowerCase() === normUsername);
-  return memUser || null;
+  if (memUser) {
+    return {
+      ...memUser,
+      role: normalizeRole(memUser.role),
+    };
+  }
+  return null;
 }
 
 async function getAllUsers(): Promise<User[]> {
@@ -1987,7 +2006,7 @@ async function getAllUsers(): Promise<User[]> {
         id: row.Id,
         username: row.Username,
         fullName: row.FullName || row.Username,
-        role: row.Role || 'Admin',
+        role: normalizeRole(row.Role),
         createdAt: row.CreatedAt ? new Date(row.CreatedAt).toISOString() : undefined,
         lastLoginAt: row.LastLoginAt ? new Date(row.LastLoginAt).toISOString() : undefined,
       }));
@@ -2003,14 +2022,17 @@ async function getAllUsers(): Promise<User[]> {
     }
   }
 
-  return db.users.map(({ passwordHash, ...u }) => u);
+  return db.users.map(({ passwordHash, ...u }) => ({
+    ...u,
+    role: normalizeRole(u.role),
+  }));
 }
 
 async function createUser(userData: { username: string; password: string; fullName?: string; role?: string }): Promise<User> {
   const normUsername = userData.username.trim();
   const pwdHash = hashPassword(userData.password);
   const fullName = userData.fullName?.trim() || normUsername;
-  const role = userData.role?.trim() || 'Admin';
+  const role = normalizeRole(userData.role);
   const nowIso = new Date().toISOString();
 
   const pool = await getMssqlPool();
@@ -2068,7 +2090,7 @@ async function updateUserPassword(username: string, newPassword: string): Promis
 
 async function updateUserRole(username: string, newRole: string): Promise<boolean> {
   const normUsername = username.trim();
-  const role = newRole.trim() || 'Admin';
+  const role = normalizeRole(newRole);
 
   const pool = await getMssqlPool();
   if (pool) {

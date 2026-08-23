@@ -137,7 +137,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   const [newUsername, setNewUsername] = useState('');
   const [newUserPassword, setNewUserPassword] = useState('');
   const [newUserFullName, setNewUserFullName] = useState('');
-  const [newUserRole, setNewUserRole] = useState('Admin');
+  const [newUserRole, setNewUserRole] = useState('Staff');
   const [userMsg, setUserMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Change Password state for selected user
@@ -2295,9 +2295,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                         onChange={(e) => setNewUserRole(e.target.value)}
                         className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-xs text-slate-900 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
                       >
-                        <option value="Admin">Admin (Full Access)</option>
-                        <option value="Shipping Manager">Shipping Manager</option>
-                        <option value="Warehouse Operator">Warehouse Operator</option>
+                        <option value="Admin">Admin (Full Access &amp; Settings)</option>
+                        <option value="Staff">Staff (Shipping, Labels &amp; Rates)</option>
                       </select>
                     </div>
 
@@ -2388,20 +2387,17 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                           <td className="px-4 py-3 text-slate-600">{user.fullName || '—'}</td>
                           <td className="px-4 py-3">
                             <select
-                              value={user.role || 'Admin'}
+                              value={user.role === 'Admin' ? 'Admin' : 'Staff'}
                               onChange={(e) => handleUpdateUserRole(user.username, e.target.value)}
                               className={`px-2.5 py-1 rounded-md text-xs font-semibold border cursor-pointer focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm transition-colors ${
                                 user.role === 'Admin'
                                   ? 'bg-purple-50 text-purple-900 border-purple-200 hover:bg-purple-100'
-                                  : user.role === 'Shipping Manager'
-                                  ? 'bg-sky-50 text-sky-900 border-sky-200 hover:bg-sky-100'
-                                  : 'bg-slate-50 text-slate-900 border-slate-200 hover:bg-slate-100'
+                                  : 'bg-sky-50 text-sky-900 border-sky-200 hover:bg-sky-100'
                               }`}
                               title="Click to update user role in database"
                             >
-                              <option value="Admin">Admin (Full Access)</option>
-                              <option value="Shipping Manager">Shipping Manager</option>
-                              <option value="Warehouse Operator">Warehouse Operator</option>
+                              <option value="Admin">Admin</option>
+                              <option value="Staff">Staff</option>
                             </select>
                           </td>
                           <td className="px-4 py-3 text-slate-500 font-mono text-[11px]">
