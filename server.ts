@@ -240,6 +240,7 @@ async function testMssqlConnection(config: {
     serverPort = parseInt(parts[1], 10) || serverPort;
   }
 
+  let pool: sql.ConnectionPool | null = null;
   try {
     const sqlConfig: sql.config = {
       server: serverHost,
@@ -247,23 +248,22 @@ async function testMssqlConnection(config: {
       database: config.database,
       user: config.user,
       password: config.password || process.env.MSSQL_PASSWORD || '',
-      connectionTimeout: 15000,
-      requestTimeout: 20000,
+      connectionTimeout: 30000,
+      requestTimeout: 45000,
       options: {
         encrypt: config.encrypt ?? false,
         trustServerCertificate: true,
-        connectTimeout: 15000,
-        requestTimeout: 20000,
-        cancelTimeout: 5000,
+        connectTimeout: 30000,
+        requestTimeout: 45000,
+        cancelTimeout: 10000,
         enableArithAbort: true,
         abortTransactionOnError: false,
       },
     };
 
-    const pool = new sql.ConnectionPool(sqlConfig);
+    pool = new sql.ConnectionPool(sqlConfig);
     await pool.connect();
     const result = await pool.request().query('SELECT @@VERSION as version');
-    await pool.close();
     const versionStr = (result.recordset[0]?.version as string)?.split('\n')[0] || 'MS SQL Server Connected';
     return {
       success: true,
@@ -276,11 +276,20 @@ async function testMssqlConnection(config: {
       success: false,
       message: `Failed to connect to MS SQL Server (${serverHost}:${serverPort}): ${errorMsg}`,
     };
+  } finally {
+    if (pool && pool.connected) {
+      try {
+        await pool.close();
+      } catch {}
+    }
   }
 }
 
 // MS SQL Active Connection Pool & Query Helpers
 let activeMssqlPool: sql.ConnectionPool | null = null;
+let poolConnectingPromise: Promise<sql.ConnectionPool | null> | null = null;
+let mssqlTablesEnsured = false;
+let ensureTablesPromise: Promise<void> | null = null;
 
 async function getMssqlPool(): Promise<sql.ConnectionPool | null> {
   if (!db.settings.mssqlServer || !db.settings.mssqlDatabase || !db.settings.mssqlUser) {
@@ -291,62 +300,76 @@ async function getMssqlPool(): Promise<sql.ConnectionPool | null> {
     return activeMssqlPool;
   }
 
-  let serverHost = db.settings.mssqlServer.trim();
-  let serverPort = db.settings.mssqlPort || 1433;
-
-  if (serverHost.includes(':')) {
-    const parts = serverHost.split(':');
-    serverHost = parts[0];
-    serverPort = parseInt(parts[1], 10) || serverPort;
-  } else if (serverHost.includes(',')) {
-    const parts = serverHost.split(',');
-    serverHost = parts[0];
-    serverPort = parseInt(parts[1], 10) || serverPort;
+  if (poolConnectingPromise) {
+    return poolConnectingPromise;
   }
 
-  const sqlConfig: sql.config = {
-    server: serverHost,
-    port: serverPort,
-    database: db.settings.mssqlDatabase,
-    user: db.settings.mssqlUser,
-    password: db.settings.mssqlPassword || process.env.MSSQL_PASSWORD || '',
-    connectionTimeout: 15000,
-    requestTimeout: 20000,
-    pool: {
-      max: 10,
-      min: 0,
-      idleTimeoutMillis: 30000,
-      acquireTimeoutMillis: 15000,
-    },
-    options: {
-      encrypt: db.settings.mssqlEncrypt ?? false,
-      trustServerCertificate: true,
-      connectTimeout: 15000,
-      requestTimeout: 20000,
-      cancelTimeout: 5000,
-      enableArithAbort: true,
-      abortTransactionOnError: false,
-    },
-  };
+  poolConnectingPromise = (async () => {
+    let serverHost = db.settings.mssqlServer.trim();
+    let serverPort = db.settings.mssqlPort || 1433;
 
-  try {
-    const pool = new sql.ConnectionPool(sqlConfig);
-    pool.on('error', (poolErr) => {
-      console.warn('[MSSQL Pool Error Handler]', poolErr?.message || poolErr);
-      activeMssqlPool = null;
+    if (serverHost.includes(':')) {
+      const parts = serverHost.split(':');
+      serverHost = parts[0];
+      serverPort = parseInt(parts[1], 10) || serverPort;
+    } else if (serverHost.includes(',')) {
+      const parts = serverHost.split(',');
+      serverHost = parts[0];
+      serverPort = parseInt(parts[1], 10) || serverPort;
+    }
+
+    const sqlConfig: sql.config = {
+      server: serverHost,
+      port: serverPort,
+      database: db.settings.mssqlDatabase,
+      user: db.settings.mssqlUser,
+      password: db.settings.mssqlPassword || process.env.MSSQL_PASSWORD || '',
+      connectionTimeout: 30000,
+      requestTimeout: 45000,
+      pool: {
+        max: 15,
+        min: 0,
+        idleTimeoutMillis: 60000,
+        acquireTimeoutMillis: 30000,
+      },
+      options: {
+        encrypt: db.settings.mssqlEncrypt ?? false,
+        trustServerCertificate: true,
+        connectTimeout: 30000,
+        requestTimeout: 45000,
+        cancelTimeout: 10000,
+        enableArithAbort: true,
+        abortTransactionOnError: false,
+      },
+    };
+
+    try {
+      const pool = new sql.ConnectionPool(sqlConfig);
+      pool.on('error', (poolErr) => {
+        console.warn('[MSSQL Pool Notice]', poolErr?.message || poolErr);
+        if (!pool.connected) {
+          activeMssqlPool = null;
+          mssqlTablesEnsured = false;
+          db.settings.mssqlConnected = false;
+        }
+      });
+      await pool.connect();
+      activeMssqlPool = pool;
+      db.settings.mssqlConnected = true;
+      db.settings.mssqlError = null;
+      return pool;
+    } catch (err: any) {
       db.settings.mssqlConnected = false;
-    });
-    await pool.connect();
-    activeMssqlPool = pool;
-    db.settings.mssqlConnected = true;
-    db.settings.mssqlError = null;
-    return pool;
-  } catch (err: any) {
-    db.settings.mssqlConnected = false;
-    db.settings.mssqlError = err?.message || String(err);
-    activeMssqlPool = null;
-    return null;
-  }
+      db.settings.mssqlError = err?.message || String(err);
+      activeMssqlPool = null;
+      mssqlTablesEnsured = false;
+      return null;
+    }
+  })().finally(() => {
+    poolConnectingPromise = null;
+  });
+
+  return poolConnectingPromise;
 }
 
 function hashPassword(password: string): string {
@@ -476,213 +499,194 @@ async function cloneShippingToDevTable(pool: sql.ConnectionPool): Promise<{ succ
 }
 
 // Ensure Database Tables Exist in MS SQL Server
-async function ensureMssqlTables(pool: sql.ConnectionPool) {
-  try {
-    // 1. Package reference table (User's [dbo].[Package])
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Package')
-      BEGIN
-          CREATE TABLE [dbo].[Package](
-              [Id] [int] IDENTITY(1,1) NOT NULL,
-              [Name] [nvarchar](100) NOT NULL,
-              [Length] [decimal](10, 2) NOT NULL,
-              [Width] [decimal](10, 2) NOT NULL,
-              [Height] [decimal](10, 2) NOT NULL,
-              [Weight] [decimal](10, 2) NOT NULL,
-              CONSTRAINT [PK_Package_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
-          );
-      END;
-    `);
+async function ensureMssqlTables(pool: sql.ConnectionPool): Promise<void> {
+  if (!pool || !pool.connected) return;
+  if (mssqlTablesEnsured) return;
 
-    // Check count in Package table; if empty and we have seed packages, populate MS SQL
-    const pkgCountRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Package]');
-    const pkgCount = pkgCountRes.recordset[0]?.cnt || 0;
-    if (pkgCount === 0 && db.packages.length > 0) {
-      console.log('[MSSQL] Table [dbo].[Package] empty. Seeding initial packages into MS SQL database...');
-      for (const pkg of db.packages) {
-        await savePackageToMssqlPool(pool, pkg);
+  if (ensureTablesPromise) {
+    return ensureTablesPromise;
+  }
+
+  ensureTablesPromise = (async () => {
+    try {
+      // 1. Create all missing tables & add missing columns in a single, unified SQL batch
+      const schemaBatch = `
+        -- 1. Package table
+        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Package')
+        BEGIN
+            CREATE TABLE [dbo].[Package](
+                [Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY CLUSTERED,
+                [Name] [nvarchar](100) NOT NULL,
+                [Length] [decimal](10, 2) NOT NULL,
+                [Width] [decimal](10, 2) NOT NULL,
+                [Height] [decimal](10, 2) NOT NULL,
+                [Weight] [decimal](10, 2) NOT NULL
+            );
+        END;
+
+        -- 2. Shipping table (Prod)
+        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Shipping')
+        BEGIN
+            CREATE TABLE [dbo].[Shipping](
+                [Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY CLUSTERED,
+                [name] [nvarchar](max) NULL,
+                [address1] [nvarchar](max) NULL,
+                [address2] [nvarchar](max) NULL,
+                [city] [nvarchar](max) NULL,
+                [state] [nvarchar](max) NULL,
+                [postalCode] [nvarchar](max) NULL,
+                [country] [nvarchar](max) NULL,
+                [phone] [nvarchar](max) NULL,
+                [email] [nvarchar](max) NULL,
+                [createdAt] [datetime2](7) NULL,
+                [OrderDetails] [nvarchar](max) NULL,
+                [receiptID] [nvarchar](max) NULL,
+                [Carrier] [nvarchar](max) NULL,
+                [Service] [nvarchar](max) NULL,
+                [trackingNumber] [nvarchar](max) NULL,
+                [status] [nvarchar](max) NULL,
+                [shippingCost] [decimal](18, 2) NULL,
+                [shippingDate] [datetime2](7) NULL,
+                [platform] [nvarchar](max) NULL,
+                [TotalWeight] [float] NOT NULL DEFAULT 16,
+                [box] [varchar](50) NULL,
+                [easypostShipmentId] [nvarchar](64) NULL,
+                [LabelData] [varbinary](max) NULL,
+                [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No'
+            );
+        END;
+
+        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'marketplacenotified')
+            ALTER TABLE [dbo].[Shipping] ADD [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No';
+        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'Carrier')
+            ALTER TABLE [dbo].[Shipping] ADD [Carrier] [nvarchar](max) NULL;
+        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'Service')
+            ALTER TABLE [dbo].[Shipping] ADD [Service] [nvarchar](max) NULL;
+        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'LabelData')
+            ALTER TABLE [dbo].[Shipping] ADD [LabelData] [varbinary](max) NULL;
+
+        -- 2b. shippingdev table (Dev)
+        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'shippingdev')
+        BEGIN
+            CREATE TABLE [dbo].[shippingdev](
+                [Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY CLUSTERED,
+                [name] [nvarchar](max) NULL,
+                [address1] [nvarchar](max) NULL,
+                [address2] [nvarchar](max) NULL,
+                [city] [nvarchar](max) NULL,
+                [state] [nvarchar](max) NULL,
+                [postalCode] [nvarchar](max) NULL,
+                [country] [nvarchar](max) NULL,
+                [phone] [nvarchar](max) NULL,
+                [email] [nvarchar](max) NULL,
+                [createdAt] [datetime2](7) NULL,
+                [OrderDetails] [nvarchar](max) NULL,
+                [receiptID] [nvarchar](max) NULL,
+                [Carrier] [nvarchar](max) NULL,
+                [Service] [nvarchar](max) NULL,
+                [trackingNumber] [nvarchar](max) NULL,
+                [status] [nvarchar](max) NULL,
+                [shippingCost] [decimal](18, 2) NULL,
+                [shippingDate] [datetime2](7) NULL,
+                [platform] [nvarchar](max) NULL,
+                [TotalWeight] [float] NOT NULL DEFAULT 16,
+                [box] [varchar](50) NULL,
+                [easypostShipmentId] [nvarchar](64) NULL,
+                [LabelData] [varbinary](max) NULL,
+                [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No'
+            );
+        END;
+
+        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'marketplacenotified')
+            ALTER TABLE [dbo].[shippingdev] ADD [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No';
+        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'Carrier')
+            ALTER TABLE [dbo].[shippingdev] ADD [Carrier] [nvarchar](max) NULL;
+        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'Service')
+            ALTER TABLE [dbo].[shippingdev] ADD [Service] [nvarchar](max) NULL;
+        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'LabelData')
+            ALTER TABLE [dbo].[shippingdev] ADD [LabelData] [varbinary](max) NULL;
+
+        -- 3. Configuration table
+        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Configuration')
+        BEGIN
+            CREATE TABLE [dbo].[Configuration](
+                [ConfigKey] [nvarchar](100) NOT NULL PRIMARY KEY,
+                [ConfigValue] [nvarchar](max) NULL
+            );
+        END;
+
+        -- 4. Users table
+        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Users')
+        BEGIN
+            CREATE TABLE [dbo].[Users](
+                [Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY CLUSTERED,
+                [Username] [nvarchar](100) NOT NULL UNIQUE,
+                [PasswordHash] [nvarchar](255) NOT NULL,
+                [FullName] [nvarchar](100) NULL,
+                [Role] [nvarchar](50) NOT NULL DEFAULT 'Admin',
+                [CreatedAt] [datetime2](7) NOT NULL DEFAULT GETDATE(),
+                [LastLoginAt] [datetime2](7) NULL
+            );
+        END;
+      `;
+
+      await pool.request().query(schemaBatch);
+
+      // Check count in Package table; if empty and we have seed packages, populate MS SQL
+      const pkgCountRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Package]');
+      const pkgCount = pkgCountRes.recordset[0]?.cnt || 0;
+      if (pkgCount === 0 && db.packages.length > 0) {
+        console.log('[MSSQL] Table [dbo].[Package] empty. Seeding initial packages into MS SQL database...');
+        for (const pkg of db.packages) {
+          await savePackageToMssqlPool(pool, pkg);
+        }
       }
-    }
 
-    // 2. Exact user Shipping orders table (Production: [dbo].[Shipping])
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Shipping')
-      BEGIN
-          CREATE TABLE [dbo].[Shipping](
-              [Id] [int] IDENTITY(1,1) NOT NULL,
-              [name] [nvarchar](max) NULL,
-              [address1] [nvarchar](max) NULL,
-              [address2] [nvarchar](max) NULL,
-              [city] [nvarchar](max) NULL,
-              [state] [nvarchar](max) NULL,
-              [postalCode] [nvarchar](max) NULL,
-              [country] [nvarchar](max) NULL,
-              [phone] [nvarchar](max) NULL,
-              [email] [nvarchar](max) NULL,
-              [createdAt] [datetime2](7) NULL,
-              [OrderDetails] [nvarchar](max) NULL,
-              [receiptID] [nvarchar](max) NULL,
-              [Carrier] [nvarchar](max) NULL,
-              [Service] [nvarchar](max) NULL,
-              [trackingNumber] [nvarchar](max) NULL,
-              [status] [nvarchar](max) NULL,
-              [shippingCost] [decimal](18, 2) NULL,
-              [shippingDate] [datetime2](7) NULL,
-              [platform] [nvarchar](max) NULL,
-              [TotalWeight] [float] NOT NULL DEFAULT 16,
-              [box] [varchar](50) NULL,
-              [easypostShipmentId] [nvarchar](64) NULL,
-              [LabelData] [varbinary](max) NULL,
-              [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No',
-              CONSTRAINT [PK_Shipping_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
-          );
-      END;
-    `);
-
-    // Add required columns to [dbo].[Shipping] if they do not exist
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'marketplacenotified')
-      BEGIN
-          ALTER TABLE [dbo].[Shipping] ADD [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No';
-      END;
-      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'Carrier')
-      BEGIN
-          ALTER TABLE [dbo].[Shipping] ADD [Carrier] [nvarchar](max) NULL;
-      END;
-      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'Service')
-      BEGIN
-          ALTER TABLE [dbo].[Shipping] ADD [Service] [nvarchar](max) NULL;
-      END;
-      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'LabelData')
-      BEGIN
-          ALTER TABLE [dbo].[Shipping] ADD [LabelData] [varbinary](max) NULL;
-      END;
-    `);
-
-    // 2b. Development Shipping Table (Dev: [dbo].[shippingdev]) - Ensure schema exists without automatic cloning
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'shippingdev')
-      BEGIN
-          CREATE TABLE [dbo].[shippingdev](
-              [Id] [int] IDENTITY(1,1) NOT NULL,
-              [name] [nvarchar](max) NULL,
-              [address1] [nvarchar](max) NULL,
-              [address2] [nvarchar](max) NULL,
-              [city] [nvarchar](max) NULL,
-              [state] [nvarchar](max) NULL,
-              [postalCode] [nvarchar](max) NULL,
-              [country] [nvarchar](max) NULL,
-              [phone] [nvarchar](max) NULL,
-              [email] [nvarchar](max) NULL,
-              [createdAt] [datetime2](7) NULL,
-              [OrderDetails] [nvarchar](max) NULL,
-              [receiptID] [nvarchar](max) NULL,
-              [Carrier] [nvarchar](max) NULL,
-              [Service] [nvarchar](max) NULL,
-              [trackingNumber] [nvarchar](max) NULL,
-              [status] [nvarchar](max) NULL,
-              [shippingCost] [decimal](18, 2) NULL,
-              [shippingDate] [datetime2](7) NULL,
-              [platform] [nvarchar](max) NULL,
-              [TotalWeight] [float] NOT NULL DEFAULT 16,
-              [box] [varchar](50) NULL,
-              [easypostShipmentId] [nvarchar](64) NULL,
-              [LabelData] [varbinary](max) NULL,
-              [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No',
-              CONSTRAINT [PK_shippingdev_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
-          );
-      END;
-      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'marketplacenotified')
-      BEGIN
-          ALTER TABLE [dbo].[shippingdev] ADD [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No';
-      END;
-      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'Carrier')
-      BEGIN
-          ALTER TABLE [dbo].[shippingdev] ADD [Carrier] [nvarchar](max) NULL;
-      END;
-      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'Service')
-      BEGIN
-          ALTER TABLE [dbo].[shippingdev] ADD [Service] [nvarchar](max) NULL;
-      END;
-      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'LabelData')
-      BEGIN
-          ALTER TABLE [dbo].[shippingdev] ADD [LabelData] [varbinary](max) NULL;
-      END;
-    `);
-
-    // 3. Configuration / Settings Table (Shared across environments)
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Configuration')
-      BEGIN
-          CREATE TABLE [dbo].[Configuration](
-              [ConfigKey] [nvarchar](100) NOT NULL PRIMARY KEY,
-              [ConfigValue] [nvarchar](max) NULL
-          );
-      END;
-    `);
-
-    // Check count in active table; if empty and we have seed orders, populate MS SQL
-    const activeTable = getShippingTableName();
-    const countRes = await pool.request().query(`SELECT COUNT(*) as cnt FROM ${activeTable}`);
-    const orderCount = countRes.recordset[0]?.cnt || 0;
-    if (orderCount === 0 && db.orders.length > 0) {
-      console.log(`[MSSQL] Table ${activeTable} empty. Seeding initial orders into MS SQL database...`);
-      for (const order of db.orders) {
-        await saveOrderToMssqlPool(pool, order);
+      // Check count in active shipping table; if empty and we have seed orders, populate MS SQL
+      const activeTable = getShippingTableName();
+      const countRes = await pool.request().query(`SELECT COUNT(*) as cnt FROM ${activeTable}`);
+      const orderCount = countRes.recordset[0]?.cnt || 0;
+      if (orderCount === 0 && db.orders.length > 0) {
+        console.log(`[MSSQL] Table ${activeTable} empty. Seeding initial orders into MS SQL database...`);
+        for (const order of db.orders) {
+          await saveOrderToMssqlPool(pool, order);
+        }
       }
-    }
 
-    // Seed/sync settings to MS SQL Configuration table if empty
-    const cfgCountRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Configuration]');
-    const cfgCount = cfgCountRes.recordset[0]?.cnt || 0;
-    if (cfgCount === 0 && db.settings) {
-      console.log('[MSSQL] Table [dbo].[Configuration] empty. Writing initial settings into MS SQL database...');
-      await saveSettingsToMssqlPool(pool, db.settings);
-    }
-
-    // 4. Users Credentials Security Table (Shared across environments)
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Users')
-      BEGIN
-          CREATE TABLE [dbo].[Users](
-              [Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
-              [Username] [nvarchar](100) NOT NULL UNIQUE,
-              [PasswordHash] [nvarchar](255) NOT NULL,
-              [FullName] [nvarchar](100) NULL,
-              [Role] [nvarchar](50) NOT NULL DEFAULT 'Admin',
-              [CreatedAt] [datetime2](7) NOT NULL DEFAULT GETDATE(),
-              [LastLoginAt] [datetime2](7) NULL
-          );
-      END;
-    `);
+      // Check count in Configuration table; if empty and we have settings, populate MS SQL
+      const cfgCountRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Configuration]');
+      const cfgCount = cfgCountRes.recordset[0]?.cnt || 0;
+      if (cfgCount === 0 && db.settings) {
+        console.log('[MSSQL] Table [dbo].[Configuration] empty. Writing initial settings into MS SQL database...');
+        await saveSettingsToMssqlPool(pool, db.settings);
+      }
 
       // Check count in Users table; if empty, seed default admin user
-    const userCountRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Users]');
-    const userCount = userCountRes.recordset[0]?.cnt || 0;
-    if (userCount === 0) {
-      console.log('[MSSQL] Table [dbo].[Users] empty. Seeding initial default user into MS SQL database...');
-      const adminHash = hashPassword('shipstation123');
-      await pool.request()
-        .input('usr', sql.NVarChar, 'admin')
-        .input('hash', sql.NVarChar, adminHash)
-        .input('fn', sql.NVarChar, 'System Administrator')
-        .input('role', sql.NVarChar, 'Admin')
-        .query(`
-          INSERT INTO [dbo].[Users] ([Username], [PasswordHash], [FullName], [Role], [CreatedAt])
-          VALUES (@usr, @hash, @fn, @role, GETDATE());
-        `);
-    } else {
-      // Migrate any legacy roles to Staff
-      await pool.request().query(`
-        UPDATE [dbo].[Users] 
-        SET [Role] = 'Staff' 
-        WHERE [Role] IN ('Shipping Manager', 'Warehouse Operator', 'shipping manager', 'warehouse operator');
-      `).catch(() => {});
-    }
+      const userCountRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Users]');
+      const userCount = userCountRes.recordset[0]?.cnt || 0;
+      if (userCount === 0) {
+        console.log('[MSSQL] Table [dbo].[Users] empty. Seeding initial default user into MS SQL database...');
+        const adminHash = hashPassword('shipstation123');
+        await pool.request()
+          .input('usr', sql.NVarChar, 'admin')
+          .input('hash', sql.NVarChar, adminHash)
+          .input('fn', sql.NVarChar, 'System Administrator')
+          .input('role', sql.NVarChar, 'Admin')
+          .query(`
+            INSERT INTO [dbo].[Users] ([Username], [PasswordHash], [FullName], [Role], [CreatedAt])
+            VALUES (@usr, @hash, @fn, @role, GETDATE());
+          `);
+      }
 
-  } catch (err) {
-    console.error('[MSSQL] Error verifying/creating MS SQL tables:', err);
-  }
+      mssqlTablesEnsured = true;
+    } catch (err) {
+      console.error('[MSSQL] Error verifying/creating MS SQL tables:', err);
+    }
+  })().finally(() => {
+    ensureTablesPromise = null;
+  });
+
+  return ensureTablesPromise;
 }
 
 // Disk Persistence for Settings
@@ -733,26 +737,30 @@ function getReturnAddress(settings?: AppSetting): ReturnAddress {
 
 // Save or Update Configuration settings key-value entries in MS SQL Server [dbo].[Configuration]
 async function saveSettingsToMssqlPool(pool: sql.ConnectionPool, settings: AppSetting) {
+  if (!pool || !pool.connected) return;
   try {
     const keys = Object.keys(settings);
-    for (const key of keys) {
+    if (keys.length === 0) return;
+
+    const req = pool.request();
+    let batchSql = '';
+    keys.forEach((key, index) => {
       const rawVal = (settings as any)[key];
       const valStr = typeof rawVal === 'object' ? JSON.stringify(rawVal) : String(rawVal ?? '');
-      
-      const req = pool.request();
-      req.input('key', sql.NVarChar(100), key);
-      req.input('val', sql.NVarChar(sql.MAX), valStr);
-      await req.query(`
-        IF EXISTS (SELECT 1 FROM [dbo].[Configuration] WHERE [ConfigKey] = @key)
-        BEGIN
-            UPDATE [dbo].[Configuration] SET [ConfigValue] = @val WHERE [ConfigKey] = @key;
-        END
-        ELSE
-        BEGIN
-            INSERT INTO [dbo].[Configuration] ([ConfigKey], [ConfigValue]) VALUES (@key, @val);
-        END
-      `);
-    }
+      req.input(`k_${index}`, sql.NVarChar(100), key);
+      req.input(`v_${index}`, sql.NVarChar(sql.MAX), valStr);
+      batchSql += `
+        MERGE [dbo].[Configuration] AS target
+        USING (SELECT @k_${index} AS ConfigKey, @v_${index} AS ConfigValue) AS source
+        ON (target.ConfigKey = source.ConfigKey)
+        WHEN MATCHED THEN
+            UPDATE SET ConfigValue = source.ConfigValue
+        WHEN NOT MATCHED THEN
+            INSERT (ConfigKey, ConfigValue) VALUES (source.ConfigKey, source.ConfigValue);
+      `;
+    });
+
+    await req.query(batchSql);
     console.log('[MSSQL] Successfully saved settings key-values to [dbo].[Configuration] table.');
   } catch (err) {
     console.error('[MSSQL] Error in saveSettingsToMssqlPool:', err);
@@ -2557,6 +2565,96 @@ app.post('/api/easypost/test-connection', async (req, res) => {
     res.status(500).json({
       success: false,
       message: `Failed to connect to EasyPost API servers: ${err?.message || String(err)}`,
+    });
+  }
+});
+
+// EasyPost Wallet Balance Endpoint
+app.get('/api/easypost/wallet-balance', async (req, res) => {
+  const settings = db.settings;
+  const apiKey = getActiveEasyPostKey(settings);
+  const isProd = getActiveAppEnv(settings) === 'prod';
+
+  if (!apiKey || apiKey.length < 5) {
+    return res.json({
+      success: false,
+      configured: false,
+      authenticated: false,
+      balance: null,
+      formattedBalance: '$0.00',
+      mode: isProd ? 'prod' : 'dev',
+      message: 'EasyPost API Key is not configured.',
+    });
+  }
+
+  try {
+    const authHeader = `Basic ${Buffer.from(apiKey + ':').toString('base64')}`;
+
+    // Query EasyPost authenticated user or users endpoint
+    let epRes = await fetch('https://api.easypost.com/v2/users/authenticated_user', {
+      method: 'GET',
+      headers: { Authorization: authHeader },
+    });
+
+    if (epRes.status === 404 || !epRes.ok) {
+      epRes = await fetch('https://api.easypost.com/v2/users', {
+        method: 'GET',
+        headers: { Authorization: authHeader },
+      });
+    }
+
+    if (epRes.status === 401 || epRes.status === 403) {
+      return res.json({
+        success: false,
+        configured: true,
+        authenticated: false,
+        balance: null,
+        formattedBalance: '$0.00',
+        mode: isProd ? 'prod' : 'dev',
+        message: 'EasyPost Authentication Failed: Invalid API Key.',
+      });
+    }
+
+    if (!epRes.ok) {
+      const errData = await epRes.json().catch(() => ({}));
+      return res.json({
+        success: false,
+        configured: true,
+        authenticated: false,
+        balance: null,
+        formattedBalance: '$0.00',
+        mode: isProd ? 'prod' : 'dev',
+        message: errData.error?.message || `EasyPost returned HTTP ${epRes.status}`,
+      });
+    }
+
+    const userData = await epRes.json();
+    const userObj = userData.user || userData;
+    const rawBalance = userObj.balance !== undefined ? parseFloat(String(userObj.balance)) : 0;
+    const balance = isNaN(rawBalance) ? 0 : rawBalance;
+
+    res.json({
+      success: true,
+      configured: true,
+      authenticated: true,
+      balance: balance,
+      formattedBalance: `$${balance.toFixed(2)}`,
+      currency: 'USD',
+      userName: userObj.name || userObj.email || 'EasyPost Account',
+      userEmail: userObj.email,
+      rechargeAmount: userObj.recharge_amount ? parseFloat(String(userObj.recharge_amount)) : undefined,
+      hasBillingMethod: Boolean(userObj.has_billing_method),
+      mode: isProd ? 'prod' : 'dev',
+    });
+  } catch (err: any) {
+    res.json({
+      success: false,
+      configured: true,
+      authenticated: false,
+      balance: null,
+      formattedBalance: '$0.00',
+      mode: isProd ? 'prod' : 'dev',
+      message: `Could not reach EasyPost: ${err?.message || String(err)}`,
     });
   }
 });
@@ -4648,21 +4746,19 @@ async function startServer() {
         db.settings.mssqlError = testRes.success ? null : testRes.message;
         console.log(`[MSSQL] Connection status: ${testRes.success ? 'CONNECTED' : 'DISCONNECTED'}`);
         if (testRes.success) {
-          fetchOrdersFromMssql()
-            .then((orders) => {
+          getMssqlPool().then(async (pool) => {
+            if (pool) {
+              await ensureMssqlTables(pool);
+              const orders = await fetchOrdersFromMssql();
               if (orders) {
                 console.log(`[MSSQL] Pre-loaded ${orders.length} orders from MS SQL database.`);
               }
-            })
-            .catch((e) => console.error('[MSSQL] Error loading orders on start:', e));
-
-          fetchPackagesFromMssql()
-            .then((pkgs) => {
+              const pkgs = await fetchPackagesFromMssql();
               if (pkgs) {
                 console.log(`[MSSQL] Pre-loaded ${pkgs.length} packages from MS SQL database.`);
               }
-            })
-            .catch((e) => console.error('[MSSQL] Error loading packages on start:', e));
+            }
+          }).catch((e) => console.error('[MSSQL] Error loading data on start:', e));
         } else {
           console.log(`[MSSQL] Details: ${testRes.message}`);
         }

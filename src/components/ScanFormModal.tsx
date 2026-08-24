@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ShippingOrder, AppSetting, ScanFormType, formatOrderId } from '../types';
+import { printPdfToQZ, getDefaultQZPrinter } from '../lib/qzTray';
 import {
   FileText,
   Printer,
@@ -16,6 +17,8 @@ import {
   Building,
   ExternalLink,
   Eye,
+  Zap,
+  Loader2,
 } from 'lucide-react';
 
 interface ScanFormModalProps {
@@ -23,6 +26,7 @@ interface ScanFormModalProps {
   settings: AppSetting;
   onClose: () => void;
   onScanFormCreated?: (scanForm: ScanFormType) => void;
+  onEasyPostError?: (err: { title: string; message: string; details?: string }) => void;
 }
 
 export const ScanFormModal: React.FC<ScanFormModalProps> = ({
@@ -30,6 +34,7 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
   settings,
   onClose,
   onScanFormCreated,
+  onEasyPostError,
 }) => {
   const [activeTab, setActiveTab] = useState<'create' | 'history'>('create');
   const [manifestDate, setManifestDate] = useState<string>(new Date().toISOString().slice(0, 10));
@@ -38,6 +43,8 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copiedBarcode, setCopiedBarcode] = useState<boolean>(false);
+  const [qzPrinting, setQzPrinting] = useState<boolean>(false);
+  const [qzStatus, setQzStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
 
   // Load SCAN Form history from server
   const fetchHistory = async () => {
@@ -137,6 +144,68 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
 
   const handlePrint = () => {
     window.print();
+  };
+
+  // Direct Hardware Print via QZ Tray using 8.5x11 Letter Packing Slip Printer
+  const handleDirectQZPrintScanForm = async (scanForm?: ScanFormType | null) => {
+    const sf = scanForm || activeScanForm;
+    if (!sf) return;
+    setQzPrinting(true);
+    setQzStatus(null);
+    try {
+      // Use configured 8.5x11 Letter packing slip printer, or QZ Tray default printer
+      const packingSlipPrinter =
+        settings?.qzPrinterPackingSlip || (await getDefaultQZPrinter()) || '';
+
+      if (!packingSlipPrinter) {
+        setQzStatus({
+          type: 'error',
+          msg: 'No 8.5x11 Letter printer configured for packing slips. Please go to Settings > QZ Tray Hardware Printing and select your 8.5x11 Letter printer.',
+        });
+        return;
+      }
+
+      // Download SCAN Form PDF as ArrayBuffer
+      const pdfRes = await fetch(`/api/scan-forms/${sf.id}/download`);
+      if (!pdfRes.ok) {
+        throw new Error(`Failed to download SCAN Form PDF from server (HTTP ${pdfRes.status})`);
+      }
+      const buffer = await pdfRes.arrayBuffer();
+
+      // Convert ArrayBuffer to Base64
+      let binary = '';
+      const bytes = new Uint8Array(buffer);
+      const len = bytes.byteLength;
+      for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const base64Pdf = window.btoa(binary);
+
+      // Print PDF directly to 8.5x11 Letter document printer via QZ Tray
+      const result = await printPdfToQZ(packingSlipPrinter, base64Pdf, {
+        scaleContent: true,
+        rasterize: false,
+      });
+
+      if (result.success) {
+        setQzStatus({
+          type: 'success',
+          msg: `Printed USPS Form 5630 directly to 8.5x11 Letter printer "${packingSlipPrinter}" via QZ Tray!`,
+        });
+      } else {
+        setQzStatus({
+          type: 'error',
+          msg: result.message || 'Direct hardware print failed via QZ Tray.',
+        });
+      }
+    } catch (err: any) {
+      setQzStatus({
+        type: 'error',
+        msg: err?.message || 'QZ Tray direct print error.',
+      });
+    } finally {
+      setQzPrinting(false);
+    }
   };
 
   const handleCopyBarcode = () => {
@@ -245,6 +314,32 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
 
         {/* Main Body Section */}
         <div className="flex-1 overflow-y-auto p-5 space-y-5 bg-slate-50/50">
+          {/* QZ TRAY DIRECT PRINT STATUS NOTIFICATION */}
+          {qzStatus && (
+            <div
+              className={`p-3.5 rounded-xl text-xs flex items-center justify-between space-x-2 no-print ${
+                qzStatus.type === 'success'
+                  ? 'bg-emerald-50 border border-emerald-300 text-emerald-900'
+                  : 'bg-rose-50 border border-rose-300 text-rose-900'
+              }`}
+            >
+              <div className="flex items-center space-x-2">
+                {qzStatus.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                )}
+                <span className="font-semibold">{qzStatus.msg}</span>
+              </div>
+              <button
+                onClick={() => setQzStatus(null)}
+                className="text-slate-400 hover:text-slate-700 cursor-pointer text-xs"
+              >
+                &times;
+              </button>
+            </div>
+          )}
+
           {/* ERROR ALERT */}
           {errorMsg && (
             <div className="bg-rose-50 border border-rose-200 text-rose-800 p-3.5 rounded-xl text-xs flex items-center space-x-2 no-print">
@@ -270,21 +365,36 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
+                  {/* DIRECT PRINT BUTTON (8.5x11 Letter) */}
+                  <button
+                    onClick={() => handleDirectQZPrintScanForm(activeScanForm)}
+                    disabled={qzPrinting}
+                    className="px-3.5 py-1.5 bg-gradient-to-r from-emerald-600 to-teal-700 hover:from-emerald-700 hover:to-teal-800 text-white rounded-lg text-xs font-bold flex items-center space-x-1.5 shadow-sm transition-all cursor-pointer disabled:opacity-50"
+                    title={`Direct Print to 8.5x11 Letter printer: ${settings?.qzPrinterPackingSlip || 'Default System Printer'}`}
+                  >
+                    {qzPrinting ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-white" />
+                    ) : (
+                      <Zap className="w-4 h-4 text-amber-300 fill-amber-300" />
+                    )}
+                    <span>Direct Print (8.5x11 Letter)</span>
+                  </button>
+
                   <button
                     onClick={handlePrint}
                     className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold flex items-center space-x-1.5 shadow-sm transition-all cursor-pointer"
-                    title="Print the official Form 5630 SCAN Form"
+                    title="Print using standard browser print dialog"
                   >
                     <Printer className="w-4 h-4" />
-                    <span>Print Form</span>
+                    <span>Browser Print</span>
                   </button>
 
                   <button
                     onClick={() => handleDownloadPdf(activeScanForm)}
-                    className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center space-x-1.5 shadow-sm transition-all cursor-pointer"
+                    className="px-3.5 py-1.5 bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition-all cursor-pointer"
                     title="Download the official PDF file from EasyPost"
                   >
-                    <Download className="w-4 h-4" />
+                    <Download className="w-4 h-4 text-slate-600" />
                     <span>Download PDF</span>
                   </button>
 
@@ -603,11 +713,20 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
 
                         <div className="flex items-center space-x-2">
                           <button
+                            onClick={() => handleDirectQZPrintScanForm(sf)}
+                            disabled={qzPrinting}
+                            className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold flex items-center space-x-1 cursor-pointer disabled:opacity-50"
+                            title={`Direct Print to 8.5x11 Letter printer: ${settings?.qzPrinterPackingSlip || 'Default'}`}
+                          >
+                            <Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300" />
+                            <span>Direct Print</span>
+                          </button>
+                          <button
                             onClick={() => handleDownloadPdf(sf)}
-                            className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-lg text-xs font-semibold flex items-center space-x-1 cursor-pointer"
+                            className="px-2.5 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-semibold flex items-center space-x-1 cursor-pointer"
                             title="Download EasyPost SCAN Form PDF file"
                           >
-                            <Download className="w-3.5 h-3.5 text-emerald-700" />
+                            <Download className="w-3.5 h-3.5 text-slate-600" />
                             <span>Download PDF</span>
                           </button>
                           <button

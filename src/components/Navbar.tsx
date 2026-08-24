@@ -17,6 +17,8 @@ import {
   Layers,
   ShieldCheck,
   Code2,
+  Wallet,
+  RefreshCw,
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -34,6 +36,9 @@ interface NavbarProps {
   onLogout: () => void;
   onSyncMssql?: () => Promise<void>;
   currentUser?: { username: string; fullName?: string; role?: string } | null;
+  walletBalance?: number | null;
+  walletLoading?: boolean;
+  onRefreshWallet?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -51,6 +56,9 @@ export const Navbar: React.FC<NavbarProps> = ({
   onLogout,
   onSyncMssql,
   currentUser,
+  walletBalance,
+  walletLoading,
+  onRefreshWallet,
 }) => {
   const [isSyncing, setIsSyncing] = React.useState(false);
 
@@ -129,6 +137,37 @@ export const Navbar: React.FC<NavbarProps> = ({
                 {appEnv === 'prod' ? 'PRODUCTION KEY' : 'TEST KEY'}
               </strong>
             </span>
+          </div>
+
+          <span className="text-slate-800 hidden lg:inline">|</span>
+
+          {/* Shipping Wallet Balance Badge */}
+          <div
+            className="flex items-center space-x-1.5 bg-slate-900/90 px-2.5 py-0.5 rounded-lg border border-slate-700/80 text-[11px] shadow-xs"
+            title="EasyPost Shipping Wallet Balance"
+          >
+            <Wallet className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+            <span>
+              Wallet:{' '}
+              <strong className="text-emerald-300 font-mono font-bold">
+                {walletLoading
+                  ? '...'
+                  : walletBalance !== null && walletBalance !== undefined
+                  ? `$${walletBalance.toFixed(2)}`
+                  : '$0.00'}
+              </strong>
+            </span>
+            {onRefreshWallet && (
+              <button
+                type="button"
+                onClick={onRefreshWallet}
+                disabled={walletLoading}
+                className="ml-1 text-slate-400 hover:text-white transition-colors cursor-pointer disabled:opacity-50"
+                title="Refresh EasyPost Wallet Balance"
+              >
+                <RefreshCw className={`w-3 h-3 ${walletLoading ? 'animate-spin' : ''}`} />
+              </button>
+            )}
           </div>
         </div>
 

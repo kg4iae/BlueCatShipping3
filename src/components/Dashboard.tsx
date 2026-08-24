@@ -155,7 +155,35 @@ export const Dashboard: React.FC<DashboardProps> = ({
     );
   };
 
+  // Calculate proposed shipping cost for an order (matching Carrier Rates column)
+  const getOrderCarrierRate = (order: ShippingOrder): number => {
+    const rates = getCalculatedRatesForOrder(
+      order,
+      settings?.defaultDomesticCarrier,
+      settings?.defaultDomesticService
+    );
+    const matchedRate =
+      rates.find(
+        (r) =>
+          r.carrier === order.carrier &&
+          order.serviceLevel &&
+          r.serviceLevel.toLowerCase().includes(order.serviceLevel.toLowerCase())
+      ) ||
+      rates.find((r) => r.isRecommended) ||
+      rates[0];
+
+    return order.shippingCost !== undefined && order.shippingCost > 0
+      ? order.shippingCost
+      : matchedRate?.rate ?? 0;
+  };
+
   const selectableOrders = filteredOrders;
+
+  // Selected orders & total shipping cost calculation based on proposed carrier rates
+  const selectedOrders = orders.filter((o) => selectedOrderIds.includes(o.id));
+  const totalSelectedCost = selectedOrders.reduce((sum, o) => {
+    return sum + getOrderCarrierRate(o);
+  }, 0);
 
   const toggleSelectAll = () => {
     if (selectedOrderIds.length === selectableOrders.length) {
@@ -321,26 +349,38 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
         {/* Search Bar & Multiselect Counter */}
         <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-          <div className="relative flex-1 max-w-md">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-            <input
-              type="text"
-              placeholder="Search by Order #, Recipient Name, Company, City, or ZIP..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white"
-            />
+          <div className="flex flex-wrap items-center gap-3 flex-1 max-w-2xl">
+            <div className="relative flex-1 min-w-[240px] max-w-md">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+              <input
+                type="text"
+                placeholder="Search by Order #, Recipient Name, Company, City, or ZIP..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white"
+              />
+            </div>
+
+            {selectedOrderIds.length > 0 && (
+              <div className="flex items-center space-x-2 bg-indigo-50 border border-indigo-200 text-indigo-900 px-3 py-1.5 rounded-lg text-xs font-semibold shadow-xs">
+                <span className="bg-indigo-600 text-white font-bold px-2 py-0.5 rounded text-[11px]">
+                  {selectedOrderIds.length} Selected
+                </span>
+                <span className="text-indigo-300 font-normal">|</span>
+                <span className="text-slate-700">
+                  Total Cost:{' '}
+                  <strong className="font-bold text-indigo-950 font-mono text-xs sm:text-sm">
+                    ${totalSelectedCost.toFixed(2)}
+                  </strong>
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="text-xs text-slate-500 flex items-center space-x-2">
             <span>
               Showing <strong className="text-slate-800">{filteredOrders.length}</strong> records synced from MS SQL
             </span>
-            {selectedOrderIds.length > 0 && (
-              <span className="bg-indigo-100 text-indigo-800 font-bold px-2 py-0.5 rounded text-[11px]">
-                {selectedOrderIds.length} Selected
-              </span>
-            )}
           </div>
         </div>
 
@@ -538,18 +578,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       {/* Carrier Rates / Shipping Cost */}
                       <td className="py-3 px-3">
                         {(() => {
-                          const rates = getCalculatedRatesForOrder(order, settings?.defaultDomesticCarrier, settings?.defaultDomesticService);
-                          const matchedRate = rates.find(
-                            (r) =>
-                              r.carrier === order.carrier &&
-                              order.serviceLevel &&
-                              r.serviceLevel.toLowerCase().includes(order.serviceLevel.toLowerCase())
-                          ) || rates.find((r) => r.isRecommended) || rates[0];
-
-                          const cost = order.shippingCost !== undefined && order.shippingCost > 0
-                            ? order.shippingCost
-                            : matchedRate?.rate ?? 0;
-
+                          const cost = getOrderCarrierRate(order);
                           const carrierDisplay = order.carrier || (countryInfo ? (settings?.defaultInternationalCarrier || 'UPS') : (settings?.defaultDomesticCarrier || 'USPS'));
                           const serviceDisplay = order.serviceLevel || (countryInfo ? (settings?.defaultInternationalService || 'UPS Worldwide Expedited') : (settings?.defaultDomesticService || 'Priority'));
 

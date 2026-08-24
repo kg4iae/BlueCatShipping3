@@ -15,6 +15,7 @@ import { ReshipModal } from './components/ReshipModal';
 import { ScanFormModal } from './components/ScanFormModal';
 import { Reports } from './components/Reports';
 import { SettingsPage } from './components/SettingsPage';
+import { EasyPostErrorModal, EasyPostErrorInfo } from './components/EasyPostErrorModal';
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
 
 export default function App() {
@@ -36,6 +37,13 @@ export default function App() {
   const [loading, setLoading] = useState<boolean>(true);
   const [hasValidatedOnLoad, setHasValidatedOnLoad] = useState<boolean>(false);
 
+  // EasyPost Wallet Balance state
+  const [walletBalance, setWalletBalance] = useState<number | null>(null);
+  const [walletLoading, setWalletLoading] = useState<boolean>(false);
+
+  // EasyPost Error Modal state (modal does NOT auto-close)
+  const [easyPostError, setEasyPostError] = useState<EasyPostErrorInfo | null>(null);
+
   // Modals state
   const [addressFixOrder, setAddressFixOrder] = useState<ShippingOrder | null>(null);
   const [weightCorrectionOrder, setWeightCorrectionOrder] = useState<ShippingOrder | null>(null);
@@ -55,6 +63,24 @@ export default function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
+  // Fetch live wallet balance from EasyPost
+  const fetchWalletBalance = async () => {
+    try {
+      setWalletLoading(true);
+      const res = await fetch('/api/easypost/wallet-balance');
+      const data = await res.json();
+      if (data.success && typeof data.balance === 'number') {
+        setWalletBalance(data.balance);
+      } else {
+        setWalletBalance(0);
+      }
+    } catch (err) {
+      console.warn('Could not fetch EasyPost wallet balance:', err);
+    } finally {
+      setWalletLoading(false);
+    }
+  };
+
   // Initial Data Fetch
   const refreshAllData = async () => {
     try {
@@ -72,6 +98,9 @@ export default function App() {
       setOrders(ordersData);
       setPackages(pkgsData);
       setSettings(settingsData);
+
+      // Fetch EasyPost wallet balance
+      fetchWalletBalance();
 
       // Requirement: Once the dashboard is loaded, it should validate addresses with EasyPost and report any issues
       if (!hasValidatedOnLoad && Array.isArray(ordersData)) {
@@ -129,12 +158,24 @@ export default function App() {
         body: JSON.stringify({ orderIds }),
       });
       const data = await res.json();
+      if (!res.ok) {
+        setEasyPostError({
+          title: 'EasyPost Address Validation Error',
+          message: data.error || 'Failed to validate addresses with EasyPost.',
+          problemOrders: data.problemOrders,
+          statusCode: res.status,
+        });
+        return;
+      }
       if (data.orders) {
         setOrders(data.orders);
         showToast(data.message, 'success');
       }
-    } catch (err) {
-      showToast('Failed to run address validation with EasyPost.', 'error');
+    } catch (err: any) {
+      setEasyPostError({
+        title: 'EasyPost Connection Error',
+        message: err?.message || 'Failed to connect to EasyPost Address Validation service.',
+      });
     }
   };
 
@@ -244,7 +285,12 @@ export default function App() {
       const data = await res.json();
 
       if (!res.ok) {
-        showToast(data.error || 'Failed to generate labels.', 'error');
+        setEasyPostError({
+          title: 'EasyPost Batch Label Purchase Failed',
+          message: data.error || 'Failed to generate labels via EasyPost API.',
+          problemOrders: data.problemOrders,
+          statusCode: res.status,
+        });
         return;
       }
 
@@ -258,12 +304,17 @@ export default function App() {
           })
         );
 
+        fetchWalletBalance();
+
         // Open PDF batch printer modal
         setPrintOrders(updated);
         showToast(`Purchased ${updated.length} EasyPost label(s) & packing slip(s) ($${data.totalCost || 0} written to DB)!`, 'success');
       }
-    } catch (err) {
-      showToast('Failed to connect to EasyPost label creation service.', 'error');
+    } catch (err: any) {
+      setEasyPostError({
+        title: 'EasyPost Connection Error',
+        message: err?.message || 'Failed to connect to EasyPost label creation service.',
+      });
     }
   };
 
@@ -282,7 +333,11 @@ export default function App() {
       });
       const data = await res.json();
       if (!res.ok) {
-        showToast(data.error || 'Failed to purchase EasyPost label.', 'error');
+        setEasyPostError({
+          title: 'EasyPost Label Purchase Error',
+          message: data.error || 'Failed to purchase EasyPost label for this order.',
+          statusCode: res.status,
+        });
         return;
       }
       if (data.order) {
@@ -291,10 +346,14 @@ export default function App() {
           setOrderDetailOrder(data.order);
         }
         setPurchasedLabelOrder(data.order);
+        fetchWalletBalance();
         showToast(data.message || `Purchased EasyPost label for Order #${data.order.orderNumber}!`, 'success');
       }
-    } catch (err) {
-      showToast('Failed to purchase label from EasyPost.', 'error');
+    } catch (err: any) {
+      setEasyPostError({
+        title: 'EasyPost API Error',
+        message: err?.message || 'Failed to purchase label from EasyPost.',
+      });
     }
   };
 
@@ -308,7 +367,11 @@ export default function App() {
       });
       const data = await res.json();
       if (!res.ok) {
-        showToast(data.error || 'Failed to purchase batch labels.', 'error');
+        setEasyPostError({
+          title: 'EasyPost Batch Purchase Error',
+          message: data.error || 'Failed to purchase batch labels.',
+          statusCode: res.status,
+        });
         return;
       }
       const updated = data.processedOrders || data.orders;
@@ -319,11 +382,15 @@ export default function App() {
             return match || o;
           })
         );
+        fetchWalletBalance();
         setPrintOrders(updated);
         showToast(data.message || `Purchased EasyPost labels for ${updated.length} order(s)!`, 'success');
       }
-    } catch (err) {
-      showToast('Failed to purchase batch labels from EasyPost.', 'error');
+    } catch (err: any) {
+      setEasyPostError({
+        title: 'EasyPost Batch Error',
+        message: err?.message || 'Failed to purchase batch labels from EasyPost.',
+      });
     }
   };
 
@@ -336,13 +403,24 @@ export default function App() {
         body: JSON.stringify({ reason }),
       });
       const data = await res.json();
-      if (data.success && data.order) {
+      if (!res.ok || !data.success) {
+        setEasyPostError({
+          title: 'EasyPost Re-Shipment Error',
+          message: data.error || 'Failed to create re-shipment order.',
+          statusCode: res.status,
+        });
+        return;
+      }
+      if (data.order) {
         setOrders((prev) => [data.order, ...prev]);
         setActiveTab('dashboard');
         showToast(data.message, 'success');
       }
-    } catch (err) {
-      showToast('Failed to create re-shipment order.', 'error');
+    } catch (err: any) {
+      setEasyPostError({
+        title: 'Re-Shipment Error',
+        message: err?.message || 'Failed to create re-shipment order.',
+      });
     }
   };
 
@@ -362,12 +440,13 @@ export default function App() {
       if (data.orders) {
         setOrders(data.orders);
       }
+      fetchWalletBalance();
       showToast(
         data.message || `Switched to ${targetEnv.toUpperCase()} mode (Table: ${data.activeTable || (targetEnv === 'prod' ? '[dbo].[Shipping]' : '[dbo].[shippingdev]')})`,
         'info'
       );
     } catch (err) {
-      showToast('Failed to switch environment mode.', 'error');
+      showToast('Failed to switch database / EasyPost environment.', 'error');
     } finally {
       setLoading(false);
     }
@@ -495,6 +574,9 @@ export default function App() {
         onLogout={() => setIsAuthenticated(false)}
         onSyncMssql={handleSyncMssql}
         currentUser={currentUser}
+        walletBalance={walletBalance}
+        walletLoading={walletLoading}
+        onRefreshWallet={fetchWalletBalance}
       />
 
 
@@ -632,6 +714,14 @@ export default function App() {
           order={reshipTargetOrder}
           onClose={() => setReshipTargetOrder(null)}
           onConfirmReship={handleConfirmReship}
+        />
+      )}
+
+      {/* EasyPost Error Modal Window (Never auto-closes) */}
+      {easyPostError && (
+        <EasyPostErrorModal
+          error={easyPostError}
+          onClose={() => setEasyPostError(null)}
         />
       )}
 
