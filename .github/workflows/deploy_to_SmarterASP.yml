@@ -1,0 +1,52 @@
+name: Deploy Node.js App to SmarterASP.NET
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 1. Install ALL dependencies (devDependencies included for Vite & esbuild)
+      - name: Install dependencies
+        run: npm install
+
+      # 2. Compile React (Vite) and Node Server (esbuild) into dist/
+      - name: Build Application
+        run: npm run build
+
+      # 3. Strip devDependencies so only production runtime modules remain
+      - name: Prune dev dependencies
+        run: npm prune --omit=dev
+        
+      # 4. Deploy only production files via FTP
+      - name: Deploy to SmarterASP.NET via FTP
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.4
+        with:
+          server: ${{ secrets.SERVER_COMPUTER_NAME }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          port: 21
+          local-dir: ./
+          server-dir: ${{ secrets.WEBSITE_NAME }}
+          state-name: .ftp-deploy-sync-state.json
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/.github/**
+            **/.env*
+            **/.vscode/**
+            **/tsconfig*.json
+            **/vite.config.ts
+            **/eslint*
+            **/README*
