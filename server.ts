@@ -391,15 +391,15 @@ function getShippingTableName(settings: AppSetting = db.settings): string {
   return isProd ? '[dbo].[Shipping]' : '[dbo].[shippingdev]';
 }
 
-// Helper: Get active EasyPost API Key based on Dev/Prod mode
+// Helper: Get active EasyPost API Key based on Dev/Prod mode (sourced from SQL database settings)
 function getActiveEasyPostKey(settings: AppSetting = db.settings): string {
   const isProd = getActiveAppEnv(settings) === 'prod';
   if (isProd) {
-    const prodKey = (settings?.easyPostProdApiKey || process.env.EASYPOST_PROD_API_KEY || '').trim();
+    const prodKey = (settings?.easyPostProdApiKey || '').trim();
     if (prodKey) return prodKey;
-    return (settings?.easyPostApiKey || process.env.EASYPOST_API_KEY || '').trim();
+    return (settings?.easyPostApiKey || '').trim();
   } else {
-    const testKey = (settings?.easyPostTestApiKey || settings?.easyPostApiKey || process.env.EASYPOST_TEST_API_KEY || process.env.EASYPOST_API_KEY || '').trim();
+    const testKey = (settings?.easyPostTestApiKey || settings?.easyPostApiKey || '').trim();
     return testKey;
   }
 }
@@ -662,6 +662,13 @@ async function ensureMssqlTables(pool: sql.ConnectionPool): Promise<void> {
       if (cfgCount === 0 && db.settings) {
         console.log('[MSSQL] Table [dbo].[Configuration] empty. Writing initial settings into MS SQL database...');
         await saveSettingsToMssqlPool(pool, db.settings);
+      } else {
+        // Load live settings from [dbo].[Configuration] table so EasyPost credentials and configs are active immediately
+        const liveDbSettings = await fetchSettingsFromMssql();
+        if (liveDbSettings) {
+          console.log('[MSSQL] Loaded application settings and EasyPost credentials from [dbo].[Configuration]');
+          db.settings = { ...db.settings, ...liveDbSettings };
+        }
       }
 
       // Check count in Users table; if empty, seed default admin user
