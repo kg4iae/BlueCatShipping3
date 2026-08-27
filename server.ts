@@ -4784,8 +4784,9 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`ShipStation Management System running on http://localhost:${PORT}`);
+  const listenPort = process.env.PORT || PORT || 3000;
+  app.listen(listenPort, () => {
+    console.log(`BlueCat Bobbins Shipping Server running on Port ${listenPort} (NODE_ENV=${process.env.NODE_ENV || 'development'})`);
   });
 }
 
