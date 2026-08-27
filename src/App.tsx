@@ -520,6 +520,7 @@ export default function App() {
   if (!isAuthenticated) {
     return (
       <LoginModal
+        initialMssqlConnected={settings?.mssqlConnected}
         onLoginSuccess={(token, user) => {
           setIsAuthenticated(true);
           if (user) setCurrentUser(user);

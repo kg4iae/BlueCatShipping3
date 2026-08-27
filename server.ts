@@ -1,3 +1,6 @@
+import dotenv from 'dotenv';
+dotenv.config();
+
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
@@ -1379,21 +1382,35 @@ const initialPackages: PackageType[] = [
   },
 ];
 
-// Initial Settings DB Seed
+// Initial Settings DB Seed with environment variable preference
+const envMssqlServer = process.env.MSSQL_SERVER || process.env.SQL_SERVER || process.env.DB_SERVER;
+const envMssqlPort = process.env.MSSQL_PORT || process.env.SQL_PORT || process.env.DB_PORT;
+const envMssqlDatabase = process.env.MSSQL_DATABASE || process.env.SQL_DATABASE || process.env.DB_DATABASE || process.env.MSSQL_DB || process.env.DB_NAME;
+const envMssqlUser = process.env.MSSQL_USER || process.env.SQL_USER || process.env.DB_USER || process.env.MSSQL_USERNAME;
+const envMssqlPassword = process.env.MSSQL_PASSWORD || process.env.SQL_PASSWORD || process.env.DB_PASSWORD;
+const envMssqlEncrypt = process.env.MSSQL_ENCRYPT !== undefined ? process.env.MSSQL_ENCRYPT === 'true' : undefined;
+
+const envEasyPostApiKey = process.env.EASYPOST_API_KEY;
+const envEasyPostTestApiKey = process.env.EASYPOST_TEST_API_KEY || process.env.EASYPOST_API_KEY;
+const envEasyPostProdApiKey = process.env.EASYPOST_PROD_API_KEY;
+const envEasyPostMode = process.env.EASYPOST_MODE as 'test' | 'production' | undefined;
+const envAppEnv = (process.env.APP_ENV as 'dev' | 'prod' | undefined) || (process.env.EASYPOST_MODE === 'production' ? 'prod' : undefined);
+const envAppPassword = process.env.APP_PASSWORD;
+
 const initialSettings: AppSetting = {
   packingSlipContent:
     'Thank you for your order! All items have been quality-inspected before shipment. For returns, missing items, or warranty questions within 30 days, please contact support@acmesupply.com or call (800) 555-0199 quoting your Order Number. Please retain this packing slip for your records.',
-  easyPostApiKey: process.env.EASYPOST_API_KEY || 'EZTK_TEST_99824_KEY',
-  easyPostTestApiKey: process.env.EASYPOST_TEST_API_KEY || process.env.EASYPOST_API_KEY || 'EZTK_TEST_99824_KEY',
-  easyPostProdApiKey: process.env.EASYPOST_PROD_API_KEY || '',
-  easyPostMode: (process.env.EASYPOST_MODE as 'test' | 'production') || 'test',
-  appEnv: (process.env.APP_ENV as 'dev' | 'prod') || (process.env.EASYPOST_MODE === 'production' ? 'prod' : 'dev'),
-  mssqlServer: process.env.MSSQL_SERVER || 'sql-east.internal.company.net',
-  mssqlPort: process.env.MSSQL_PORT ? parseInt(process.env.MSSQL_PORT, 10) : 1433,
-  mssqlDatabase: process.env.MSSQL_DATABASE || 'ShippingProductionDB',
-  mssqlUser: process.env.MSSQL_USER || 'shipstation_app_user',
-  mssqlPassword: process.env.MSSQL_PASSWORD || '',
-  mssqlEncrypt: process.env.MSSQL_ENCRYPT === 'true',
+  easyPostApiKey: envEasyPostApiKey || 'EZTK_TEST_99824_KEY',
+  easyPostTestApiKey: envEasyPostTestApiKey || 'EZTK_TEST_99824_KEY',
+  easyPostProdApiKey: envEasyPostProdApiKey || '',
+  easyPostMode: envEasyPostMode || 'test',
+  appEnv: envAppEnv || 'dev',
+  mssqlServer: envMssqlServer || 'sql-east.internal.company.net',
+  mssqlPort: envMssqlPort ? parseInt(envMssqlPort, 10) : 1433,
+  mssqlDatabase: envMssqlDatabase || 'ShippingProductionDB',
+  mssqlUser: envMssqlUser || 'shipstation_app_user',
+  mssqlPassword: envMssqlPassword || '',
+  mssqlEncrypt: envMssqlEncrypt ?? false,
   mssqlConnected: false,
   mssqlError: null,
   companyName: 'BlueCat Bobbins Shipping',
@@ -1408,7 +1425,7 @@ const initialSettings: AppSetting = {
     country: 'US',
     phone: '312-555-0144',
   },
-  appPassword: process.env.APP_PASSWORD || 'shipstation123',
+  appPassword: envAppPassword || 'shipstation123',
   defaultDomesticCarrier: 'USPS',
   defaultDomesticService: 'Priority',
   defaultInternationalCarrier: 'UPS',
@@ -1418,6 +1435,25 @@ const initialSettings: AppSetting = {
 
 // Seed realistic order dataset spanning active queue and historical months
 const savedDiskSettings = loadSettingsFromFile();
+
+// Merge settings: Disk settings load first, but explicit environment variables from .env take precedence
+const mergedSettings: AppSetting = {
+  ...initialSettings,
+  ...(savedDiskSettings || {}),
+};
+
+if (envMssqlServer) mergedSettings.mssqlServer = envMssqlServer;
+if (envMssqlPort) mergedSettings.mssqlPort = parseInt(envMssqlPort, 10);
+if (envMssqlDatabase) mergedSettings.mssqlDatabase = envMssqlDatabase;
+if (envMssqlUser) mergedSettings.mssqlUser = envMssqlUser;
+if (envMssqlPassword) mergedSettings.mssqlPassword = envMssqlPassword;
+if (envMssqlEncrypt !== undefined) mergedSettings.mssqlEncrypt = envMssqlEncrypt;
+if (envEasyPostApiKey) mergedSettings.easyPostApiKey = envEasyPostApiKey;
+if (envEasyPostTestApiKey) mergedSettings.easyPostTestApiKey = envEasyPostTestApiKey;
+if (envEasyPostProdApiKey) mergedSettings.easyPostProdApiKey = envEasyPostProdApiKey;
+if (envEasyPostMode) mergedSettings.easyPostMode = envEasyPostMode;
+if (envAppEnv) mergedSettings.appEnv = envAppEnv;
+if (envAppPassword) mergedSettings.appPassword = envAppPassword;
 
 // Seed realistic development (dev) order dataset ([dbo].[shippingdev])
 const initialDevOrders: ShippingOrder[] = [
@@ -1874,13 +1910,13 @@ const initialProdOrders: ShippingOrder[] = [
 
 const db: DatabaseSchema = {
   packages: [...initialPackages],
-  settings: { ...initialSettings, ...(savedDiskSettings || {}) },
+  settings: mergedSettings,
   scanForms: [],
   users: [
     {
       id: 1,
       username: 'admin',
-      passwordHash: hashPassword('shipstation123'),
+      passwordHash: hashPassword(mergedSettings.appPassword || 'shipstation123'),
       fullName: 'System Administrator',
       role: 'Admin',
       createdAt: new Date().toISOString(),
@@ -1888,7 +1924,7 @@ const db: DatabaseSchema = {
   ],
   devOrders: [...initialDevOrders],
   prodOrders: [...initialProdOrders],
-  orders: (initialSettings.appEnv === 'prod' || savedDiskSettings?.appEnv === 'prod')
+  orders: mergedSettings.appEnv === 'prod'
     ? [...initialProdOrders]
     : [...initialDevOrders],
 };
@@ -4410,6 +4446,17 @@ app.delete('/api/packages/:id', async (req, res) => {
 });
 
 // Settings API (including Packing Slip Content custom editor)
+app.get('/api/database/status', async (req, res) => {
+  const isConnected = !!(activeMssqlPool && activeMssqlPool.connected && !activeMssqlPool.connecting);
+  res.json({
+    connected: isConnected,
+    server: db.settings.mssqlServer || '',
+    database: db.settings.mssqlDatabase || '',
+    appEnv: db.settings.appEnv || 'dev',
+    error: isConnected ? null : (db.settings.mssqlError || (db.settings.mssqlServer ? 'Connecting / Offline' : 'Not configured')),
+  });
+});
+
 app.get('/api/settings', async (req, res) => {
   // Try fetching live settings from MS SQL Configuration table if connected
   if (db.settings.mssqlServer && db.settings.mssqlDatabase && db.settings.mssqlUser) {
