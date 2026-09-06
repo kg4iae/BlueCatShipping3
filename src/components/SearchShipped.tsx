@@ -38,6 +38,7 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [carrierFilter, setCarrierFilter] = useState('all');
   const [copiedTracking, setCopiedTracking] = useState<string | null>(null);
+  const [selectedOrderIds, setSelectedOrderIds] = useState<Set<string>>(new Set());
 
   const filteredOrders = shippedOrders.filter((order) => {
     if (carrierFilter !== 'all' && order.carrier !== carrierFilter) return false;
@@ -59,6 +60,26 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
     setCopiedTracking(text);
     setTimeout(() => setCopiedTracking(null), 2000);
   };
+
+  const toggleSelection = (id: string) => {
+    const next = new Set(selectedOrderIds);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    setSelectedOrderIds(next);
+  };
+
+  const toggleAll = () => {
+    if (selectedOrderIds.size === filteredOrders.length && filteredOrders.length > 0) {
+      setSelectedOrderIds(new Set());
+    } else {
+      setSelectedOrderIds(new Set(filteredOrders.map((o) => o.id)));
+    }
+  };
+  
+  const selectedOrders = filteredOrders.filter((o) => selectedOrderIds.has(o.id));
 
   return (
     <div className="space-y-6">
@@ -84,6 +105,15 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
             >
               <FileText className="w-4 h-4 text-indigo-400" />
               <span>USPS SCAN Form</span>
+            </button>
+          )}
+          {selectedOrders.length > 0 && (
+            <button
+              onClick={() => onOpenPrintModal(selectedOrders)}
+              className="flex items-center space-x-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg text-xs font-semibold shadow-sm transition-all cursor-pointer"
+            >
+              <FileText className="w-4 h-4 text-white" />
+              <span>Print Selected ({selectedOrders.length})</span>
             </button>
           )}
           {shippedOrders.length > 0 && (
@@ -134,6 +164,14 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
           <table className="w-full text-left border-collapse">
             <thead className="bg-slate-50 text-slate-500 uppercase text-[10px] font-bold tracking-widest border-b border-slate-200">
               <tr>
+                <th className="py-3 px-3 w-10">
+                  <input
+                    type="checkbox"
+                    checked={selectedOrderIds.size === filteredOrders.length && filteredOrders.length > 0}
+                    onChange={toggleAll}
+                    className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                  />
+                </th>
                 <th className="py-3 px-3">Order ID &amp; Date</th>
                 <th className="py-3 px-3">Recipient &amp; Address</th>
                 <th className="py-3 px-3">Tracking Number &amp; Carrier</th>
@@ -145,7 +183,7 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
             <tbody className="divide-y divide-slate-100 text-xs text-slate-800">
               {filteredOrders.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-12 text-center text-slate-500">
+                  <td colSpan={7} className="py-12 text-center text-slate-500">
                     <Search className="w-8 h-8 text-slate-400 mx-auto mb-2 opacity-50" />
                     <p className="font-medium">No shipped records match your query.</p>
                   </td>
@@ -153,6 +191,14 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
               ) : (
                 filteredOrders.map((order) => (
                   <tr key={order.id} className="hover:bg-indigo-50/40 transition-colors">
+                    <td className="py-3 px-3">
+                      <input
+                        type="checkbox"
+                        checked={selectedOrderIds.has(order.id)}
+                        onChange={() => toggleSelection(order.id)}
+                        className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                      />
+                    </td>
                     {/* Order # & Ship Date */}
                     <td className="py-3 px-3">
                       <div className="font-bold text-indigo-600 font-mono flex items-center space-x-1.5">
