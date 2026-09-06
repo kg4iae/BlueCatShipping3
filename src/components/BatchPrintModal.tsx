@@ -1,8 +1,25 @@
 import React, { useState } from 'react';
-import { ShippingOrder, AppSetting, formatOrderId } from '../types';
+import { ShippingOrder, AppSetting, formatOrderId, HomeEvent } from '../types';
 import { jsPDF } from 'jspdf';
-import { Printer, Download, X, FileText, PackageCheck, Sparkles, Tag, ExternalLink, RefreshCw, Zap, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Printer, Download, X, FileText, PackageCheck, Sparkles, Tag, ExternalLink, RefreshCw, Zap, CheckCircle2, AlertCircle, Calendar } from 'lucide-react';
 import { printPdfToQZ, getDefaultQZPrinter } from '../lib/qzTray';
+
+function getActiveHomeEvents(settings?: AppSetting): HomeEvent[] {
+  const raw = settings?.homeEventsList;
+  if (!raw) return [];
+  let list: any[] = [];
+  if (Array.isArray(raw)) {
+    list = raw;
+  } else if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) list = parsed;
+    } catch (e) {
+      list = [];
+    }
+  }
+  return list.filter((e) => e && e.isActive !== false && (e.name || e.locationAndDate));
+}
 
 interface BatchPrintModalProps {
   orders: ShippingOrder[];
@@ -22,6 +39,8 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
   const [isPurchasing, setIsPurchasing] = useState(false);
   const [qzPrinting, setQzPrinting] = useState(false);
   const [qzStatus, setQzStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+
+  const activeHomeEvents = getActiveHomeEvents(settings);
 
   const orderIdsStr = orders.map((o) => o.id).join(',');
 
@@ -526,36 +545,113 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
           itemY += maxLines * itemLineSpacing + 8;
         });
 
-        // Custom Notice Box
-        itemY += 15;
+        // 1. Upcoming Events Box (from dbo.Configuration -> homeEventsList)
+        const activeEvents = getActiveHomeEvents(settings);
+        if (activeEvents.length > 0) {
+          itemY += 12;
+          const eventsTitle = (settings.homeEventsTitle || 'Upcoming Events:').trim();
+          const eventTitleFontSize = 10;
+          const eventUrlFontSize = 9;
+          const eventTitleLineSpacing = 13;
+          const eventUrlLineSpacing = 12;
+
+          let contentH = 22;
+          const preparedEvents: Array<{ titleLines: string[]; urlLines: string[] }> = [];
+
+          activeEvents.forEach((evt) => {
+            const titleText = `• ${evt.name}${evt.locationAndDate ? ` ${evt.locationAndDate}` : ''}`;
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(eventTitleFontSize);
+            const titleLines = doc.splitTextToSize(titleText, 500);
+
+            let urlLines: string[] = [];
+            if (evt.url) {
+              doc.setFont('helvetica', 'normal');
+              doc.setFontSize(eventUrlFontSize);
+              urlLines = doc.splitTextToSize(evt.url.trim(), 485);
+            }
+
+            preparedEvents.push({ titleLines, urlLines });
+            contentH += titleLines.length * eventTitleLineSpacing + (urlLines.length ? urlLines.length * eventUrlLineSpacing : 0) + 4;
+          });
+
+          const eventsBoxHeight = Math.max(50, contentH + 8);
+
+          if (itemY + eventsBoxHeight > 740) {
+            doc.addPage('letter', 'portrait');
+            itemY = 40;
+          }
+
+          doc.setFillColor(239, 246, 255); // blue-50
+          doc.setDrawColor(147, 197, 253); // blue-300
+          doc.roundedRect(36, itemY, 540, eventsBoxHeight, 6, 6, 'FD');
+
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(11);
+          doc.setTextColor(30, 58, 138); // blue-900
+          doc.text(eventsTitle, 48, itemY + 18);
+
+          let currentEventY = itemY + 32;
+
+          preparedEvents.forEach((pe) => {
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(eventTitleFontSize);
+            doc.setTextColor(15, 23, 42); // slate-900
+            pe.titleLines.forEach((line) => {
+              doc.text(line, 48, currentEventY);
+              currentEventY += eventTitleLineSpacing;
+            });
+
+            if (pe.urlLines.length > 0) {
+              doc.setFont('helvetica', 'normal');
+              doc.setFontSize(eventUrlFontSize);
+              doc.setTextColor(29, 78, 216); // blue-700
+              pe.urlLines.forEach((line) => {
+                doc.text(line, 58, currentEventY);
+                currentEventY += eventUrlLineSpacing;
+              });
+            }
+            currentEventY += 4;
+          });
+
+          itemY += eventsBoxHeight + 8;
+        }
+
+        // 2. Custom Notice Box
+        itemY += 4;
         const rawNotice = settings.packingSlipContent || 'Thank you for your order! Please inspect items upon arrival and contact us if you have any questions.';
 
-        const noticeFontSize = 13;
+        const noticeFontSize = 11;
         doc.setFontSize(noticeFontSize);
 
-        const splitNotice = doc.splitTextToSize(rawNotice, 480);
+        const splitNotice = doc.splitTextToSize(rawNotice, 490);
         const noticeLineSpacing = noticeFontSize * 1.35;
         const textBlockHeight = splitNotice.length * noticeLineSpacing;
-        const titlePadding = 32;
-        const bottomPadding = 20;
-        const noticeBoxHeight = Math.max(70, titlePadding + textBlockHeight + bottomPadding);
+        const titlePadding = 26;
+        const bottomPadding = 14;
+        const noticeBoxHeight = Math.max(54, titlePadding + textBlockHeight + bottomPadding);
+
+        if (itemY + noticeBoxHeight > 750) {
+          doc.addPage('letter', 'portrait');
+          itemY = 40;
+        }
 
         doc.setFillColor(219, 234, 254); // blue-100
         doc.setDrawColor(147, 197, 253); // blue-300
         doc.roundedRect(36, itemY, 540, noticeBoxHeight, 6, 6, 'FD');
 
         doc.setFont('helvetica', 'bold');
-        doc.setFontSize(13);
+        doc.setFontSize(11);
         doc.setTextColor(15, 23, 42);
-        doc.text('Important Notice & Customer Service Policy', 52, itemY + 22);
+        doc.text('Important Notice & Customer Service Policy', 48, itemY + 18);
 
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(noticeFontSize);
         doc.setTextColor(15, 23, 42);
 
-        let noticeTextY = itemY + 40;
+        let noticeTextY = itemY + 34;
         splitNotice.forEach((line) => {
-          doc.text(line, 52, noticeTextY);
+          doc.text(line, 48, noticeTextY);
           noticeTextY += noticeLineSpacing;
         });
       });
@@ -796,6 +892,34 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
                       </tbody>
                     </table>
                   </div>
+
+                  {/* FUTURE / UPCOMING EVENTS AREA (From dbo.Configuration -> homeEventsList) */}
+                  {activeHomeEvents.length > 0 && (
+                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 text-slate-900 overflow-hidden break-words mb-4">
+                      <div className="flex items-center space-x-2 font-bold text-blue-900 uppercase tracking-wide mb-3 text-[13pt]">
+                        <Calendar className="w-5 h-5 text-blue-700 shrink-0" />
+                        <span>{settings.homeEventsTitle || 'Upcoming Events:'}</span>
+                      </div>
+                      <div className="space-y-3 text-[12pt]">
+                        {activeHomeEvents.map((evt, eIdx) => (
+                          <div key={evt.id || eIdx} className="pl-1">
+                            <div className="flex flex-wrap items-baseline gap-1.5 font-bold text-slate-900">
+                              <span className="text-blue-600 font-bold">•</span>
+                              <span>{evt.name}</span>
+                              {evt.locationAndDate && (
+                                <span className="text-slate-600 font-normal">{evt.locationAndDate}</span>
+                              )}
+                            </div>
+                            {evt.url && (
+                              <div className="text-[11pt] text-blue-700 font-mono pl-4 break-all mt-0.5">
+                                {evt.url}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* CUSTOM PACKING SLIP CONTENT AREA (From Settings Table) */}
                   <div className="bg-blue-100 border border-blue-300 rounded-xl p-5 text-[13pt] text-slate-900 overflow-hidden break-words">

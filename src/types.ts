@@ -93,8 +93,18 @@ export interface ReturnAddress {
   phone: string;
 }
 
+export interface HomeEvent {
+  id?: string;
+  name: string;
+  locationAndDate?: string;
+  url?: string;
+  isActive?: boolean;
+}
+
 export interface AppSetting {
   packingSlipContent: string;
+  homeEventsList?: HomeEvent[] | string;
+  homeEventsTitle?: string;
   easyPostApiKey: string;
   easyPostTestApiKey?: string;
   easyPostProdApiKey?: string;

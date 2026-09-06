@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { AppSetting, PackageType, CarrierType, User } from '../types';
+import { AppSetting, PackageType, CarrierType, User, HomeEvent } from '../types';
 import {
   FileText,
   Save,
@@ -31,7 +31,25 @@ import {
   UserPlus,
   KeyRound,
   Globe,
+  Calendar,
 } from 'lucide-react';
+
+function getActiveHomeEvents(settings?: AppSetting): HomeEvent[] {
+  const raw = settings?.homeEventsList;
+  if (!raw) return [];
+  let list: any[] = [];
+  if (Array.isArray(raw)) {
+    list = raw;
+  } else if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) list = parsed;
+    } catch (e) {
+      list = [];
+    }
+  }
+  return list.filter((e) => e && e.isActive !== false && (e.name || e.locationAndDate));
+}
 
 import {
   getQZPrinters,
@@ -1519,7 +1537,40 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                     <Eye className="w-3.5 h-3.5 text-indigo-600" />
                     <span>Live Packing Slip Preview Rendering:</span>
                   </label>
-                  <div className="bg-slate-50 border border-slate-200 text-slate-800 p-4 rounded-lg text-xs font-sans">
+                  
+                  {/* Live Upcoming Events preview from dbo.Configuration */}
+                  {(() => {
+                    const activeEvents = getActiveHomeEvents(settings);
+                    if (activeEvents.length === 0) return null;
+                    return (
+                      <div className="bg-blue-50 border border-blue-200 text-slate-900 p-4 rounded-xl text-xs font-sans mb-3 space-y-2.5">
+                        <div className="font-bold text-blue-900 flex items-center space-x-1.5 uppercase tracking-wide text-[11px]">
+                          <Calendar className="w-3.5 h-3.5 text-blue-700 shrink-0" />
+                          <span>{settings.homeEventsTitle || 'Upcoming Events:'}</span>
+                        </div>
+                        <div className="space-y-2 pl-1">
+                          {activeEvents.map((evt, idx) => (
+                            <div key={evt.id || idx} className="text-xs">
+                              <div className="font-semibold text-slate-900">
+                                <span className="text-blue-600 font-bold mr-1">•</span>
+                                <span>{evt.name}</span>
+                                {evt.locationAndDate && (
+                                  <span className="text-slate-600 font-normal ml-1.5">{evt.locationAndDate}</span>
+                                )}
+                              </div>
+                              {evt.url && (
+                                <div className="text-[11px] text-blue-700 font-mono pl-3.5 mt-0.5 break-all">
+                                  {evt.url}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  <div className="bg-slate-50 border border-slate-200 text-slate-800 p-4 rounded-xl text-xs font-sans">
                     <div className="font-bold text-indigo-900 mb-1 flex items-center space-x-1">
                       <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
                       <span>IMPORTANT CUSTOMER INFORMATION:</span>

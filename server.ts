@@ -9,7 +9,7 @@ import sql from 'mssql';
 import { jsPDF } from 'jspdf';
 import crypto from 'crypto';
 import sharp from 'sharp';
-import { ShippingOrder, PackageType, AppSetting, MonthlyReportData, OrderStatus, CarrierType, ScanFormType, OrderItem, ReturnAddress, formatOrderId, User } from './src/types.js';
+import { ShippingOrder, PackageType, AppSetting, MonthlyReportData, OrderStatus, CarrierType, ScanFormType, OrderItem, ReturnAddress, formatOrderId, User, HomeEvent } from './src/types.js';
 
 const app = express();
 const PORT = 3000;
@@ -745,6 +745,24 @@ function getReturnAddress(settings?: AppSetting): ReturnAddress {
   };
 }
 
+// Helper: Safely parse and retrieve active events from database settings (dbo.Configuration -> homeEventsList)
+function getActiveHomeEvents(settings?: AppSetting): HomeEvent[] {
+  const raw = settings?.homeEventsList ?? db?.settings?.homeEventsList;
+  if (!raw) return [];
+  let list: any[] = [];
+  if (Array.isArray(raw)) {
+    list = raw;
+  } else if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) list = parsed;
+    } catch (e) {
+      list = [];
+    }
+  }
+  return list.filter((e) => e && e.isActive !== false && (e.name || e.locationAndDate));
+}
+
 // Save or Update Configuration settings key-value entries in MS SQL Server [dbo].[Configuration]
 async function saveSettingsToMssqlPool(pool: sql.ConnectionPool, settings: AppSetting) {
   if (!pool || !pool.connected) return;
@@ -1438,6 +1456,13 @@ const initialSettings: AppSetting = {
   defaultInternationalCarrier: 'UPS',
   defaultInternationalService: 'UPS Worldwide Expedited',
   defaultHsTariffCode: process.env.DEFAULT_HS_TARIFF_CODE || '610910',
+  homeEventsList: [
+    { id: 'evt-1', name: 'Sunkissed Fiber Festival', locationAndDate: '(Tampa, FL) Jan 23-24, 2027', url: 'https://www.sunkissedfiberfestival.com/', isActive: true },
+    { id: 'evt-2', name: 'Birchwood Fiber Festival', locationAndDate: '(Birchwood, TN) May 1-2, 2027', url: 'https://birchwoodfiberfestival.com/', isActive: true },
+    { id: 'evt-3', name: 'Fiber in the Valley', locationAndDate: '(Helen, GA) May 9-10, 2026', url: 'https://www.bwh2.net/ff25', isActive: true },
+    { id: 'evt-4', name: 'Alabama Fiber Festival', locationAndDate: '(Birmingham, AL) Nov 13-14, 2026', url: 'https://www.alfiberfest.com/','isActive': true },
+  ],
+  homeEventsTitle: 'Upcoming Events:',
 };
 
 // Seed realistic order dataset spanning active queue and historical months
@@ -3700,36 +3725,120 @@ function generatePackingSlipPdfBuffer(orders: ShippingOrder[], settings: AppSett
       itemY += maxLines * itemLineSpacing + 8;
     });
 
-    // Custom Notice Box (Dynamically sized so content never overflows box)
-    itemY += 15;
+    // 1. Upcoming Events Box (Loaded from [dbo].[Configuration] -> homeEventsList)
+    const activeEvents = getActiveHomeEvents(settings);
+    if (activeEvents.length > 0) {
+      itemY += 12;
+      const eventsTitle = (settings.homeEventsTitle || 'Upcoming Events:').trim();
+      const eventTitleFontSize = 10;
+      const eventUrlFontSize = 9;
+      const eventTitleLineSpacing = 13;
+      const eventUrlLineSpacing = 12;
+
+      // Calculate dynamic height for events box
+      let contentH = 22; // header padding
+      const preparedEvents: Array<{ titleLines: string[]; urlLines: string[] }> = [];
+
+      activeEvents.forEach((evt) => {
+        const titleText = `• ${evt.name}${evt.locationAndDate ? ` ${evt.locationAndDate}` : ''}`;
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(eventTitleFontSize);
+        const titleLines = doc.splitTextToSize(titleText, 500);
+
+        let urlLines: string[] = [];
+        if (evt.url) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(eventUrlFontSize);
+          urlLines = doc.splitTextToSize(evt.url.trim(), 485);
+        }
+
+        preparedEvents.push({ titleLines, urlLines });
+        contentH += titleLines.length * eventTitleLineSpacing + (urlLines.length ? urlLines.length * eventUrlLineSpacing : 0) + 4;
+      });
+
+      const eventsBoxHeight = Math.max(50, contentH + 8);
+
+      // Check for page overflow
+      if (itemY + eventsBoxHeight > 740) {
+        doc.addPage('letter', 'portrait');
+        itemY = 40;
+      }
+
+      // Draw Events Box
+      doc.setFillColor(239, 246, 255); // blue-50
+      doc.setDrawColor(147, 197, 253); // blue-300
+      doc.roundedRect(36, itemY, 540, eventsBoxHeight, 6, 6, 'FD');
+
+      // Title
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(11);
+      doc.setTextColor(30, 58, 138); // blue-900
+      doc.text(eventsTitle, 48, itemY + 18);
+
+      let currentEventY = itemY + 32;
+
+      preparedEvents.forEach((pe) => {
+        // Event Name + Date / Location
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(eventTitleFontSize);
+        doc.setTextColor(15, 23, 42); // slate-900
+        pe.titleLines.forEach((line) => {
+          doc.text(line, 48, currentEventY);
+          currentEventY += eventTitleLineSpacing;
+        });
+
+        // Actual URL printed out clearly
+        if (pe.urlLines.length > 0) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(eventUrlFontSize);
+          doc.setTextColor(29, 78, 216); // blue-700
+          pe.urlLines.forEach((line) => {
+            doc.text(line, 58, currentEventY);
+            currentEventY += eventUrlLineSpacing;
+          });
+        }
+        currentEventY += 4;
+      });
+
+      itemY += eventsBoxHeight + 8;
+    }
+
+    // 2. Custom Notice Box (Dynamically sized so content never overflows box)
+    itemY += 4;
     const rawNotice = settings.packingSlipContent || 'Thank you for your order! Please inspect items upon arrival and contact us if you have any questions.';
 
-    const noticeFontSize = 13;
+    const noticeFontSize = 11;
     doc.setFontSize(noticeFontSize);
 
-    const splitNotice = doc.splitTextToSize(rawNotice, 480);
+    const splitNotice = doc.splitTextToSize(rawNotice, 490);
     const noticeLineSpacing = noticeFontSize * 1.35;
     const textBlockHeight = splitNotice.length * noticeLineSpacing;
-    const titlePadding = 32;
-    const bottomPadding = 20;
-    const noticeBoxHeight = Math.max(70, titlePadding + textBlockHeight + bottomPadding);
+    const titlePadding = 26;
+    const bottomPadding = 14;
+    const noticeBoxHeight = Math.max(54, titlePadding + textBlockHeight + bottomPadding);
+
+    // Check for page overflow
+    if (itemY + noticeBoxHeight > 750) {
+      doc.addPage('letter', 'portrait');
+      itemY = 40;
+    }
 
     doc.setFillColor(219, 234, 254); // blue-100
     doc.setDrawColor(147, 197, 253); // blue-300
     doc.roundedRect(36, itemY, 540, noticeBoxHeight, 6, 6, 'FD');
 
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(13);
+    doc.setFontSize(11);
     doc.setTextColor(15, 23, 42);
-    doc.text('Important Notice & Customer Service Policy', 52, itemY + 22);
+    doc.text('Important Notice & Customer Service Policy', 48, itemY + 18);
 
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(noticeFontSize);
     doc.setTextColor(15, 23, 42);
 
-    let noticeTextY = itemY + 40;
+    let noticeTextY = itemY + 34;
     splitNotice.forEach((line) => {
-      doc.text(line, 52, noticeTextY);
+      doc.text(line, 48, noticeTextY);
       noticeTextY += noticeLineSpacing;
     });
   });
