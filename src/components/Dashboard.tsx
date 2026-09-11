@@ -132,7 +132,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const filteredOrders = orders.filter((order) => {
     if (order.status === 'shipped') return false; // Shipped orders moved to Search & History view
 
-    if (statusFilter !== 'all' && order.status !== statusFilter) return false;
+    if (statusFilter !== 'all') {
+      if (statusFilter === 'ready_to_ship') {
+        const orderStatus = (order.dbStatus || order.shippingStatus || order.status || '').toString().trim().toLowerCase();
+        if (orderStatus !== 'complete' && orderStatus !== 'completed') return false;
+      } else if (order.status !== statusFilter) {
+        return false;
+      }
+    }
 
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
@@ -210,7 +217,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
   // Status Counts
   const pendingCount = orders.filter((o) => o.status === 'pending_validation').length;
   const errorCount = orders.filter((o) => o.status === 'address_error').length;
-  const readyCount = orders.filter((o) => o.status === 'ready_to_ship').length;
+  const readyCount = orders.filter((o) => {
+    if (o.status === 'shipped') return false;
+    const orderStatus = (o.dbStatus || o.shippingStatus || o.status || '').toString().trim().toLowerCase();
+    return orderStatus === 'complete' || orderStatus === 'completed';
+  }).length;
 
   return (
     <div className="space-y-6">
@@ -469,15 +480,30 @@ export const Dashboard: React.FC<DashboardProps> = ({
                           <span className="text-[10px] text-slate-400 font-sans">
                             {new Date(order.orderDate).toLocaleDateString()}
                           </span>
-                          <span className={`text-[9px] font-mono px-1 py-0.2 rounded border font-semibold ${
-                            (order.sourceTable?.includes('shippingdev') || order.env === 'dev' || (!order.sourceTable && settings.appEnv === 'dev'))
-                              ? 'bg-amber-50 text-amber-800 border-amber-200'
-                              : 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                          }`}>
-                            {(order.sourceTable?.includes('shippingdev') || order.env === 'dev' || (!order.sourceTable && settings.appEnv === 'dev'))
-                              ? 'shippingdev'
-                              : 'Shipping'}
-                          </span>
+                          {(() => {
+                            const rawStatus = (order.dbStatus || order.shippingStatus || (order.status === 'shipped' ? 'shipped' : 'Complete')).trim();
+                            const statusLower = rawStatus.toLowerCase();
+                            let badgeStyle = 'bg-slate-50 text-slate-700 border-slate-200';
+                            if (statusLower === 'complete' || statusLower === 'completed') {
+                              badgeStyle = 'bg-emerald-50 text-emerald-800 border-emerald-200';
+                            } else if (statusLower === 'new') {
+                              badgeStyle = 'bg-sky-50 text-sky-800 border-sky-200';
+                            } else if (statusLower === 'shipped') {
+                              badgeStyle = 'bg-purple-50 text-purple-800 border-purple-200';
+                            } else if (statusLower.includes('error') || statusLower.includes('fail')) {
+                              badgeStyle = 'bg-rose-50 text-rose-800 border-rose-200';
+                            } else if (statusLower.includes('pending') || statusLower.includes('process')) {
+                              badgeStyle = 'bg-amber-50 text-amber-800 border-amber-200';
+                            }
+                            return (
+                              <span
+                                className={`text-[9px] font-mono px-1.5 py-0.2 rounded border font-semibold ${badgeStyle}`}
+                                title={`dbo.shipping.status: ${rawStatus}`}
+                              >
+                                {rawStatus}
+                              </span>
+                            );
+                          })()}
                         </div>
                       </td>
 

@@ -382,7 +382,8 @@ function hashPassword(password: string): string {
 // Helper: Get active environment ('dev' | 'prod')
 function getActiveAppEnv(settings: AppSetting = db.settings): 'dev' | 'prod' {
   if (settings && settings.appEnv) return settings.appEnv;
-  return settings && settings.easyPostMode === 'production' ? 'prod' : 'dev';
+  if (settings && settings.easyPostMode) return settings.easyPostMode === 'test' ? 'dev' : 'prod';
+  return 'prod';
 }
 
 // Helper: Get active MSSQL table for shipping orders ('[dbo].[Shipping]' in Prod vs '[dbo].[shippingdev]' in Dev)
@@ -699,29 +700,6 @@ async function ensureMssqlTables(pool: sql.ConnectionPool): Promise<void> {
   return ensureTablesPromise;
 }
 
-// Disk Persistence for Settings
-const SETTINGS_FILE_PATH = path.join(process.cwd(), 'data_settings.json');
-
-function saveSettingsToFile(settings: AppSetting) {
-  try {
-    fs.writeFileSync(SETTINGS_FILE_PATH, JSON.stringify(settings, null, 2), 'utf8');
-  } catch (err) {
-    console.error('[FILE] Error writing settings to data_settings.json:', err);
-  }
-}
-
-function loadSettingsFromFile(): Partial<AppSetting> | null {
-  try {
-    if (fs.existsSync(SETTINGS_FILE_PATH)) {
-      const content = fs.readFileSync(SETTINGS_FILE_PATH, 'utf8');
-      return JSON.parse(content);
-    }
-  } catch (err) {
-    console.error('[FILE] Error reading settings from data_settings.json:', err);
-  }
-  return null;
-}
-
 // Helper: Safely parse and retrieve Return Address from database settings
 function getReturnAddress(settings?: AppSetting): ReturnAddress {
   let ret = settings?.returnAddress;
@@ -961,7 +939,10 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
     req.input('Carrier', sql.NVarChar(sql.MAX), carrierVal);
     req.input('Service', sql.NVarChar(sql.MAX), serviceVal);
     req.input('trackingNumber', sql.NVarChar(sql.MAX), order.trackingNumber || null);
-    req.input('status', sql.NVarChar(sql.MAX), order.status);
+    const mssqlStatus = order.status === 'shipped' || order.trackingNumber
+      ? 'shipped'
+      : (order.dbStatus || order.shippingStatus || 'Complete');
+    req.input('status', sql.NVarChar(sql.MAX), mssqlStatus);
     req.input('shippingCost', sql.Decimal(18, 2), order.shippingCost || null);
     req.input('shippingDate', sql.DateTime2(7), order.shippingDate ? new Date(order.shippingDate) : null);
     req.input('platform', sql.NVarChar(sql.MAX), order.marketplace || order.company || 'Web App');
@@ -1279,6 +1260,12 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
         email: row.email ? String(row.email) : '',
         orderDate: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString(),
         status: statusVal,
+        dbStatus: row.status !== undefined && row.status !== null && String(row.status).trim() !== ''
+          ? String(row.status).trim()
+          : (row.trackingNumber || statusVal === 'shipped' ? 'shipped' : 'Complete'),
+        shippingStatus: row.status !== undefined && row.status !== null && String(row.status).trim() !== ''
+          ? String(row.status).trim()
+          : (row.trackingNumber || statusVal === 'shipped' ? 'shipped' : 'Complete'),
         boxId: row.box ? String(row.box) : 'pkg_medium',
         boxName: row.box ? String(row.box) : 'Medium Flat Rate Box',
         weightOz: rawWeight,
@@ -1419,7 +1406,7 @@ const envEasyPostApiKey = process.env.EASYPOST_API_KEY;
 const envEasyPostTestApiKey = process.env.EASYPOST_TEST_API_KEY || process.env.EASYPOST_API_KEY;
 const envEasyPostProdApiKey = process.env.EASYPOST_PROD_API_KEY;
 const envEasyPostMode = process.env.EASYPOST_MODE as 'test' | 'production' | undefined;
-const envAppEnv = (process.env.APP_ENV as 'dev' | 'prod' | undefined) || (process.env.EASYPOST_MODE === 'production' ? 'prod' : undefined);
+const envAppEnv = (process.env.APP_ENV as 'dev' | 'prod' | undefined) || (process.env.EASYPOST_MODE === 'test' ? 'dev' : (process.env.EASYPOST_MODE === 'production' ? 'prod' : undefined));
 const envAppPassword = process.env.APP_PASSWORD;
 
 const initialSettings: AppSetting = {
@@ -1428,8 +1415,8 @@ const initialSettings: AppSetting = {
   easyPostApiKey: envEasyPostApiKey || 'EZTK_TEST_99824_KEY',
   easyPostTestApiKey: envEasyPostTestApiKey || 'EZTK_TEST_99824_KEY',
   easyPostProdApiKey: envEasyPostProdApiKey || '',
-  easyPostMode: envEasyPostMode || 'test',
-  appEnv: envAppEnv || 'dev',
+  easyPostMode: envEasyPostMode || (envAppEnv === 'dev' ? 'test' : 'production'),
+  appEnv: envAppEnv || 'prod',
   mssqlServer: envMssqlServer || 'sql-east.internal.company.net',
   mssqlPort: envMssqlPort ? parseInt(envMssqlPort, 10) : 1433,
   mssqlDatabase: envMssqlDatabase || 'ShippingProductionDB',
@@ -1465,13 +1452,9 @@ const initialSettings: AppSetting = {
   homeEventsTitle: 'Upcoming Events:',
 };
 
-// Seed realistic order dataset spanning active queue and historical months
-const savedDiskSettings = loadSettingsFromFile();
-
-// Merge settings: Disk settings load first, but explicit environment variables from .env take precedence
+// Merge settings: Initial settings with environment variables precedence
 const mergedSettings: AppSetting = {
   ...initialSettings,
-  ...(savedDiskSettings || {}),
 };
 
 if (envMssqlServer) mergedSettings.mssqlServer = envMssqlServer;
@@ -1485,6 +1468,8 @@ if (envEasyPostTestApiKey) mergedSettings.easyPostTestApiKey = envEasyPostTestAp
 if (envEasyPostProdApiKey) mergedSettings.easyPostProdApiKey = envEasyPostProdApiKey;
 if (envEasyPostMode) mergedSettings.easyPostMode = envEasyPostMode;
 if (envAppEnv) mergedSettings.appEnv = envAppEnv;
+if (!mergedSettings.appEnv) mergedSettings.appEnv = 'prod';
+if (!mergedSettings.easyPostMode) mergedSettings.easyPostMode = mergedSettings.appEnv === 'prod' ? 'production' : 'test';
 if (envAppPassword) mergedSettings.appPassword = envAppPassword;
 
 // Seed realistic development (dev) order dataset ([dbo].[shippingdev])
@@ -2374,6 +2359,11 @@ app.get('/api/orders', async (req, res) => {
 
   if (shippedOnly === 'true') {
     result = result.filter((o) => o.status === 'shipped');
+  } else if (status === 'ready_to_ship') {
+    result = result.filter((o) => {
+      const dbStatusLower = (o.dbStatus || o.shippingStatus || o.status || '').toString().trim().toLowerCase();
+      return dbStatusLower === 'complete';
+    });
   } else if (status) {
     result = result.filter((o) => o.status === status);
   }
@@ -2762,6 +2752,8 @@ app.post('/api/orders/create-labels-batch', async (req, res) => {
       const result = await purchaseLabelWithEasyPost(order, db.settings);
 
       order.status = 'shipped';
+      order.dbStatus = 'shipped';
+      order.shippingStatus = 'shipped';
       order.marketplacenotified = 'Pending';
       order.trackingNumber = result.trackingNumber;
       order.carrier = result.carrier;
@@ -3252,6 +3244,8 @@ app.post('/api/orders/:id/purchase-label', async (req, res) => {
     const result = await purchaseLabelWithEasyPost(order, db.settings, carrier, serviceLevel);
 
     order.status = 'shipped';
+    order.dbStatus = 'shipped';
+    order.shippingStatus = 'shipped';
     order.marketplacenotified = 'Pending';
     order.trackingNumber = result.trackingNumber;
     order.carrier = result.carrier;
@@ -3318,6 +3312,8 @@ app.post('/api/orders/batch-purchase-labels', async (req, res) => {
       const result = await purchaseLabelWithEasyPost(order, db.settings);
 
       order.status = 'shipped';
+      order.dbStatus = 'shipped';
+      order.shippingStatus = 'shipped';
       order.marketplacenotified = 'Pending';
       order.trackingNumber = result.trackingNumber;
       order.carrier = result.carrier;
@@ -4568,7 +4564,7 @@ app.get('/api/database/status', async (req, res) => {
     connected: isConnected,
     server: db.settings.mssqlServer || '',
     database: db.settings.mssqlDatabase || '',
-    appEnv: db.settings.appEnv || 'dev',
+    appEnv: db.settings.appEnv || 'prod',
     error: isConnected ? null : (db.settings.mssqlError || (db.settings.mssqlServer ? 'Connecting / Offline' : 'Not configured')),
   });
 });
@@ -4590,10 +4586,7 @@ app.get('/api/settings', async (req, res) => {
 app.put('/api/settings', async (req, res) => {
   db.settings = { ...db.settings, ...req.body };
 
-  // 1. Write to local persistent JSON file so configuration survives app restarts
-  saveSettingsToFile(db.settings);
-
-  // 2. Write to MS SQL database [dbo].[Configuration] table
+  // Write to MS SQL database [dbo].[Configuration] table
   const pool = await getMssqlPool();
   if (pool) {
     await saveSettingsToMssqlPool(pool, db.settings);
@@ -4627,8 +4620,6 @@ app.post('/api/settings/environment', async (req, res) => {
   const targetEnv: 'dev' | 'prod' = req.body.env === 'prod' ? 'prod' : 'dev';
   db.settings.appEnv = targetEnv;
   db.settings.easyPostMode = targetEnv === 'prod' ? 'production' : 'test';
-
-  saveSettingsToFile(db.settings);
 
   const pool = await getMssqlPool();
   if (pool) {

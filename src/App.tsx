@@ -16,6 +16,7 @@ import { ScanFormModal } from './components/ScanFormModal';
 import { Reports } from './components/Reports';
 import { SettingsPage } from './components/SettingsPage';
 import { EasyPostErrorModal, EasyPostErrorInfo } from './components/EasyPostErrorModal';
+import { EnvLoadingOverlay, EnvSwitchState } from './components/EnvLoadingOverlay';
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
 
 export default function App() {
@@ -43,6 +44,9 @@ export default function App() {
 
   // EasyPost Error Modal state (modal does NOT auto-close)
   const [easyPostError, setEasyPostError] = useState<EasyPostErrorInfo | null>(null);
+
+  // Dedicated Environment Switch Loading State
+  const [envSwitchState, setEnvSwitchState] = useState<EnvSwitchState | null>(null);
 
   // Modals state
   const [addressFixOrder, setAddressFixOrder] = useState<ShippingOrder | null>(null);
@@ -424,8 +428,20 @@ export default function App() {
     }
   };
 
-  // Environment Switch Handler
+  // Environment Switch Handler with dedicated loading screen
   const handleToggleAppEnv = async (targetEnv: 'dev' | 'prod') => {
+    if (envSwitchState?.isSwitching) return;
+
+    const currentEnv = settings?.appEnv || (settings?.easyPostMode === 'test' ? 'dev' : 'prod');
+    const startTime = Date.now();
+
+    setEnvSwitchState({
+      isSwitching: true,
+      targetEnv,
+      fromEnv: currentEnv,
+      status: 'switching',
+    });
+
     try {
       setLoading(true);
       const res = await fetch('/api/settings/environment', {
@@ -441,11 +457,42 @@ export default function App() {
         setOrders(data.orders);
       }
       fetchWalletBalance();
-      showToast(
-        data.message || `Switched to ${targetEnv.toUpperCase()} mode (Table: ${data.activeTable || (targetEnv === 'prod' ? '[dbo].[Shipping]' : '[dbo].[shippingdev]')})`,
-        'info'
-      );
-    } catch (err) {
+
+      // Ensure minimum display time of 850ms so the user sees the progress steps smoothly
+      const elapsed = Date.now() - startTime;
+      const remaining = Math.max(0, 850 - elapsed);
+      if (remaining > 0) {
+        await new Promise((resolve) => setTimeout(resolve, remaining));
+      }
+
+      const activeTableName = data.activeTable || (targetEnv === 'prod' ? '[dbo].[Shipping]' : '[dbo].[shippingdev]');
+      const orderCount = Array.isArray(data.orders) ? data.orders.length : 0;
+      const successMsg = `Switched to ${targetEnv.toUpperCase()} mode (Table: ${activeTableName}, ${orderCount} records loaded)`;
+
+      setEnvSwitchState({
+        isSwitching: true,
+        targetEnv,
+        fromEnv: currentEnv,
+        status: 'success',
+        message: successMsg,
+        orderCount,
+        tableName: activeTableName,
+      });
+
+      showToast(successMsg, 'info');
+
+      // Keep success message visible briefly for 650ms, then smoothly dismiss
+      setTimeout(() => {
+        setEnvSwitchState(null);
+      }, 650);
+    } catch (err: any) {
+      setEnvSwitchState({
+        isSwitching: true,
+        targetEnv,
+        fromEnv: currentEnv,
+        status: 'error',
+        message: err?.message || 'Failed to switch database / EasyPost environment.',
+      });
       showToast('Failed to switch database / EasyPost environment.', 'error');
     } finally {
       setLoading(false);
@@ -531,7 +578,11 @@ export default function App() {
 
   const pendingCount = orders.filter((o) => o.status === 'pending_validation').length;
   const errorCount = orders.filter((o) => o.status === 'address_error').length;
-  const readyCount = orders.filter((o) => o.status === 'ready_to_ship').length;
+  const readyCount = orders.filter((o) => {
+    if (o.status === 'shipped') return false;
+    const orderStatus = (o.dbStatus || o.shippingStatus || o.status || '').toString().trim().toLowerCase();
+    return orderStatus === 'complete' || orderStatus === 'completed';
+  }).length;
   const shippedOrders = orders.filter((o) => o.status === 'shipped');
 
   return (
@@ -569,8 +620,8 @@ export default function App() {
         addressErrorCount={errorCount}
         readyToShipCount={readyCount}
         mssqlConnected={settings?.mssqlConnected ?? true}
-        easyPostMode={settings?.easyPostMode ?? 'test'}
-        appEnv={settings?.appEnv || (settings?.easyPostMode === 'production' ? 'prod' : 'dev')}
+        easyPostMode={settings?.easyPostMode ?? 'production'}
+        appEnv={settings?.appEnv || (settings?.easyPostMode === 'test' ? 'dev' : 'prod')}
         onToggleAppEnv={handleToggleAppEnv}
         onLogout={() => setIsAuthenticated(false)}
         onSyncMssql={handleSyncMssql}
@@ -624,6 +675,7 @@ export default function App() {
             onUpdateSettings={handleUpdateSettings}
             onCreatePackage={handleCreatePackage}
             onDeletePackage={handleDeletePackage}
+            onToggleAppEnv={handleToggleAppEnv}
           />
         )}
       </main>
@@ -725,6 +777,12 @@ export default function App() {
           onClose={() => setEasyPostError(null)}
         />
       )}
+
+      {/* Dedicated Environment Switch Loading Overlay */}
+      <EnvLoadingOverlay
+        state={envSwitchState}
+        onDismiss={() => setEnvSwitchState(null)}
+      />
 
       {!isAuthenticated && (
         <LoginModal

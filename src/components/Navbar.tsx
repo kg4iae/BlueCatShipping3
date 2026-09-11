@@ -51,7 +51,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   readyToShipCount,
   mssqlConnected,
   easyPostMode,
-  appEnv = 'dev',
+  appEnv = 'prod',
   onToggleAppEnv,
   onLogout,
   onSyncMssql,

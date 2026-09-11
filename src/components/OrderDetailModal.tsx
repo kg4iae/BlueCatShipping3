@@ -200,6 +200,12 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
             <div className="flex items-center space-x-2 flex-wrap gap-y-1">
               <h2 className="text-xl font-extrabold text-slate-900">Order #{formatOrderId(order.orderNumber)}</h2>
 
+              {(order.dbStatus || order.shippingStatus) && (
+                <span className="bg-slate-100 text-slate-800 border border-slate-300 px-2.5 py-0.5 rounded-full text-xs font-mono font-semibold" title="dbo.shipping.status">
+                  DB Status: {order.dbStatus || order.shippingStatus}
+                </span>
+              )}
+
               {order.status === 'ready_to_ship' && (
                 <span className="bg-emerald-100 text-emerald-800 border border-emerald-300 px-2.5 py-0.5 rounded-full text-xs font-bold flex items-center space-x-1">
                   <CheckCircle2 className="w-3 h-3 text-emerald-600" />

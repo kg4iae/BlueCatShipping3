@@ -211,7 +211,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ initialMssqlConnected, o
             <span>Database Auth {dbStatus?.connected ? 'Active' : 'Standby'}</span>
           </div>
           <span className="text-[11px] text-slate-400">
-            {dbStatus?.appEnv === 'prod' ? 'Production Mode' : 'Development Mode'}
+            {dbStatus?.appEnv === 'dev' ? 'Development Mode' : 'Production Mode'}
           </span>
         </div>
       </div>

@@ -64,6 +64,7 @@ interface SettingsPageProps {
   onUpdateSettings: (updated: Partial<AppSetting>) => Promise<void>;
   onCreatePackage: (pkgData: Partial<PackageType>) => Promise<void>;
   onDeletePackage: (id: string) => Promise<void>;
+  onToggleAppEnv?: (targetEnv: 'dev' | 'prod') => Promise<void>;
 }
 
 export const SettingsPage: React.FC<SettingsPageProps> = ({
@@ -72,6 +73,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   onUpdateSettings,
   onCreatePackage,
   onDeletePackage,
+  onToggleAppEnv,
 }) => {
   const [activeSection, setActiveSection] = useState<'returnAddress' | 'carrierDefaults' | 'internationalCustoms' | 'qztray' | 'packingslip' | 'easypost' | 'packages' | 'mssql' | 'security'>('returnAddress');
 
@@ -118,8 +120,14 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   const [easyPostApiKey, setEasyPostApiKey] = useState(settings.easyPostApiKey || '');
   const [easyPostTestApiKey, setEasyPostTestApiKey] = useState(settings.easyPostTestApiKey || settings.easyPostApiKey || '');
   const [easyPostProdApiKey, setEasyPostProdApiKey] = useState(settings.easyPostProdApiKey || '');
-  const [easyPostMode, setEasyPostMode] = useState<'test' | 'production'>(settings.easyPostMode || 'test');
-  const [appEnv, setAppEnv] = useState<'dev' | 'prod'>(settings.appEnv || (settings.easyPostMode === 'production' ? 'prod' : 'dev'));
+  const [easyPostMode, setEasyPostMode] = useState<'test' | 'production'>(settings.easyPostMode || 'production');
+  const [appEnv, setAppEnv] = useState<'dev' | 'prod'>(settings.appEnv || (settings.easyPostMode === 'test' ? 'dev' : 'prod'));
+
+  useEffect(() => {
+    if (settings.appEnv) {
+      setAppEnv(settings.appEnv);
+    }
+  }, [settings.appEnv]);
   const [mssqlServer, setMssqlServer] = useState(settings.mssqlServer || '');
   const [mssqlPort, setMssqlPort] = useState<string>(String(settings.mssqlPort || 1433));
   const [mssqlDatabase, setMssqlDatabase] = useState(settings.mssqlDatabase || '');
@@ -490,6 +498,9 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     e.preventDefault();
     setSaving(true);
     const activeKey = appEnv === 'prod' ? (easyPostProdApiKey || easyPostApiKey) : (easyPostTestApiKey || easyPostApiKey);
+    if (onToggleAppEnv && appEnv !== settings.appEnv) {
+      await onToggleAppEnv(appEnv);
+    }
     await onUpdateSettings({
       easyPostApiKey: activeKey,
       easyPostTestApiKey,

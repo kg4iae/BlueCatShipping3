@@ -36,6 +36,8 @@ export interface ShippingOrder {
   email?: string;
   orderDate: string;
   status: OrderStatus;
+  dbStatus?: string; // dbo.shipping.status field (e.g. 'Complete', 'New', 'shipped')
+  shippingStatus?: string;
   boxId: string;
   boxName?: string;
   items: OrderItem[];
