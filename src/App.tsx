@@ -32,6 +32,7 @@ export default function App() {
 
 
   const [orders, setOrders] = useState<ShippingOrder[]>([]);
+  const [totalShippedCount, setTotalShippedCount] = useState<number>(0);
   const [packages, setPackages] = useState<PackageType[]>([]);
   const [settings, setSettings] = useState<AppSetting | null>(null);
 
@@ -98,6 +99,11 @@ export default function App() {
       const ordersData = await ordersRes.json();
       const pkgsData = await pkgsRes.json();
       const settingsData = await settingsRes.json();
+
+      const shippedCountHeader = ordersRes.headers.get('X-Total-Shipped-Count');
+      if (shippedCountHeader) {
+        setTotalShippedCount(parseInt(shippedCountHeader, 10));
+      }
 
       setOrders(ordersData);
       setPackages(pkgsData);
@@ -629,6 +635,7 @@ export default function App() {
         walletBalance={walletBalance}
         walletLoading={walletLoading}
         onRefreshWallet={fetchWalletBalance}
+        shippedHistoryCount={totalShippedCount}
       />
 
 
@@ -663,6 +670,7 @@ export default function App() {
             onOpenPrintModal={(ordersToPrint) => setPrintOrders(ordersToPrint)}
             onOpenScanFormModal={() => setShowScanFormModal(true)}
             onOpenOrderDetailModal={(order) => setOrderDetailOrder(order)}
+            totalShippedCount={totalShippedCount}
           />
         )}
 

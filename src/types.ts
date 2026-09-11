@@ -70,6 +70,14 @@ export interface ShippingOrder {
   env?: 'dev' | 'prod';
 }
 
+export interface PaginatedShippedOrders {
+  orders: ShippingOrder[];
+  totalCount: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+}
+
 export interface PackageType {
   id: string;
   code: string;

@@ -1153,7 +1153,145 @@ function parseOrderDetailsString(rawDetails: string | null | undefined): { items
   return { items, parseError };
 }
 
+// Helper: Map raw database row from [dbo].[Shipping] / [dbo].[shippingdev] to ShippingOrder
+function mapDbRowToShippingOrder(row: any, tableName: string): ShippingOrder {
+  const validationErrors: string[] = [];
+
+  const rawCountry = (row.country ? String(row.country) : 'US').trim().toUpperCase();
+  const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
+
+  const street1 = row.address1 ? String(row.address1) : '';
+  const street2 = row.address2 ? String(row.address2) : '';
+  const city = row.city ? String(row.city) : '';
+  const state = row.state ? String(row.state) : '';
+  const zip = row.postalCode ? String(row.postalCode) : '';
+  const country = row.country ? String(row.country) : 'US';
+
+  // Validate address syntax
+  const addrVal = validateAddressWithEasyPost({ street1, street2, city, state, zip, country });
+  if (!addrVal.isValid) {
+    validationErrors.push(...addrVal.errors);
+  }
+
+  // Check Total Weight
+  const rawWeight = row.TotalWeight !== null && row.TotalWeight !== undefined ? Number(row.TotalWeight) : 16;
+  if (rawWeight <= 0) {
+    validationErrors.push('Total Weight is set to 0 oz - Needs weight correction');
+  }
+
+  // Parse OrderDetails
+  const { items, parseError } = parseOrderDetailsString(row.OrderDetails);
+  if (parseError) {
+    validationErrors.push(parseError);
+  }
+
+  const rawTracking = row.trackingNumber ? String(row.trackingNumber).trim() : '';
+  const hasTracking = Boolean(rawTracking.length > 0);
+  const rawStatus = (row.status || '').toString().trim();
+  const rawStatusLower = rawStatus.toLowerCase();
+
+  const validStatuses: OrderStatus[] = ['pending_validation', 'address_error', 'ready_to_ship', 'shipped', 'cancelled'];
+  let statusVal: OrderStatus = 'pending_validation';
+  if (rawStatus && validStatuses.includes(rawStatus as OrderStatus)) {
+    statusVal = rawStatus as OrderStatus;
+  } else if (rawStatusLower === 'shipped' || hasTracking) {
+    statusVal = 'shipped';
+  } else if (rawStatusLower === 'complete' || rawStatusLower === 'completed' || rawStatusLower === 'new') {
+    statusVal = 'ready_to_ship';
+  }
+
+  if (validationErrors.length > 0 && statusVal !== 'shipped' && statusVal !== 'cancelled') {
+    statusVal = 'address_error';
+  } else if (validationErrors.length === 0 && (statusVal === 'pending_validation' || statusVal === 'address_error')) {
+    statusVal = 'ready_to_ship';
+  }
+
+  const defaultCarrierSetting = !isIntl
+    ? (db.settings.defaultDomesticCarrier || 'USPS')
+    : (db.settings.defaultInternationalCarrier || 'UPS');
+  const defaultServiceSetting = !isIntl
+    ? (db.settings.defaultDomesticService || 'Priority')
+    : (db.settings.defaultInternationalService || 'UPS Worldwide Expedited');
+
+  const rawCarrier = row.Carrier || row.carrier;
+  const rawService = row.Service || row.service;
+  const rawShippingMethod = row.shippingMethod ? String(row.shippingMethod).trim() : '';
+
+  let carrierVal: CarrierType = defaultCarrierSetting;
+  let serviceLevelVal: string = defaultServiceSetting;
+
+  if (rawCarrier && String(rawCarrier).trim()) {
+    carrierVal = normalizeCarrierName(String(rawCarrier).trim());
+    if (rawService && String(rawService).trim()) {
+      serviceLevelVal = String(rawService).trim();
+    }
+  } else if (rawShippingMethod) {
+    const firstWord = rawShippingMethod.split(' ')[0].toUpperCase();
+    const validCarriers: CarrierType[] = ['USPS', 'FedEx', 'UPS', 'DHL'];
+    if (validCarriers.includes(firstWord as CarrierType)) {
+      carrierVal = firstWord as CarrierType;
+      serviceLevelVal = rawShippingMethod.substring(firstWord.length).trim() || defaultServiceSetting;
+    } else {
+      serviceLevelVal = rawShippingMethod;
+    }
+  } else if (rawService && String(rawService).trim()) {
+    serviceLevelVal = String(rawService).trim();
+  }
+
+  const hasLabelBinary = Boolean(
+    row.hasLabel === 1 ||
+    row.hasLabel === true ||
+    (row.LabelData && (Buffer.isBuffer(row.LabelData) ? row.LabelData.length > 0 : true))
+  );
+
+  return {
+    id: String(row.Id),
+    orderNumber: row.receiptID ? String(row.receiptID) : `ORD-${row.Id}`,
+    recipientName: row.name ? String(row.name) : 'Valued Customer',
+    company: '',
+    marketplace: row.platform ? String(row.platform) : '',
+    street1: row.address1 ? String(row.address1) : '',
+    street2: row.address2 ? String(row.address2) : '',
+    city: row.city ? String(row.city) : '',
+    state: row.state ? String(row.state) : '',
+    zip: row.postalCode ? String(row.postalCode) : '',
+    country: row.country ? String(row.country) : 'US',
+    phone: row.phone ? String(row.phone) : '',
+    email: row.email ? String(row.email) : '',
+    orderDate: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString(),
+    status: statusVal,
+    dbStatus: rawStatus || (hasTracking || statusVal === 'shipped' ? 'shipped' : 'Complete'),
+    shippingStatus: rawStatus || (hasTracking || statusVal === 'shipped' ? 'shipped' : 'Complete'),
+    boxId: row.box ? String(row.box) : 'pkg_medium',
+    boxName: row.box ? String(row.box) : 'Medium Flat Rate Box',
+    weightOz: rawWeight,
+    declaredValue: 0,
+    addressValidated: Boolean(
+      statusVal === 'address_error' ? false :
+      statusVal === 'ready_to_ship' ||
+      statusVal === 'shipped' ||
+      hasTracking
+    ),
+    validationErrors: validationErrors.length > 0 ? validationErrors : undefined,
+    trackingNumber: hasTracking ? rawTracking : undefined,
+    carrier: carrierVal,
+    serviceLevel: serviceLevelVal,
+    shippingCost: row.shippingCost !== null && row.shippingCost !== undefined ? Number(row.shippingCost) : undefined,
+    shippingDate: row.shippingDate ? new Date(row.shippingDate).toISOString() : undefined,
+    easypostShipmentId: row.easypostShipmentId ? String(row.easypostShipmentId) : undefined,
+    marketplacenotified: row.marketplacenotified ? String(row.marketplacenotified) : 'No',
+    labelUrl: `/api/orders/${String(row.Id)}/label.pdf`,
+    labelBinary: row.LabelData ? Buffer.from(row.LabelData) : undefined,
+    hasLabelData: hasLabelBinary,
+    LabelData: hasLabelBinary ? true : null,
+    sourceTable: tableName,
+    env: getActiveAppEnv(),
+    items,
+  };
+}
+
 // Fetch Orders directly from MS SQL Server ([dbo].[Shipping] or [dbo].[shippingdev])
+// Fast query: Fetches all active queue orders + only the first 20 historical shipped records + total shipped count
 async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
   const pool = await getMssqlPool();
   if (!pool) return null;
@@ -1161,148 +1299,130 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
   try {
     await ensureMssqlTables(pool);
     const tableName = getShippingTableName();
-    const result = await pool.request().query(`
-      SELECT *
+
+    // Query 1: Active orders (where trackingNumber IS NULL or empty string, and status is not shipped)
+    // Query 2: First 20 historical shipped records (avoids pulling hundreds of rows on app load)
+    // Query 3: Total count of historical shipped records
+    const multiQuery = `
+      SELECT 
+        [Id], [name], [address1], [address2], [city], [state], [postalCode], [country],
+        [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
+        [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
+        [TotalWeight], [box], [easypostShipmentId], [marketplacenotified],
+        CASE WHEN [LabelData] IS NOT NULL AND DATALENGTH([LabelData]) > 0 THEN 1 ELSE 0 END AS [hasLabel]
       FROM ${tableName}
-      ORDER BY [Id] DESC
-    `);
+      WHERE ([status] != 'shipped' OR [status] IS NULL) 
+        AND ([trackingNumber] IS NULL OR LTRIM(RTRIM([trackingNumber])) = '')
+      ORDER BY [Id] DESC;
 
-    const orders: ShippingOrder[] = result.recordset.map((row: any) => {
-      const validationErrors: string[] = [];
+      SELECT 
+        [Id], [name], [address1], [address2], [city], [state], [postalCode], [country],
+        [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
+        [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
+        [TotalWeight], [box], [easypostShipmentId], [marketplacenotified],
+        CASE WHEN [LabelData] IS NOT NULL AND DATALENGTH([LabelData]) > 0 THEN 1 ELSE 0 END AS [hasLabel]
+      FROM ${tableName}
+      WHERE ([status] = 'shipped' OR ([trackingNumber] IS NOT NULL AND LTRIM(RTRIM([trackingNumber])) != ''))
+      ORDER BY ISNULL([shippingDate], [createdAt]) DESC, [Id] DESC
+      OFFSET 0 ROWS FETCH NEXT 20 ROWS ONLY;
 
-      const rawCountry = (row.country ? String(row.country) : 'US').trim().toUpperCase();
-      const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
+      SELECT COUNT(*) AS totalShippedCount
+      FROM ${tableName}
+      WHERE ([status] = 'shipped' OR ([trackingNumber] IS NOT NULL AND LTRIM(RTRIM([trackingNumber])) != ''));
+    `;
 
-      const street1 = row.address1 ? String(row.address1) : '';
-      const street2 = row.address2 ? String(row.address2) : '';
-      const city = row.city ? String(row.city) : '';
-      const state = row.state ? String(row.state) : '';
-      const zip = row.postalCode ? String(row.postalCode) : '';
-      const country = row.country ? String(row.country) : 'US';
+    const result = await pool.request().query(multiQuery);
+    const activeRows = result.recordsets[0] || [];
+    const shippedRows = result.recordsets[1] || [];
+    const totalShippedCount = result.recordsets[2]?.[0]?.totalShippedCount ?? shippedRows.length;
 
-      // Validate address syntax
-      const addrVal = validateAddressWithEasyPost({ street1, street2, city, state, zip, country });
-      if (!addrVal.isValid) {
-        validationErrors.push(...addrVal.errors);
-      }
+    const activeOrders: ShippingOrder[] = activeRows.map((row: any) => mapDbRowToShippingOrder(row, tableName));
+    const shippedOrders: ShippingOrder[] = shippedRows.map((row: any) => mapDbRowToShippingOrder(row, tableName));
+    const combinedOrders = [...activeOrders, ...shippedOrders];
 
-      // Check Total Weight
-      const rawWeight = row.TotalWeight !== null && row.TotalWeight !== undefined ? Number(row.TotalWeight) : 16;
-      if (rawWeight <= 0) {
-        validationErrors.push('Total Weight is set to 0 oz - Needs weight correction');
-      }
-
-      // Parse OrderDetails
-      const { items, parseError } = parseOrderDetailsString(row.OrderDetails);
-      if (parseError) {
-        validationErrors.push(parseError);
-      }
-
-      const validStatuses: OrderStatus[] = ['pending_validation', 'address_error', 'ready_to_ship', 'shipped', 'cancelled'];
-      let statusVal: OrderStatus = 'pending_validation';
-      if (row.status && validStatuses.includes(row.status as OrderStatus)) {
-        statusVal = row.status as OrderStatus;
-      } else if (row.trackingNumber) {
-        statusVal = 'shipped';
-      }
-
-      if (validationErrors.length > 0 && statusVal !== 'shipped' && statusVal !== 'cancelled') {
-        statusVal = 'address_error';
-      } else if (validationErrors.length === 0 && (statusVal === 'pending_validation' || statusVal === 'address_error')) {
-        statusVal = 'ready_to_ship';
-      }
-
-      const defaultCarrierSetting = !isIntl
-        ? (db.settings.defaultDomesticCarrier || 'USPS')
-        : (db.settings.defaultInternationalCarrier || 'UPS');
-      const defaultServiceSetting = !isIntl
-        ? (db.settings.defaultDomesticService || 'Priority')
-        : (db.settings.defaultInternationalService || 'UPS Worldwide Expedited');
-
-      const rawCarrier = row.Carrier || row.carrier;
-      const rawService = row.Service || row.service;
-      const rawShippingMethod = row.shippingMethod ? String(row.shippingMethod).trim() : '';
-
-      let carrierVal: CarrierType = defaultCarrierSetting;
-      let serviceLevelVal: string = defaultServiceSetting;
-
-      if (rawCarrier && String(rawCarrier).trim()) {
-        carrierVal = normalizeCarrierName(String(rawCarrier).trim());
-        if (rawService && String(rawService).trim()) {
-          serviceLevelVal = String(rawService).trim();
-        }
-      } else if (rawShippingMethod) {
-        const firstWord = rawShippingMethod.split(' ')[0].toUpperCase();
-        const validCarriers: CarrierType[] = ['USPS', 'FedEx', 'UPS', 'DHL'];
-        if (validCarriers.includes(firstWord as CarrierType)) {
-          carrierVal = firstWord as CarrierType;
-          serviceLevelVal = rawShippingMethod.substring(firstWord.length).trim() || defaultServiceSetting;
-        } else {
-          serviceLevelVal = rawShippingMethod;
-        }
-      } else if (rawService && String(rawService).trim()) {
-        serviceLevelVal = String(rawService).trim();
-      }
-
-      return {
-        id: String(row.Id),
-        orderNumber: row.receiptID ? String(row.receiptID) : `ORD-${row.Id}`,
-        recipientName: row.name ? String(row.name) : 'Valued Customer',
-        company: '',
-        marketplace: row.platform ? String(row.platform) : '',
-        street1: row.address1 ? String(row.address1) : '',
-        street2: row.address2 ? String(row.address2) : '',
-        city: row.city ? String(row.city) : '',
-        state: row.state ? String(row.state) : '',
-        zip: row.postalCode ? String(row.postalCode) : '',
-        country: row.country ? String(row.country) : 'US',
-        phone: row.phone ? String(row.phone) : '',
-        email: row.email ? String(row.email) : '',
-        orderDate: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString(),
-        status: statusVal,
-        dbStatus: row.status !== undefined && row.status !== null && String(row.status).trim() !== ''
-          ? String(row.status).trim()
-          : (row.trackingNumber || statusVal === 'shipped' ? 'shipped' : 'Complete'),
-        shippingStatus: row.status !== undefined && row.status !== null && String(row.status).trim() !== ''
-          ? String(row.status).trim()
-          : (row.trackingNumber || statusVal === 'shipped' ? 'shipped' : 'Complete'),
-        boxId: row.box ? String(row.box) : 'pkg_medium',
-        boxName: row.box ? String(row.box) : 'Medium Flat Rate Box',
-        weightOz: rawWeight,
-        declaredValue: 0,
-        addressValidated: Boolean(
-          statusVal === 'address_error' ? false :
-          statusVal === 'ready_to_ship' ||
-          statusVal === 'shipped' ||
-          row.trackingNumber
-        ),
-        validationErrors: validationErrors.length > 0 ? validationErrors : undefined,
-        trackingNumber: row.trackingNumber ? String(row.trackingNumber) : undefined,
-        carrier: carrierVal,
-        serviceLevel: serviceLevelVal,
-        shippingCost: row.shippingCost !== null && row.shippingCost !== undefined ? Number(row.shippingCost) : undefined,
-        shippingDate: row.shippingDate ? new Date(row.shippingDate).toISOString() : undefined,
-        easypostShipmentId: row.easypostShipmentId ? String(row.easypostShipmentId) : undefined,
-        marketplacenotified: row.marketplacenotified ? String(row.marketplacenotified) : 'No',
-        labelUrl: `/api/orders/${String(row.Id)}/label.pdf`,
-        labelBinary: row.LabelData ? Buffer.from(row.LabelData) : undefined,
-        hasLabelData: Boolean(row.LabelData && (Buffer.isBuffer(row.LabelData) ? row.LabelData.length > 0 : true)),
-        LabelData: row.LabelData ? true : null,
-        sourceTable: tableName,
-        env: getActiveAppEnv(),
-        items,
-      };
-    });
-
-    db.orders = orders;
+    db.orders = combinedOrders;
+    (db as any).totalShippedCount = totalShippedCount;
     if (getActiveAppEnv() === 'dev') {
-      db.devOrders = orders;
+      db.devOrders = combinedOrders;
     } else {
-      db.prodOrders = orders;
+      db.prodOrders = combinedOrders;
     }
-    return orders;
+    return combinedOrders;
   } catch (err: any) {
     console.error('[MSSQL] Error fetching orders from MS SQL:', err);
+    return null;
+  }
+}
+
+// Fetch Paginated Shipped Historical Orders from MS SQL Server
+async function fetchShippedOrdersFromMssql(options: {
+  page?: number;
+  limit?: number;
+  carrier?: string;
+  search?: string;
+}): Promise<{ orders: ShippingOrder[]; totalCount: number; page: number; limit: number; totalPages: number } | null> {
+  const pool = await getMssqlPool();
+  if (!pool) return null;
+
+  try {
+    await ensureMssqlTables(pool);
+    const tableName = getShippingTableName();
+    const page = Math.max(1, options.page || 1);
+    const limit = Math.max(1, Math.min(100, options.limit || 20));
+    const offset = (page - 1) * limit;
+
+    const req = pool.request();
+    req.input('offset', sql.Int, offset);
+    req.input('limit', sql.Int, limit);
+
+    const whereClauses = ["([status] = 'shipped' OR ([trackingNumber] IS NOT NULL AND LTRIM(RTRIM([trackingNumber])) != ''))"];
+
+    if (options.carrier && options.carrier !== 'all') {
+      whereClauses.push("([Carrier] = @carrier OR [Carrier] LIKE @carrierLike)");
+      req.input('carrier', sql.NVarChar(50), options.carrier);
+      req.input('carrierLike', sql.NVarChar(50), `%${options.carrier}%`);
+    }
+
+    if (options.search && options.search.trim()) {
+      const q = `%${options.search.trim()}%`;
+      whereClauses.push(
+        "([receiptID] LIKE @search OR [name] LIKE @search OR [trackingNumber] LIKE @search OR [city] LIKE @search OR [box] LIKE @search OR [OrderDetails] LIKE @search)"
+      );
+      req.input('search', sql.NVarChar(sql.MAX), q);
+    }
+
+    const whereSql = whereClauses.join(' AND ');
+
+    // 1. Total count query matching filters
+    const countRes = await req.query(`SELECT COUNT(*) AS totalCount FROM ${tableName} WHERE ${whereSql}`);
+    const totalCount = countRes.recordset[0]?.totalCount || 0;
+
+    // 2. Paginated rows query (skips bulky LabelData varbinary column for high performance)
+    const rowsRes = await req.query(`
+      SELECT 
+        [Id], [name], [address1], [address2], [city], [state], [postalCode], [country],
+        [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
+        [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
+        [TotalWeight], [box], [easypostShipmentId], [marketplacenotified],
+        CASE WHEN [LabelData] IS NOT NULL AND DATALENGTH([LabelData]) > 0 THEN 1 ELSE 0 END AS [hasLabel]
+      FROM ${tableName}
+      WHERE ${whereSql}
+      ORDER BY ISNULL([shippingDate], [createdAt]) DESC, [Id] DESC
+      OFFSET @offset ROWS
+      FETCH NEXT @limit ROWS ONLY
+    `);
+
+    const orders = rowsRes.recordset.map((row: any) => mapDbRowToShippingOrder(row, tableName));
+
+    return {
+      orders,
+      totalCount,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(totalCount / limit)),
+    };
+  } catch (err: any) {
+    console.error('[MSSQL] Error fetching paginated shipped orders:', err);
     return null;
   }
 }
@@ -1316,6 +1436,7 @@ interface DatabaseSchema {
   settings: AppSetting;
   scanForms: ScanFormType[];
   users: User[];
+  totalShippedCount?: number;
 }
 
 // Initial Packages DB Seed
@@ -2339,6 +2460,64 @@ app.delete('/api/users/:username', async (req, res) => {
 });
 
 
+// Paginated Shipped Orders API (defaults to 20 records, supports 20, 50, 100 limit, carrier filter, and search query)
+app.get('/api/orders/shipped', async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+  const limit = Math.max(1, Math.min(100, parseInt(req.query.limit as string, 10) || 20));
+  const carrier = (req.query.carrier as string) || 'all';
+  const search = (req.query.search as string) || '';
+
+  if (db.settings.mssqlServer && db.settings.mssqlDatabase && db.settings.mssqlUser) {
+    const result = await fetchShippedOrdersFromMssql({ page, limit, carrier, search });
+    if (result) {
+      // Merge into local cache so details modal and print modals can find the loaded records
+      for (const o of result.orders) {
+        const idx = db.orders.findIndex((x) => x.id === o.id || x.orderNumber === o.orderNumber);
+        if (idx >= 0) {
+          db.orders[idx] = o;
+        } else {
+          db.orders.push(o);
+        }
+      }
+      return res.json(result);
+    }
+  }
+
+  // Fallback to in-memory db.orders
+  let shipped = db.orders.filter((o) => o.status === 'shipped' || o.trackingNumber);
+  if (carrier !== 'all') {
+    shipped = shipped.filter((o) => o.carrier === carrier);
+  }
+  if (search.trim()) {
+    const q = search.toLowerCase();
+    shipped = shipped.filter(
+      (o) =>
+        o.orderNumber.toLowerCase().includes(q) ||
+        o.recipientName.toLowerCase().includes(q) ||
+        (o.company && o.company.toLowerCase().includes(q)) ||
+        (o.trackingNumber && o.trackingNumber.toLowerCase().includes(q)) ||
+        (o.city && o.city.toLowerCase().includes(q)) ||
+        (o.boxName && o.boxName.toLowerCase().includes(q))
+    );
+  }
+  shipped.sort(
+    (a, b) =>
+      new Date(b.shippingDate || b.orderDate).getTime() - new Date(a.shippingDate || a.orderDate).getTime()
+  );
+
+  const totalCount = shipped.length;
+  const offset = (page - 1) * limit;
+  const paged = shipped.slice(offset, offset + limit);
+
+  res.json({
+    orders: paged,
+    totalCount,
+    page,
+    limit,
+    totalPages: Math.max(1, Math.ceil(totalCount / limit)),
+  });
+});
+
 // Orders API
 app.get('/api/orders', async (req, res) => {
   const { status, search, shippedOnly } = req.query;
@@ -2353,7 +2532,12 @@ app.get('/api/orders', async (req, res) => {
     // Keep in-memory dataset in sync with active environment
     const activeEnv = getActiveAppEnv(db.settings);
     db.orders = activeEnv === 'prod' ? db.prodOrders : db.devOrders;
+    db.totalShippedCount = db.orders.filter((o) => o.status === 'shipped' || o.trackingNumber).length;
   }
+
+  const totalShipped = db.totalShippedCount ?? db.orders.filter((o) => o.status === 'shipped' || o.trackingNumber).length;
+  res.setHeader('Access-Control-Expose-Headers', 'X-Total-Shipped-Count');
+  res.setHeader('X-Total-Shipped-Count', String(totalShipped));
 
   let result = [...db.orders];
 

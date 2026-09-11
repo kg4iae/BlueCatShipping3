@@ -1,21 +1,23 @@
-import React, { useState } from 'react';
-import { ShippingOrder, AppSetting, formatOrderId } from '../types';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { ShippingOrder, AppSetting, formatOrderId, PaginatedShippedOrders } from '../types';
 import { getCountryFlag } from './Dashboard';
 import {
   Search,
   RotateCcw,
-  ExternalLink,
   PackageCheck,
   Calendar,
   Truck,
   Box,
-  DollarSign,
-  Filter,
   CheckCircle2,
   FileText,
   Copy,
-  Sparkles,
   Download,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  Loader2,
+  RefreshCw,
 } from 'lucide-react';
 
 interface SearchShippedProps {
@@ -25,6 +27,7 @@ interface SearchShippedProps {
   onOpenPrintModal: (orders: ShippingOrder[]) => void;
   onOpenScanFormModal?: () => void;
   onOpenOrderDetailModal?: (order: ShippingOrder) => void;
+  totalShippedCount?: number;
 }
 
 export const SearchShipped: React.FC<SearchShippedProps> = ({
@@ -34,26 +37,113 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
   onOpenPrintModal,
   onOpenScanFormModal,
   onOpenOrderDetailModal,
+  totalShippedCount: initialTotalCount,
 }) => {
+  // Pagination State: Default 20 records per page, support 20, 50, 100
+  const [pageSize, setPageSize] = useState<number>(20);
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [totalCount, setTotalCount] = useState<number>(
+    initialTotalCount !== undefined && initialTotalCount > 0
+      ? initialTotalCount
+      : shippedOrders.length
+  );
+  const [displayedOrders, setDisplayedOrders] = useState<ShippingOrder[]>(
+    shippedOrders.slice(0, 20)
+  );
+  const [loading, setLoading] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [carrierFilter, setCarrierFilter] = useState('all');
   const [copiedTracking, setCopiedTracking] = useState<string | null>(null);
   const [selectedOrderIds, setSelectedOrderIds] = useState<Set<string>>(new Set());
 
-  const filteredOrders = shippedOrders.filter((order) => {
-    if (carrierFilter !== 'all' && order.carrier !== carrierFilter) return false;
+  // Track whether initial mount has happened to avoid redundant fetch if already preloaded
+  const isInitialMount = useRef(true);
+  const searchTimeoutRef = useRef<any>(null);
 
-    if (!searchQuery.trim()) return true;
-    const q = searchQuery.toLowerCase();
-    return (
-      order.orderNumber.toLowerCase().includes(q) ||
-      order.recipientName.toLowerCase().includes(q) ||
-      (order.company && order.company.toLowerCase().includes(q)) ||
-      (order.trackingNumber && order.trackingNumber.toLowerCase().includes(q)) ||
-      (order.city && order.city.toLowerCase().includes(q)) ||
-      (order.boxName && order.boxName.toLowerCase().includes(q))
-    );
-  });
+  // Sync when initialTotalCount or shippedOrders updates from parent
+  useEffect(() => {
+    if (initialTotalCount !== undefined && initialTotalCount > 0) {
+      setTotalCount(initialTotalCount);
+    }
+  }, [initialTotalCount]);
+
+  // Fetch paginated data from server
+  const fetchPage = useCallback(
+    async (page: number, limit: number, carrier: string, query: string) => {
+      setLoading(true);
+      try {
+        const params = new URLSearchParams({
+          page: String(page),
+          limit: String(limit),
+          carrier: carrier || 'all',
+          search: query.trim(),
+        });
+        const res = await fetch(`/api/orders/shipped?${params.toString()}`);
+        if (res.ok) {
+          const data: PaginatedShippedOrders = await res.json();
+          setDisplayedOrders(data.orders || []);
+          setTotalCount(data.totalCount || 0);
+          setCurrentPage(data.page || 1);
+        }
+      } catch (err) {
+        console.error('[SearchShipped] Failed to fetch paginated shipped orders:', err);
+      } finally {
+        setLoading(false);
+      }
+    },
+    []
+  );
+
+  // Trigger fetch when pagination or filters change
+  useEffect(() => {
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      // If we already have preloaded shippedOrders and default settings, we use them
+      if (shippedOrders.length > 0 && currentPage === 1 && pageSize === 20 && carrierFilter === 'all' && !searchQuery) {
+        setDisplayedOrders(shippedOrders.slice(0, 20));
+        return;
+      }
+    }
+
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+
+    searchTimeoutRef.current = setTimeout(() => {
+      fetchPage(currentPage, pageSize, carrierFilter, searchQuery);
+    }, 250);
+
+    return () => {
+      if (searchTimeoutRef.current) {
+        clearTimeout(searchTimeoutRef.current);
+      }
+    };
+  }, [currentPage, pageSize, carrierFilter, searchQuery, fetchPage]);
+
+  // Handle Page Size Change (20, 50, 100)
+  const handlePageSizeChange = (newSize: number) => {
+    setPageSize(newSize);
+    setCurrentPage(1);
+    setSelectedOrderIds(new Set());
+  };
+
+  // Handle Carrier Filter Change
+  const handleCarrierChange = (newCarrier: string) => {
+    setCarrierFilter(newCarrier);
+    setCurrentPage(1);
+    setSelectedOrderIds(new Set());
+  };
+
+  // Handle Search Input Change
+  const handleSearchChange = (val: string) => {
+    setSearchQuery(val);
+    setCurrentPage(1);
+    setSelectedOrderIds(new Set());
+  };
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const startRecord = totalCount === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+  const endRecord = Math.min(currentPage * pageSize, totalCount);
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -71,33 +161,66 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
     setSelectedOrderIds(next);
   };
 
-  const toggleAll = () => {
-    if (selectedOrderIds.size === filteredOrders.length && filteredOrders.length > 0) {
+  const toggleAllOnPage = () => {
+    if (selectedOrderIds.size === displayedOrders.length && displayedOrders.length > 0) {
       setSelectedOrderIds(new Set());
     } else {
-      setSelectedOrderIds(new Set(filteredOrders.map((o) => o.id)));
+      setSelectedOrderIds(new Set(displayedOrders.map((o) => o.id)));
     }
   };
-  
-  const selectedOrders = filteredOrders.filter((o) => selectedOrderIds.has(o.id));
+
+  const selectedOrders = displayedOrders.filter((o) => selectedOrderIds.has(o.id));
+
+  // Generate page numbers for smart pagination bar
+  const getPageNumbers = () => {
+    const pages: (number | string)[] = [];
+    if (totalPages <= 7) {
+      for (let i = 1; i <= totalPages; i++) pages.push(i);
+    } else {
+      pages.push(1);
+      if (currentPage > 3) {
+        pages.push('...');
+      }
+      const start = Math.max(2, currentPage - 1);
+      const end = Math.min(totalPages - 1, currentPage + 1);
+      for (let i = start; i <= end; i++) {
+        if (!pages.includes(i)) pages.push(i);
+      }
+      if (currentPage < totalPages - 2) {
+        pages.push('...');
+      }
+      if (!pages.includes(totalPages)) pages.push(totalPages);
+    }
+    return pages;
+  };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {/* Header Banner */}
       <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm flex flex-wrap items-center justify-between gap-4">
         <div>
           <div className="flex items-center space-x-2">
             <h2 className="text-xl font-bold text-slate-900">Shipped Packages &amp; Historical Archive</h2>
             <span className="bg-indigo-50 text-indigo-700 border border-indigo-200 text-xs px-2.5 py-0.5 rounded-full font-bold">
-              {shippedOrders.length} Shipped Records
+              {totalCount} Total Shipped
             </span>
           </div>
           <p className="text-xs text-slate-500 mt-0.5">
-            Search historical shipping database records, print reprint receipts/labels, or launch replacement Re-Ships.
+            Historical records archive. Displaying {displayedOrders.length} records on current page (Page {currentPage} of {totalPages}).
           </p>
         </div>
 
         <div className="flex items-center space-x-2">
+          <button
+            onClick={() => fetchPage(currentPage, pageSize, carrierFilter, searchQuery)}
+            disabled={loading}
+            className="flex items-center space-x-1.5 bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 px-3 py-2 rounded-lg text-xs font-semibold shadow-sm transition-all cursor-pointer disabled:opacity-50"
+            title="Refresh current page from database"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 text-slate-500 ${loading ? 'animate-spin' : ''}`} />
+            <span>Refresh</span>
+          </button>
+
           {onOpenScanFormModal && (
             <button
               onClick={onOpenScanFormModal}
@@ -107,6 +230,7 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
               <span>USPS SCAN Form</span>
             </button>
           )}
+
           {selectedOrders.length > 0 && (
             <button
               onClick={() => onOpenPrintModal(selectedOrders)}
@@ -116,50 +240,111 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
               <span>Print Selected ({selectedOrders.length})</span>
             </button>
           )}
-          {shippedOrders.length > 0 && (
+
+          {displayedOrders.length > 0 && (
             <button
-              onClick={() => onOpenPrintModal(filteredOrders)}
-              className="flex items-center space-x-2 bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 px-4 py-2 rounded-lg text-xs font-semibold shadow-sm transition-all cursor-pointer"
+              onClick={() => onOpenPrintModal(displayedOrders)}
+              className="flex items-center space-x-2 bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 px-3 py-2 rounded-lg text-xs font-semibold shadow-sm transition-all cursor-pointer"
+              title="Print all records visible on current page"
             >
               <FileText className="w-4 h-4 text-indigo-600" />
-              <span>Reprint Filtered Batch</span>
+              <span>Print Page Batch</span>
             </button>
           )}
         </div>
       </div>
 
-      {/* Filter & Search Bar */}
+      {/* Filter, Search & Page Size Bar */}
       <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm space-y-3">
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          {/* Search Box */}
           <div className="relative flex-1 min-w-[280px]">
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
             <input
               type="text"
               placeholder="Search by Order #, Recipient, Tracking #, City, or Box Name..."
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white"
+              onChange={(e) => handleSearchChange(e.target.value)}
+              className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-9 pr-8 py-1.5 text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white"
             />
+            {searchQuery && (
+              <button
+                onClick={() => handleSearchChange('')}
+                className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-600 text-xs font-bold px-1"
+                title="Clear search"
+              >
+                ✕
+              </button>
+            )}
           </div>
 
-          <div className="flex items-center space-x-2">
-            <span className="text-xs text-slate-500 font-semibold">Carrier Filter:</span>
-            <select
-              value={carrierFilter}
-              onChange={(e) => setCarrierFilter(e.target.value)}
-              className="bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-3 py-1.5 text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none cursor-pointer"
-            >
-              <option value="all">All Carriers</option>
-              <option value="USPS">USPS</option>
-              <option value="UPS">UPS</option>
-              <option value="FedEx">FedEx</option>
-            </select>
+          <div className="flex items-center space-x-3 flex-wrap gap-y-2">
+            {/* Carrier Filter */}
+            <div className="flex items-center space-x-1.5">
+              <span className="text-xs text-slate-500 font-semibold">Carrier:</span>
+              <select
+                value={carrierFilter}
+                onChange={(e) => handleCarrierChange(e.target.value)}
+                className="bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-2.5 py-1.5 text-xs font-medium focus:ring-2 focus:ring-indigo-500 focus:outline-none cursor-pointer"
+              >
+                <option value="all">All Carriers</option>
+                <option value="USPS">USPS</option>
+                <option value="UPS">UPS</option>
+                <option value="FedEx">FedEx</option>
+              </select>
+            </div>
+
+            {/* Page Size Selector: 20, 50, 100 */}
+            <div className="flex items-center space-x-1.5 border-l border-slate-200 pl-3">
+              <span className="text-xs text-slate-500 font-semibold">Show:</span>
+              <select
+                id="pagination-pagesize-select"
+                value={pageSize}
+                onChange={(e) => handlePageSizeChange(Number(e.target.value))}
+                className="bg-slate-50 border border-slate-200 text-slate-800 rounded-lg px-2.5 py-1.5 text-xs font-bold text-indigo-700 focus:ring-2 focus:ring-indigo-500 focus:outline-none cursor-pointer"
+              >
+                <option value={20}>20 records</option>
+                <option value={50}>50 records</option>
+                <option value={100}>100 records</option>
+              </select>
+            </div>
           </div>
+        </div>
+
+        {/* Status Line: Records range and loading spinner */}
+        <div className="flex items-center justify-between text-xs text-slate-500 pt-1 border-t border-slate-100">
+          <div className="flex items-center space-x-2">
+            <span>
+              Showing <strong className="text-slate-800">{startRecord}</strong> to{' '}
+              <strong className="text-slate-800">{endRecord}</strong> of{' '}
+              <strong className="text-indigo-600">{totalCount}</strong> records
+            </span>
+            {searchQuery && (
+              <span className="bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded text-[11px]">
+                Filtered by &quot;{searchQuery}&quot;
+              </span>
+            )}
+          </div>
+          {loading && (
+            <div className="flex items-center space-x-1.5 text-indigo-600 text-xs font-medium">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              <span>Loading records...</span>
+            </div>
+          )}
         </div>
       </div>
 
       {/* Table of Shipped Orders */}
-      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm relative">
+        {loading && (
+          <div className="absolute inset-0 bg-white/60 backdrop-blur-[1px] z-10 flex items-center justify-center">
+            <div className="flex items-center space-x-2 bg-white px-4 py-2 rounded-lg shadow-md border border-slate-200 text-slate-700 text-xs font-semibold">
+              <Loader2 className="w-4 h-4 text-indigo-600 animate-spin" />
+              <span>Fetching {pageSize} records...</span>
+            </div>
+          </div>
+        )}
+
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead className="bg-slate-50 text-slate-500 uppercase text-[10px] font-bold tracking-widest border-b border-slate-200">
@@ -167,9 +352,10 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
                 <th className="py-3 px-3 w-10">
                   <input
                     type="checkbox"
-                    checked={selectedOrderIds.size === filteredOrders.length && filteredOrders.length > 0}
-                    onChange={toggleAll}
+                    checked={selectedOrderIds.size === displayedOrders.length && displayedOrders.length > 0}
+                    onChange={toggleAllOnPage}
                     className="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500 cursor-pointer"
+                    title="Select all on this page"
                   />
                 </th>
                 <th className="py-3 px-3">Order ID &amp; Date</th>
@@ -181,15 +367,27 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-xs text-slate-800">
-              {filteredOrders.length === 0 ? (
+              {displayedOrders.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="py-12 text-center text-slate-500">
                     <Search className="w-8 h-8 text-slate-400 mx-auto mb-2 opacity-50" />
                     <p className="font-medium">No shipped records match your query.</p>
+                    {(searchQuery || carrierFilter !== 'all') && (
+                      <button
+                        onClick={() => {
+                          setSearchQuery('');
+                          setCarrierFilter('all');
+                          setCurrentPage(1);
+                        }}
+                        className="mt-2 text-indigo-600 hover:text-indigo-800 text-xs font-semibold underline cursor-pointer"
+                      >
+                        Reset filters
+                      </button>
+                    )}
                   </td>
                 </tr>
               ) : (
-                filteredOrders.map((order) => (
+                displayedOrders.map((order) => (
                   <tr key={order.id} className="hover:bg-indigo-50/40 transition-colors">
                     <td className="py-3 px-3">
                       <input
@@ -340,6 +538,102 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
               )}
             </tbody>
           </table>
+        </div>
+
+        {/* Pagination Control Bar at Bottom of Table */}
+        <div className="bg-slate-50 border-t border-slate-200 px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs">
+          {/* Left: Summary and Page Size */}
+          <div className="flex items-center space-x-3">
+            <span className="text-slate-600">
+              Showing <strong className="text-slate-900">{startRecord}</strong> - <strong className="text-slate-900">{endRecord}</strong> of <strong className="text-indigo-600">{totalCount}</strong> records
+            </span>
+            <div className="flex items-center space-x-1.5">
+              <span className="text-slate-400">|</span>
+              <span className="text-slate-500">Per page:</span>
+              <div className="inline-flex rounded-md shadow-xs" role="group">
+                {[20, 50, 100].map((size) => (
+                  <button
+                    key={size}
+                    onClick={() => handlePageSizeChange(size)}
+                    className={`px-2.5 py-1 text-xs font-semibold border transition-all cursor-pointer ${
+                      pageSize === size
+                        ? 'bg-indigo-600 text-white border-indigo-600 z-10'
+                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                    } ${size === 20 ? 'rounded-l-md' : ''} ${size === 100 ? 'rounded-r-md' : ''} -ml-px first:ml-0`}
+                  >
+                    {size}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Right: Page Navigation Buttons */}
+          <div className="flex items-center space-x-1">
+            {/* First Page */}
+            <button
+              onClick={() => setCurrentPage(1)}
+              disabled={currentPage <= 1 || loading}
+              className="p-1.5 rounded-md border border-slate-300 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+              title="First Page"
+            >
+              <ChevronsLeft className="w-4 h-4" />
+            </button>
+
+            {/* Prev Page */}
+            <button
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              disabled={currentPage <= 1 || loading}
+              className="p-1.5 rounded-md border border-slate-300 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+              title="Previous Page"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+
+            {/* Page Numbers */}
+            <div className="flex items-center space-x-1 px-1">
+              {getPageNumbers().map((p, idx) =>
+                typeof p === 'number' ? (
+                  <button
+                    key={idx}
+                    onClick={() => setCurrentPage(p)}
+                    disabled={loading}
+                    className={`min-w-[32px] h-8 px-2 rounded-md text-xs font-bold transition-colors cursor-pointer ${
+                      currentPage === p
+                        ? 'bg-indigo-600 text-white shadow-sm'
+                        : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    {p}
+                  </button>
+                ) : (
+                  <span key={idx} className="px-1 text-slate-400 font-bold select-none">
+                    {p}
+                  </span>
+                )
+              )}
+            </div>
+
+            {/* Next Page */}
+            <button
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+              disabled={currentPage >= totalPages || loading}
+              className="p-1.5 rounded-md border border-slate-300 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+              title="Next Page"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+
+            {/* Last Page */}
+            <button
+              onClick={() => setCurrentPage(totalPages)}
+              disabled={currentPage >= totalPages || loading}
+              className="p-1.5 rounded-md border border-slate-300 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+              title="Last Page"
+            >
+              <ChevronsRight className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </div>
     </div>

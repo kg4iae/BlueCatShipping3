@@ -39,6 +39,7 @@ interface NavbarProps {
   walletBalance?: number | null;
   walletLoading?: boolean;
   onRefreshWallet?: () => void;
+  shippedHistoryCount?: number;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -59,6 +60,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   walletBalance,
   walletLoading,
   onRefreshWallet,
+  shippedHistoryCount,
 }) => {
   const [isSyncing, setIsSyncing] = React.useState(false);
 
@@ -246,6 +248,11 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <Search className="w-4 h-4" />
               <span>Shipped History</span>
+              {shippedHistoryCount !== undefined && shippedHistoryCount > 0 && (
+                <span className="ml-1 px-1.5 py-0.2 bg-slate-800 text-slate-300 text-xs font-bold rounded-full border border-slate-700">
+                  {shippedHistoryCount}
+                </span>
+              )}
             </button>
 
             <button
