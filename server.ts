@@ -610,6 +610,26 @@ async function ensureMssqlTables(pool: sql.ConnectionPool): Promise<void> {
         IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'LabelData')
             ALTER TABLE [dbo].[shippingdev] ADD [LabelData] [varbinary](max) NULL;
 
+        -- Ensure default constraint DF_Shipping_status ('New') on Shipping
+        IF NOT EXISTS (
+            SELECT 1 FROM sys.default_constraints 
+            WHERE parent_object_id = OBJECT_ID(N'[dbo].[Shipping]') 
+              AND parent_column_id = COLUMNPROPERTY(OBJECT_ID(N'[dbo].[Shipping]'), 'status', 'ColumnId')
+        )
+        BEGIN
+            ALTER TABLE [dbo].[Shipping] ADD CONSTRAINT DF_Shipping_status DEFAULT 'New' FOR [status];
+        END;
+
+        -- Ensure default constraint DF_shippingdev_status ('New') on shippingdev
+        IF NOT EXISTS (
+            SELECT 1 FROM sys.default_constraints 
+            WHERE parent_object_id = OBJECT_ID(N'[dbo].[shippingdev]') 
+              AND parent_column_id = COLUMNPROPERTY(OBJECT_ID(N'[dbo].[shippingdev]'), 'status', 'ColumnId')
+        )
+        BEGIN
+            ALTER TABLE [dbo].[shippingdev] ADD CONSTRAINT DF_shippingdev_status DEFAULT 'New' FOR [status];
+        END;
+
         -- 3. Configuration table
         IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Configuration')
         BEGIN
@@ -635,6 +655,60 @@ async function ensureMssqlTables(pool: sql.ConnectionPool): Promise<void> {
       `;
 
       await pool.request().query(schemaBatch);
+
+      // Ensure triggers on Shipping and shippingdev to guarantee status defaults to 'New' upon creation if blank/NULL
+      try {
+        await pool.request().query(`
+          CREATE OR ALTER TRIGGER [dbo].[tr_shipping_ensure_status_new]
+          ON [dbo].[Shipping]
+          AFTER INSERT, UPDATE
+          AS
+          BEGIN
+              SET NOCOUNT ON;
+              IF TRIGGER_NESTLEVEL() > 1 RETURN;
+
+              UPDATE s
+              SET s.status = 'New'
+              FROM [dbo].[Shipping] s
+              INNER JOIN inserted i ON s.Id = i.Id
+              WHERE (s.status IS NULL OR LTRIM(RTRIM(CAST(s.status AS NVARCHAR(MAX)))) = '')
+                AND (s.trackingNumber IS NULL OR LTRIM(RTRIM(CAST(s.trackingNumber AS NVARCHAR(MAX)))) = '');
+          END;
+        `);
+
+        await pool.request().query(`
+          CREATE OR ALTER TRIGGER [dbo].[tr_shippingdev_ensure_status_new]
+          ON [dbo].[shippingdev]
+          AFTER INSERT, UPDATE
+          AS
+          BEGIN
+              SET NOCOUNT ON;
+              IF TRIGGER_NESTLEVEL() > 1 RETURN;
+
+              UPDATE s
+              SET s.status = 'New'
+              FROM [dbo].[shippingdev] s
+              INNER JOIN inserted i ON s.Id = i.Id
+              WHERE (s.status IS NULL OR LTRIM(RTRIM(CAST(s.status AS NVARCHAR(MAX)))) = '')
+                AND (s.trackingNumber IS NULL OR LTRIM(RTRIM(CAST(s.trackingNumber AS NVARCHAR(MAX)))) = '');
+          END;
+        `);
+
+        // Clean up any historical blank or null status records
+        await pool.request().query(`
+          UPDATE [dbo].[Shipping]
+          SET [status] = 'New'
+          WHERE ([status] IS NULL OR LTRIM(RTRIM(CAST([status] AS NVARCHAR(MAX)))) = '')
+            AND ([trackingNumber] IS NULL OR LTRIM(RTRIM(CAST([trackingNumber] AS NVARCHAR(MAX)))) = '');
+
+          UPDATE [dbo].[shippingdev]
+          SET [status] = 'New'
+          WHERE ([status] IS NULL OR LTRIM(RTRIM(CAST([status] AS NVARCHAR(MAX)))) = '')
+            AND ([trackingNumber] IS NULL OR LTRIM(RTRIM(CAST([trackingNumber] AS NVARCHAR(MAX)))) = '');
+        `);
+      } catch (triggerErr: any) {
+        console.warn('[MSSQL] Notice while ensuring status triggers:', triggerErr?.message || triggerErr);
+      }
 
       // Check count in Package table; if empty and we have seed packages, populate MS SQL
       const pkgCountRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Package]');
@@ -939,9 +1013,15 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
     req.input('Carrier', sql.NVarChar(sql.MAX), carrierVal);
     req.input('Service', sql.NVarChar(sql.MAX), serviceVal);
     req.input('trackingNumber', sql.NVarChar(sql.MAX), order.trackingNumber || null);
-    const mssqlStatus = order.status === 'shipped' || order.trackingNumber
-      ? 'shipped'
-      : (order.dbStatus || order.shippingStatus || 'Complete');
+    const rawOrderDbStatus = (order.dbStatus || order.shippingStatus || '').toString().trim();
+    let mssqlStatus = 'New';
+    if (order.status === 'shipped' || (order.trackingNumber && String(order.trackingNumber).trim() !== '')) {
+      mssqlStatus = 'shipped';
+    } else if (rawOrderDbStatus) {
+      mssqlStatus = rawOrderDbStatus;
+    } else {
+      mssqlStatus = 'New';
+    }
     req.input('status', sql.NVarChar(sql.MAX), mssqlStatus);
     req.input('shippingCost', sql.Decimal(18, 2), order.shippingCost || null);
     req.input('shippingDate', sql.DateTime2(7), order.shippingDate ? new Date(order.shippingDate) : null);
@@ -1196,7 +1276,7 @@ function mapDbRowToShippingOrder(row: any, tableName: string): ShippingOrder {
     statusVal = rawStatus as OrderStatus;
   } else if (rawStatusLower === 'shipped' || hasTracking) {
     statusVal = 'shipped';
-  } else if (rawStatusLower === 'complete' || rawStatusLower === 'completed' || rawStatusLower === 'new') {
+  } else if (rawStatusLower === 'complete' || rawStatusLower === 'completed' || rawStatusLower === 'new' || !rawStatusLower) {
     statusVal = 'ready_to_ship';
   }
 
@@ -1260,8 +1340,8 @@ function mapDbRowToShippingOrder(row: any, tableName: string): ShippingOrder {
     email: row.email ? String(row.email) : '',
     orderDate: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString(),
     status: statusVal,
-    dbStatus: rawStatus || (hasTracking || statusVal === 'shipped' ? 'shipped' : 'Complete'),
-    shippingStatus: rawStatus || (hasTracking || statusVal === 'shipped' ? 'shipped' : 'Complete'),
+    dbStatus: rawStatus || (hasTracking || statusVal === 'shipped' ? 'shipped' : 'New'),
+    shippingStatus: rawStatus || (hasTracking || statusVal === 'shipped' ? 'shipped' : 'New'),
     boxId: row.box ? String(row.box) : 'pkg_medium',
     boxName: row.box ? String(row.box) : 'Medium Flat Rate Box',
     weightOz: rawWeight,
@@ -2609,6 +2689,8 @@ app.post('/api/orders', async (req, res) => {
     email: email || '',
     orderDate: new Date().toISOString(),
     status: validation.isValid ? 'ready_to_ship' : 'address_error',
+    dbStatus: 'New',
+    shippingStatus: 'New',
     boxId: selectedBox.id,
     boxName: selectedBox.name,
     carrier: req.body.carrier || defaultCarrier,
@@ -4296,6 +4378,8 @@ app.post('/api/orders/:id/reship', (req, res) => {
     email: originalOrder.email,
     orderDate: new Date().toISOString(),
     status: 'ready_to_ship',
+    dbStatus: 'New',
+    shippingStatus: 'New',
     boxId: originalOrder.boxId,
     boxName: originalOrder.boxName,
     items: originalOrder.items.map((i) => ({ ...i, name: `[REPLACEMENT] ${i.name}` })),

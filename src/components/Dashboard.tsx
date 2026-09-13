@@ -481,7 +481,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             {new Date(order.orderDate).toLocaleDateString()}
                           </span>
                           {(() => {
-                            const rawStatus = (order.dbStatus || order.shippingStatus || (order.status === 'shipped' ? 'shipped' : 'Complete')).trim();
+                            const rawStatus = (order.dbStatus || order.shippingStatus || (order.status === 'shipped' ? 'shipped' : 'New')).trim();
                             const statusLower = rawStatus.toLowerCase();
                             let badgeStyle = 'bg-slate-50 text-slate-700 border-slate-200';
                             if (statusLower === 'complete' || statusLower === 'completed') {
