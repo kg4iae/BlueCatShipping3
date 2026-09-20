@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4f46e5" />
+      <stop offset="100%" stop-color="#312e81" />
+    </linearGradient>
+    <linearGradient id="boxGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#e0e7ff" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#0f172a" flood-opacity="0.4" />
+    </filter>
+  </defs>
+  <!-- Background with rounded corners -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)" />
+  
+  <!-- Shipping Package / Bobbin Icon Graphic -->
+  <g filter="url(#shadow)" transform="translate(106, 106)">
+    <!-- Outer isometric shipping box -->
+    <!-- Top face -->
+    <polygon points="150,20 280,85 150,150 20,85" fill="#818cf8" />
+    <!-- Left face -->
+    <polygon points="20,85 150,150 150,280 20,215" fill="#6366f1" />
+    <!-- Right face -->
+    <polygon points="150,150 280,85 280,215 150,280" fill="#4f46e5" />
+    
+    <!-- Top tape line -->
+    <line x1="85" y1="52" x2="215" y2="117" stroke="#c7d2fe" stroke-width="12" stroke-linecap="round" />
+    <line x1="20" y1="85" x2="150" y2="150" stroke="#3730a3" stroke-width="4" opacity="0.4" />
+    <line x1="150" y1="150" x2="280" y2="85" stroke="#3730a3" stroke-width="4" opacity="0.4" />
+    <line x1="150" y1="150" x2="150" y2="280" stroke="#312e81" stroke-width="4" opacity="0.4" />
+
+    <!-- Fast delivery swoosh wings -->
+    <path d="M-20,180 Q-5,160 50,165 Q10,180 -20,180 Z" fill="#38bdf8" opacity="0.9" />
+    <path d="M-35,210 Q-15,195 40,200 Q0,215 -35,210 Z" fill="#38bdf8" opacity="0.7" />
+  </g>
+  
+  <!-- Sub-label BCB -->
+  <text x="256" y="440" font-family="system-ui, -apple-system, sans-serif" font-size="42" font-weight="800" fill="#ffffff" text-anchor="middle" letter-spacing="4">BCB SHIP</text>
+</svg>

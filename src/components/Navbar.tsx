@@ -6,9 +6,6 @@ import {
   BarChart3,
   Settings,
   Database,
-  CheckCircle2,
-  AlertTriangle,
-  Lock,
   LogOut,
   Truck,
   Sparkles,
@@ -20,6 +17,7 @@ import {
   Wallet,
   RefreshCw,
 } from 'lucide-react';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface NavbarProps {
   activeTab: 'dashboard' | 'search' | 'reports' | 'settings';
@@ -108,26 +106,27 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           </div>
 
-          {/* Active Table Badge */}
-          <div className="flex items-center space-x-1.5 bg-slate-900/90 px-2 py-0.5 rounded border border-slate-800 text-[11px]">
-            <Database className={`w-3.5 h-3.5 ${appEnv === 'prod' ? 'text-emerald-400' : 'text-amber-400'}`} />
-            <span>
-              Table: <strong className={appEnv === 'prod' ? 'text-emerald-300 font-mono' : 'text-amber-300 font-mono'}>
-                {appEnv === 'prod' ? '[dbo].[Shipping]' : '[dbo].[shippingdev]'}
-              </strong>
+          {/* Database Sync Badge */}
+          <button
+            type="button"
+            onClick={handleSyncClick}
+            disabled={isSyncing || !mssqlConnected}
+            className={`flex items-center space-x-1.5 bg-slate-900/90 hover:bg-slate-800/90 px-2.5 py-0.5 rounded border border-slate-800 text-[11px] transition-colors cursor-pointer disabled:opacity-60 shadow-xs ${
+              appEnv === 'prod' ? 'hover:border-emerald-700/50' : 'hover:border-amber-700/50'
+            }`}
+            title="Click to sync orders directly with MS SQL database"
+          >
+            <Database className={`w-3.5 h-3.5 ${appEnv === 'prod' ? 'text-emerald-400' : 'text-amber-400'} ${isSyncing ? 'animate-spin' : ''}`} />
+            <span className="font-semibold text-slate-200">
+              {isSyncing ? 'Syncing...' : 'Database Sync'}
             </span>
-            {mssqlConnected && onSyncMssql && (
-              <button
-                type="button"
-                onClick={handleSyncClick}
-                disabled={isSyncing}
-                className="ml-1 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 text-[10px] font-semibold px-1.5 py-0.2 rounded cursor-pointer transition-colors disabled:opacity-50"
-                title="Sync orders directly with MS SQL database"
-              >
-                {isSyncing ? 'Syncing...' : 'Sync'}
-              </button>
+            {mssqlConnected && (
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${appEnv === 'prod' ? 'bg-emerald-400' : 'bg-amber-400'} animate-pulse`}
+                title={appEnv === 'prod' ? 'Connected to Production SQL' : 'Connected to Dev SQL'}
+              />
             )}
-          </div>
+          </button>
 
           <span className="text-slate-800 hidden md:inline">|</span>
 
@@ -171,27 +170,22 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             )}
           </div>
-        </div>
 
-        <div className="flex items-center space-x-3">
-          {addressErrorCount > 0 && (
-            <span className="inline-flex items-center space-x-1 bg-rose-500/20 text-rose-300 px-2 py-0.5 rounded text-[11px] font-medium border border-rose-500/30">
-              <AlertTriangle className="w-3 h-3 text-rose-400" />
-              <span>{addressErrorCount} Address Errors</span>
-            </span>
-          )}
-          {readyToShipCount > 0 && (
-            <span className="inline-flex items-center space-x-1 bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded text-[11px] font-medium border border-emerald-500/30">
-              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-              <span>{readyToShipCount} Ready to Ship</span>
-            </span>
-          )}
+          {/* User Badge */}
           {currentUser && (
-            <span className="inline-flex items-center space-x-1 bg-indigo-950/80 text-indigo-200 px-2 py-0.5 rounded text-[11px] font-medium border border-indigo-700/60">
-              <User className="w-3 h-3 text-indigo-400" />
-              <span>User: <strong className="text-white">{currentUser.username}</strong> ({currentUser.role || 'Admin'})</span>
-            </span>
+            <>
+              <span className="text-slate-800 hidden sm:inline">|</span>
+              <span className="inline-flex items-center space-x-1 bg-indigo-950/80 text-indigo-200 px-2 py-0.5 rounded text-[11px] font-medium border border-indigo-700/60">
+                <User className="w-3 h-3 text-indigo-400" />
+                <span>User: <strong className="text-white">{currentUser.username}</strong> ({currentUser.role || 'Admin'})</span>
+              </span>
+            </>
           )}
+
+          {/* Smartphone & Web App Install Button */}
+          <PWAInstallButton />
+
+          {/* Logout Button */}
           <button
             onClick={onLogout}
             className="flex items-center space-x-1 text-slate-400 hover:text-rose-300 transition-colors pl-2 border-l border-slate-800 cursor-pointer"
@@ -213,7 +207,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <span className="font-bold text-lg tracking-tight text-white">BlueCat Bobbins Shipping</span>
+                <span className="font-bold text-lg tracking-tight text-white">BCB Shipping</span>
               </div>
               <p className="text-[11px] text-slate-400 hidden sm:block">EasyPost Labeling &amp; Logistics Engine</p>
             </div>
