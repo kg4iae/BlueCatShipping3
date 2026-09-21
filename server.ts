@@ -12,6 +12,7 @@ import path from 'path';
 import fs from 'fs';
 import sql from 'mssql';
 import { jsPDF } from 'jspdf';
+import { PDFDocument } from 'pdf-lib';
 import crypto from 'crypto';
 import sharp from 'sharp';
 import { ShippingOrder, PackageType, AppSetting, MonthlyReportData, OrderStatus, CarrierType, ScanFormType, OrderItem, ReturnAddress, formatOrderId, User, HomeEvent } from './src/types.js';
@@ -3847,6 +3848,30 @@ app.get('/api/orders/:id/label.pdf', async (req, res) => {
     return res.status(404).send('Order not found');
   }
 
+  // Retrieve label binary from MS SQL if not already in memory
+  if (!order.labelBinary) {
+    try {
+      const pool = await getMssqlPool();
+      if (pool) {
+        const tableName = getShippingTableName(db.settings);
+        const lRes = await pool.request()
+          .input('oid', sql.VarChar, String(order.id))
+          .input('intid', sql.Int, parseInt(order.id, 10) || 0)
+          .input('oreceipt', sql.VarChar, String(order.orderNumber))
+          .query(`SELECT [Id], [LabelData], [Carrier], [Service], [trackingNumber] FROM ${tableName} WHERE [Id] = @intid OR [Id] = @oid OR [receiptID] = @oreceipt`);
+        console.log(`[Label PDF Debug] Querying table ${tableName} for Order #${order.id} / ${order.orderNumber}. Found:`, lRes.recordset.length, 'LabelData size:', lRes.recordset[0]?.LabelData ? Buffer.from(lRes.recordset[0].LabelData).length : 'null');
+        if (lRes.recordset.length > 0 && lRes.recordset[0].LabelData) {
+          order.labelBinary = Buffer.from(lRes.recordset[0].LabelData);
+          if (lRes.recordset[0].trackingNumber && !order.trackingNumber) {
+            order.trackingNumber = lRes.recordset[0].trackingNumber;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[Label PDF] Error fetching LabelData from MS SQL:', e);
+    }
+  }
+
   if (!order.labelBinary && !order.trackingNumber && !order.easyPostLabelUrl) {
     return res.status(400).send('Postage label has not been purchased from EasyPost for this order yet. Please purchase the label first.');
   }
@@ -4250,13 +4275,10 @@ app.get('/api/orders/batch-labels.pdf', async (req, res) => {
   }
 
   try {
-    const doc = new jsPDF({ unit: 'in', format: [4, 6], orientation: 'portrait' });
-    
+    const mergedDoc = await PDFDocument.create();
+
     for (let index = 0; index < targetOrders.length; index++) {
       const order = targetOrders[index];
-      if (index > 0) {
-        doc.addPage([4, 6], 'portrait');
-      }
 
       // If labelBinary is missing from in-memory order, attempt to retrieve LabelData from MS SQL
       if (!order.labelBinary && !order.labelPngBase64) {
@@ -4280,179 +4302,100 @@ app.get('/api/orders/batch-labels.pdf', async (req, res) => {
         }
       }
 
-      // Check if order has real label image (PNG base64 or easyPostLabelUrl or labelBinary)
-      let renderedRealLabel = false;
-      const isIntl = isInternationalOrder(order);
+      let embeddedOrder = false;
 
-      const pngBase64 = order.labelPngBase64 || (order.labelPngData ? order.labelPngData.replace(/^data:image\/png;base64,/, '') : undefined);
-      if (pngBase64) {
-        try {
-          const rawBuf = Buffer.from(pngBase64, 'base64');
-          await addLabelImageToDoc(doc, rawBuf);
-          renderedRealLabel = true;
-        } catch (e) {
-          console.warn(`[Batch Labels PDF] Failed embedding labelPngBase64 for Order #${order.orderNumber}:`, e);
-        }
-      }
-
-      if (!renderedRealLabel && order.labelBinary && Buffer.isBuffer(order.labelBinary)) {
-        const isPng = order.labelBinary.toString('utf8', 1, 4) === 'PNG' || order.labelBinary.slice(0, 8).includes(Buffer.from('PNG', 'ascii'));
-        if (isPng) {
+      // 1. If order has real PDF labelBinary (from MS SQL or EasyPost API), copy its pages
+      if (order.labelBinary && Buffer.isBuffer(order.labelBinary)) {
+        const isPdf = order.labelBinary.toString('utf8', 0, 4) === '%PDF';
+        if (isPdf) {
           try {
-            await addLabelImageToDoc(doc, order.labelBinary);
-            renderedRealLabel = true;
-          } catch (e) {
-            console.warn(`[Batch Labels PDF] Failed embedding labelBinary for Order #${order.orderNumber}:`, e);
+            const donorDoc = await PDFDocument.load(order.labelBinary);
+            const copiedPages = await mergedDoc.copyPages(donorDoc, donorDoc.getPageIndices());
+            copiedPages.forEach((page) => mergedDoc.addPage(page));
+            embeddedOrder = true;
+          } catch (err) {
+            console.warn(`[Batch Labels PDF] Failed loading PDF donor doc for Order #${order.orderNumber}:`, err);
           }
-        }
-      }
-
-      const targetUrl = order.easyPostLabelUrl || (order.labelUrl && order.labelUrl.startsWith('http') ? order.labelUrl : null);
-      if (!renderedRealLabel && targetUrl) {
-        try {
-          const imgRes = await fetch(targetUrl);
-          if (imgRes.ok) {
-            const arrayBuffer = await imgRes.arrayBuffer();
-            const buf = Buffer.from(arrayBuffer);
-            const isPdf = buf.toString('utf8', 0, 4) === '%PDF';
-            if (!isPdf) {
-              await addLabelImageToDoc(doc, buf);
-              renderedRealLabel = true;
+        } else {
+          // Check if binary is PNG
+          const isPng = order.labelBinary.toString('utf8', 1, 4) === 'PNG' || order.labelBinary.slice(0, 8).includes(Buffer.from('PNG', 'ascii'));
+          if (isPng) {
+            try {
+              const embeddedImage = await mergedDoc.embedPng(order.labelBinary);
+              const page = mergedDoc.addPage([288, 432]); // 4x6 in points
+              page.drawImage(embeddedImage, { x: 0, y: 0, width: 288, height: 432 });
+              embeddedOrder = true;
+            } catch (err) {
+              console.warn(`[Batch Labels PDF] Failed embedding PNG binary for Order #${order.orderNumber}:`, err);
             }
           }
-        } catch (e) {
-          console.warn(`[Batch Labels PDF] Could not fetch external label URL for Order #${order.orderNumber}:`, e);
         }
       }
 
-      // Synthetic label fallback if no real image
-      if (!renderedRealLabel) {
-        const rawCountry = (order.country || 'US').trim().toUpperCase();
-        const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
-        const displayCarrier = isIntl ? (order.carrier || 'USPS INTERNATIONAL') : (order.carrier || 'USPS');
-        const displayService = order.serviceLevel || (isIntl ? 'PRIORITY MAIL INTERNATIONAL' : 'PRIORITY MAIL 2-DAY');
-        const ret = getReturnAddress(db.settings);
-
-        // Outer Frame Border
-        doc.setLineWidth(0.015);
-        doc.setDrawColor(0, 0, 0);
-        doc.rect(0.1, 0.1, 3.8, 5.8);
-
-        // Header Box
-        doc.setFontSize(14);
-        doc.setTextColor(0, 0, 0);
-        doc.setFont('helvetica', 'bold');
-        doc.text(`${displayCarrier}`, 0.2, 0.38);
-        if (isIntl) {
-          doc.setFontSize(8);
-          doc.text('INTL', 2.1, 0.38);
+      // 2. Check if PNG base64 exists
+      if (!embeddedOrder) {
+        const pngBase64 = order.labelPngBase64 || (order.labelPngData ? order.labelPngData.replace(/^data:image\/png;base64,/, '') : undefined);
+        if (pngBase64) {
+          try {
+            const rawBuf = Buffer.from(pngBase64, 'base64');
+            const embeddedImage = await mergedDoc.embedPng(rawBuf);
+            const page = mergedDoc.addPage([288, 432]);
+            page.drawImage(embeddedImage, { x: 0, y: 0, width: 288, height: 432 });
+            embeddedOrder = true;
+          } catch (err) {
+            console.warn(`[Batch Labels PDF] Failed embedding PNG base64 for Order #${order.orderNumber}:`, err);
+          }
         }
-        doc.setFontSize(9);
-        doc.setFont('helvetica', 'bold');
-        doc.text(displayService, 0.2, 0.54);
+      }
 
-        // Postage Paid Box
-        doc.setLineWidth(0.01);
-        doc.rect(2.6, 0.2, 1.2, 0.38);
-        doc.setFontSize(7);
-        doc.setFont('helvetica', 'bold');
-        const postageText = order.carrier === 'UPS' ? 'UPS POSTAGE PAID' : isIntl ? 'USPS INTL PAID' : 'US POSTAGE PAID';
-        doc.text(postageText, 2.65, 0.42);
-
-        doc.line(0.1, 0.65, 3.9, 0.65);
-
-        // Return Address Block
-        doc.setFontSize(7);
-        doc.setFont('helvetica', 'bold');
-        doc.text('SHIP FROM:', 0.2, 0.78);
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(8);
-        doc.text(ret.name, 0.2, 0.9);
-        doc.setFont('helvetica', 'normal');
-        let retY = 1.01;
-        if (ret.company) { doc.text(ret.company, 0.2, retY); retY += 0.11; }
-        doc.text(ret.street1, 0.2, retY); retY += 0.11;
-        if (ret.street2) { doc.text(ret.street2, 0.2, retY); retY += 0.11; }
-        doc.text(`${ret.city}, ${ret.state} ${ret.zip} ${ret.country || 'UNITED STATES'}`, 0.2, retY);
-
-        doc.line(0.1, 1.4, 3.9, 1.4);
-
-        // Ship To Block with thick left border
-        doc.setFillColor(0, 0, 0);
-        doc.rect(0.2, 1.5, 0.04, 1.3, 'F');
-
-        doc.setFontSize(7);
-        doc.setFont('helvetica', 'bold');
-        doc.text('SHIP TO:', 0.3, 1.62);
-        doc.setFontSize(13);
-        doc.setFont('helvetica', 'bold');
-        doc.text(order.recipientName, 0.3, 1.82);
-
-        doc.setFontSize(9);
-        let shipY = 1.98;
-        if (order.company) {
-          doc.setFont('helvetica', 'bold');
-          doc.text(order.company, 0.3, shipY);
-          shipY += 0.16;
+      // 3. Check easyPostLabelUrl if remote
+      if (!embeddedOrder) {
+        const targetUrl = order.easyPostLabelUrl || (order.labelUrl && order.labelUrl.startsWith('http') ? order.labelUrl : null);
+        if (targetUrl) {
+          try {
+            const fetchRes = await fetch(targetUrl);
+            if (fetchRes.ok) {
+              const ab = await fetchRes.arrayBuffer();
+              const buf = Buffer.from(ab);
+              if (buf.toString('utf8', 0, 4) === '%PDF') {
+                const donorDoc = await PDFDocument.load(buf);
+                const copiedPages = await mergedDoc.copyPages(donorDoc, donorDoc.getPageIndices());
+                copiedPages.forEach((page) => mergedDoc.addPage(page));
+                embeddedOrder = true;
+              } else {
+                const embeddedImage = await mergedDoc.embedPng(buf);
+                const page = mergedDoc.addPage([288, 432]);
+                page.drawImage(embeddedImage, { x: 0, y: 0, width: 288, height: 432 });
+                embeddedOrder = true;
+              }
+            }
+          } catch (err) {
+            console.warn(`[Batch Labels PDF] Failed fetching remote label for Order #${order.orderNumber}:`, err);
+          }
         }
-        doc.setFont('helvetica', 'normal');
-        doc.text(order.street1, 0.3, shipY);
-        shipY += 0.16;
-        if (order.street2) {
-          doc.text(order.street2, 0.3, shipY);
-          shipY += 0.16;
+      }
+
+      // 4. Fallback: generate single order fallback PDF page (for orders without postage purchased)
+      if (!embeddedOrder) {
+        try {
+          const fallbackBuf = await generateSingleOrderLabelPdfBuffer(order, db.settings);
+          const donorDoc = await PDFDocument.load(fallbackBuf);
+          const copiedPages = await mergedDoc.copyPages(donorDoc, donorDoc.getPageIndices());
+          copiedPages.forEach((page) => mergedDoc.addPage(page));
+          embeddedOrder = true;
+        } catch (err) {
+          console.error(`[Batch Labels PDF] Failed generating fallback page for Order #${order.orderNumber}:`, err);
         }
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(12);
-        doc.text(`${order.city.toUpperCase()}, ${order.state} ${order.zip}`, 0.3, shipY);
-        shipY += 0.2;
-
-        if (isIntl) {
-          doc.setFontSize(9);
-          doc.setFont('helvetica', 'bold');
-          doc.text(`DESTINATION: ${(order.country || 'USA').toUpperCase()}`, 0.3, shipY);
-          shipY += 0.2;
-
-          // Customs Box
-          doc.rect(0.2, shipY, 3.6, 0.55);
-          doc.setFontSize(7);
-          doc.text('USPS CUSTOMS DECLARATION (CN22 / CP72)', 0.25, shipY + 0.16);
-          doc.setFont('helvetica', 'normal');
-          doc.text(`Decl. Value: $${order.declaredValue || 100.0} USD | Merchandise`, 0.25, shipY + 0.34);
-          doc.text(`Weight: ${order.weightOz || 16} oz | Verified`, 0.25, shipY + 0.48);
-          shipY += 0.65;
-        }
-
-        // Barcode Section
-        const barcodeY = Math.max(shipY, 3.5);
-        doc.line(0.1, barcodeY, 3.9, barcodeY);
-
-        if (order.trackingNumber) {
-          doc.setFillColor(0, 0, 0);
-          doc.rect(0.2, barcodeY + 0.12, 3.6, 0.8, 'F');
-          doc.setFontSize(10);
-          doc.setFont('helvetica', 'bold');
-          doc.setTextColor(0, 0, 0);
-          doc.text(`TRACKING #: ${order.trackingNumber}`, 0.2, barcodeY + 1.12);
-        } else {
-          doc.setFontSize(10);
-          doc.setFont('helvetica', 'bold');
-          doc.setTextColor(180, 0, 0);
-          doc.text('POSTAGE NOT PURCHASED YET', 0.2, barcodeY + 0.5);
-        }
-
-        doc.setFontSize(8);
-        doc.setFont('helvetica', 'normal');
-        doc.setTextColor(0, 0, 0);
-        doc.text(`Order #: ${formatOrderId(order.orderNumber)}  |  Weight: ${order.weightOz || 16} oz  |  Box: ${order.boxName || 'Standard'}`, 0.2, barcodeY + 1.32);
       }
     }
 
-    const pdfBuffer = Buffer.from(doc.output('arraybuffer'));
+    const finalPdfBytes = await mergedDoc.save();
+    const finalBuffer = Buffer.from(finalPdfBytes);
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="EasyPost_Batch_Labels_${Date.now()}.pdf"`);
-    res.send(pdfBuffer);
+    res.setHeader('Content-Disposition', `inline; filename="EasyPost_Batch_Labels_${Date.now()}.pdf"`);
+    res.send(finalBuffer);
   } catch (err: any) {
+    console.error('[Batch Labels PDF] Error generating batch PDF labels:', err);
     res.status(500).send('Error generating batch PDF labels');
   }
 });

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ShippingOrder, PackageType, CarrierType, AppSetting, formatOrderId } from '../types';
 import { getCountryFlag } from './Dashboard';
 import { getCalculatedRatesForOrder } from './CompareRatesModal';
+import { downloadOrOpenPdf } from '../lib/pdfDownloader';
 import {
   X,
   Package,
@@ -807,17 +808,15 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
 
           <div className="flex items-center space-x-2">
             {(order.status === 'shipped' || order.labelUrl) && (
-              <a
-                href={`/api/orders/${order.id}/label.pdf`}
-                download={`EasyPost_Label_${order.orderNumber}.pdf`}
-                target="_blank"
-                rel="noopener noreferrer"
+              <button
+                type="button"
+                onClick={() => downloadOrOpenPdf(`/api/orders/${order.id}/label.pdf`, `EasyPost_Label_${order.orderNumber}.pdf`, { mode: 'download' })}
                 className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 font-bold text-xs px-4 py-2.5 rounded-lg flex items-center space-x-1.5 transition-all cursor-pointer"
                 title="Download thermal label PDF stored in database"
               >
                 <Download className="w-4 h-4 text-indigo-600" />
                 <span>Download Label PDF</span>
-              </a>
+              </button>
             )}
 
             {order.status !== 'shipped' && onPurchaseLabel && (

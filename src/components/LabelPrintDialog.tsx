@@ -63,7 +63,7 @@ export const LabelPrintDialog: React.FC<LabelPrintDialogProps> = ({ order, setti
       await downloadOrOpenPdf(`/api/orders/${order.id}/packing-slip.pdf`, `PackingSlip_${order.orderNumber || order.id}.pdf`);
       setQzStatus({
         type: 'success',
-        msg: 'Both PDF Label and Packing Slip downloaded and opened!',
+        msg: 'Both PDF Label and Packing Slip downloaded to your computer successfully!',
       });
     } catch (err: any) {
       setQzStatus({

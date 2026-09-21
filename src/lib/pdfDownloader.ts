@@ -3,10 +3,19 @@
  * triggers an immediate browser file download, and opens a Blob URL in a new
  * tab/window without triggering Cloud Run proxy cookie-check redirects.
  */
+export interface PdfDownloadOptions {
+  /**
+   * 'download': Clean file download to user's device (does not navigate or open new window)
+   * 'open': Opens PDF in new tab via window.open (no forced file download)
+   * Defaults to 'download'.
+   */
+  mode?: 'download' | 'open';
+}
+
 export async function downloadOrOpenPdf(
   url: string,
   filename: string,
-  options: { openInNewTab?: boolean } = { openInNewTab: true }
+  options: PdfDownloadOptions = { mode: 'download' }
 ): Promise<{ blobUrl: string; opened: boolean }> {
   const token = localStorage.getItem('shipping_auth_token');
   const headers: Record<string, string> = {};
@@ -28,7 +37,34 @@ export async function downloadOrOpenPdf(
   const pdfBlob = new Blob([blob], { type: 'application/pdf' });
   const blobUrl = URL.createObjectURL(pdfBlob);
 
-  // 1. Trigger instantaneous browser file download
+  let opened = false;
+
+  if (options.mode === 'open') {
+    try {
+      const popup = window.open(blobUrl, '_blank');
+      if (popup) {
+        opened = true;
+      } else {
+        // If popup was blocked by browser, fall back to downloading file
+        triggerFileDownload(blobUrl, filename);
+      }
+    } catch (e) {
+      triggerFileDownload(blobUrl, filename);
+    }
+  } else {
+    // Mode 'download': Download the file without opening or navigating the window
+    triggerFileDownload(blobUrl, filename);
+  }
+
+  // Revoke Blob URL after 3 minutes to free memory
+  setTimeout(() => {
+    URL.revokeObjectURL(blobUrl);
+  }, 180000);
+
+  return { blobUrl, opened };
+}
+
+function triggerFileDownload(blobUrl: string, filename: string) {
   try {
     const link = document.createElement('a');
     link.href = blobUrl;
@@ -39,26 +75,4 @@ export async function downloadOrOpenPdf(
   } catch (e) {
     console.warn('[PDF Downloader] Direct download link click failed:', e);
   }
-
-  // 2. Open in new tab via Blob URL (no network request / no proxy redirect)
-  let opened = false;
-  if (options.openInNewTab !== false) {
-    try {
-      const popup = window.open(blobUrl, '_blank');
-      if (popup) {
-        opened = true;
-      } else {
-        console.warn('[PDF Downloader] Popup was blocked by browser. File was downloaded directly.');
-      }
-    } catch (e) {
-      console.warn('[PDF Downloader] window.open failed:', e);
-    }
-  }
-
-  // Revoke Blob URL after 3 minutes to free memory
-  setTimeout(() => {
-    URL.revokeObjectURL(blobUrl);
-  }, 180000);
-
-  return { blobUrl, opened };
 }

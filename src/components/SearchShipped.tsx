@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ShippingOrder, AppSetting, formatOrderId, PaginatedShippedOrders } from '../types';
 import { getCountryFlag } from './Dashboard';
+import { downloadOrOpenPdf } from '../lib/pdfDownloader';
 import {
   Search,
   RotateCcw,
@@ -499,29 +500,25 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
                     {/* Action Buttons */}
                     <td className="py-3 px-3 text-right">
                       <div className="flex items-center justify-end space-x-2">
-                        <a
-                          href={`/api/orders/${order.id}/label.pdf`}
-                          download={`EasyPost_Label_${order.orderNumber}.pdf`}
-                          target="_blank"
-                          rel="noopener noreferrer"
+                        <button
+                          type="button"
+                          onClick={() => downloadOrOpenPdf(`/api/orders/${order.id}/label.pdf`, `EasyPost_Label_${order.orderNumber}.pdf`, { mode: 'download' })}
                           className="flex items-center space-x-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer"
                           title="Download EasyPost shipping label PDF stored in database"
                         >
                           <Download className="w-3.5 h-3.5 text-indigo-600" />
                           <span>PDF Label</span>
-                        </a>
+                        </button>
 
-                        <a
-                          href={`/api/orders/${order.id}/packing-slip.pdf`}
-                          download={`PackingSlip_${order.orderNumber}.pdf`}
-                          target="_blank"
-                          rel="noopener noreferrer"
+                        <button
+                          type="button"
+                          onClick={() => downloadOrOpenPdf(`/api/orders/${order.id}/packing-slip.pdf`, `PackingSlip_${order.orderNumber}.pdf`, { mode: 'download' })}
                           className="flex items-center space-x-1 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer"
                           title="Download or view Packing Slip PDF"
                         >
                           <FileText className="w-3.5 h-3.5 text-slate-600" />
                           <span>Packing Slip</span>
-                        </a>
+                        </button>
 
                         <button
                           onClick={() => onReshipOrder(order)}

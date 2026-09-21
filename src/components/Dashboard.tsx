@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ShippingOrder, PackageType, AppSetting, formatOrderId } from '../types';
 import { getCalculatedRatesForOrder } from './CompareRatesModal';
+import { downloadOrOpenPdf } from '../lib/pdfDownloader';
 import {
   Package,
   CheckCircle2,
@@ -697,17 +698,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             </button>
                           )
                         ) : Boolean(order.hasLabelData || (order.LabelData !== null && order.LabelData !== undefined && order.LabelData !== false) || order.labelBinary) ? (
-                          <a
-                            href={`/api/orders/${order.id}/label.pdf`}
-                            download={`EasyPost_Label_${order.orderNumber}.pdf`}
-                            target="_blank"
-                            rel="noopener noreferrer"
+                          <button
+                            type="button"
+                            onClick={() => downloadOrOpenPdf(`/api/orders/${order.id}/label.pdf`, `EasyPost_Label_${order.orderNumber}.pdf`, { mode: 'download' })}
                             className="inline-flex items-center space-x-1 text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-1 rounded text-xs font-bold transition-colors cursor-pointer"
-                            title="Print PDF label stored in database"
+                            title="Download PDF label stored in database"
                           >
                             <Printer className="w-3.5 h-3.5" />
                             <span>Print Label</span>
-                          </a>
+                          </button>
                         ) : (
                           <div className="flex items-center justify-end space-x-2">
                             <button

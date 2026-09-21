@@ -233,15 +233,14 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
     setQzStatus(null);
     try {
       const filename = `Batch_Labels_${orders.length}_Orders_${new Date().toISOString().slice(0, 10)}.pdf`;
-      const { opened } = await downloadOrOpenPdf(
+      await downloadOrOpenPdf(
         `/api/orders/batch-labels.pdf?orderIds=${orderIdsStr}`,
-        filename
+        filename,
+        { mode: 'download' }
       );
       setQzStatus({
         type: 'success',
-        msg: opened
-          ? `PDF Labels downloaded and opened in new tab (${orders.length} order${orders.length === 1 ? '' : 's'}).`
-          : `PDF Labels downloaded successfully to your computer (${orders.length} order${orders.length === 1 ? '' : 's'}).`,
+        msg: `PDF Labels downloaded successfully to your computer (${orders.length} order${orders.length === 1 ? '' : 's'}).`,
       });
     } catch (err: any) {
       console.error('PDF Labels generation failed:', err);
@@ -259,15 +258,14 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
     setQzStatus(null);
     try {
       const filename = `Batch_Packing_Slips_${orders.length}_Orders_${new Date().toISOString().slice(0, 10)}.pdf`;
-      const { opened } = await downloadOrOpenPdf(
+      await downloadOrOpenPdf(
         `/api/orders/batch-packing-slips.pdf?orderIds=${orderIdsStr}`,
-        filename
+        filename,
+        { mode: 'download' }
       );
       setQzStatus({
         type: 'success',
-        msg: opened
-          ? `PDF Packing Slips downloaded and opened in new tab (${orders.length} order${orders.length === 1 ? '' : 's'}).`
-          : `PDF Packing Slips downloaded successfully to your computer (${orders.length} order${orders.length === 1 ? '' : 's'}).`,
+        msg: `PDF Packing Slips downloaded successfully to your computer (${orders.length} order${orders.length === 1 ? '' : 's'}).`,
       });
     } catch (err: any) {
       console.error('PDF Packing Slips generation failed:', err);
@@ -286,15 +284,17 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
     try {
       await downloadOrOpenPdf(
         `/api/orders/batch-labels.pdf?orderIds=${orderIdsStr}`,
-        `Batch_Labels_${orders.length}_Orders_${new Date().toISOString().slice(0, 10)}.pdf`
+        `Batch_Labels_${orders.length}_Orders_${new Date().toISOString().slice(0, 10)}.pdf`,
+        { mode: 'download' }
       );
       await downloadOrOpenPdf(
         `/api/orders/batch-packing-slips.pdf?orderIds=${orderIdsStr}`,
-        `Batch_Packing_Slips_${orders.length}_Orders_${new Date().toISOString().slice(0, 10)}.pdf`
+        `Batch_Packing_Slips_${orders.length}_Orders_${new Date().toISOString().slice(0, 10)}.pdf`,
+        { mode: 'download' }
       );
       setQzStatus({
         type: 'success',
-        msg: `Both PDF Labels and Packing Slips generated, downloaded, and opened!`,
+        msg: `Both PDF Labels and Packing Slips downloaded successfully to your computer!`,
       });
     } catch (err: any) {
       console.error('Print Both failed:', err);
@@ -815,42 +815,42 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
               onClick={handlePrintServerLabels}
               disabled={downloadingPdf !== null}
               className="flex items-center space-x-1.5 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 disabled:opacity-60 px-3 py-1.5 rounded-lg text-xs font-bold shadow-2xs transition-all cursor-pointer"
-              title="Print/Download combined PDF labels for selected batch"
+              title="Download combined PDF labels to your computer"
             >
               {downloadingPdf === 'labels' ? (
                 <Loader2 className="w-3.5 h-3.5 text-indigo-600 animate-spin" />
               ) : (
-                <Printer className="w-3.5 h-3.5 text-indigo-600" />
+                <Download className="w-3.5 h-3.5 text-indigo-600" />
               )}
-              <span>{downloadingPdf === 'labels' ? 'Generating...' : 'PDF Labels'}</span>
+              <span>{downloadingPdf === 'labels' ? 'Generating...' : 'Download PDF Labels'}</span>
             </button>
 
             <button
               onClick={handlePrintServerPackingSlips}
               disabled={downloadingPdf !== null}
               className="flex items-center space-x-1.5 bg-slate-100 border border-slate-300 text-slate-800 hover:bg-slate-200 disabled:opacity-60 px-3 py-1.5 rounded-lg text-xs font-bold shadow-2xs transition-all cursor-pointer"
-              title="Print/Download combined PDF packing slips for selected batch"
+              title="Download combined PDF packing slips to your computer"
             >
               {downloadingPdf === 'slips' ? (
                 <Loader2 className="w-3.5 h-3.5 text-slate-600 animate-spin" />
               ) : (
-                <FileText className="w-3.5 h-3.5 text-slate-600" />
+                <Download className="w-3.5 h-3.5 text-slate-600" />
               )}
-              <span>{downloadingPdf === 'slips' ? 'Generating...' : 'PDF Slips'}</span>
+              <span>{downloadingPdf === 'slips' ? 'Generating...' : 'Download PDF Slips'}</span>
             </button>
 
             <button
               onClick={handlePrintBothServer}
               disabled={downloadingPdf !== null}
               className="flex items-center space-x-1.5 bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-60 px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer"
-              title="Print both Labels and Packing Slips for selected batch"
+              title="Download both Labels and Packing Slips files to your computer"
             >
               {downloadingPdf === 'both' ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
               ) : (
-                <ExternalLink className="w-3.5 h-3.5" />
+                <Download className="w-3.5 h-3.5" />
               )}
-              <span>{downloadingPdf === 'both' ? 'Generating Both...' : 'Print Both'}</span>
+              <span>{downloadingPdf === 'both' ? 'Generating Both...' : 'Download Both'}</span>
             </button>
 
             <button
@@ -1019,24 +1019,72 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
 
               {/* --- 2. 4x6 SHIPPING LABEL --- */}
               {(viewMode === 'both' || viewMode === 'labels') && (() => {
-                const realLabelSrc =
+                const hasPurchasedLabel = Boolean(
+                  order.hasLabelData ||
+                  (order.LabelData !== null && order.LabelData !== undefined && order.LabelData !== false) ||
+                  order.trackingNumber ||
+                  order.labelBinary ||
+                  order.labelPngData ||
+                  order.labelPngBase64 ||
+                  order.status === 'shipped'
+                );
+
+                const realImageSrc =
                   order.labelPngData ||
                   (order.labelPngBase64 ? `data:image/png;base64,${order.labelPngBase64}` : null) ||
-                  (order.id ? `/api/orders/${order.id}/label.png` : null) ||
-                  order.easyPostLabelUrl;
+                  (order.easyPostLabelUrl && !order.easyPostLabelUrl.endsWith('.pdf') ? order.easyPostLabelUrl : null);
 
-                if (realLabelSrc) {
+                if (hasPurchasedLabel) {
                   return (
                     <div className="bg-white rounded-xl p-4 shadow-xl max-w-md mx-auto border-2 border-slate-900 overflow-hidden print:shadow-none print:max-w-none print:w-[4in] print:h-[6in] print:p-0 page-break-after">
-                      <div className="text-[10px] font-bold text-slate-500 uppercase mb-2 flex justify-between items-center print:hidden">
-                        <span>Official EasyPost Postage Label - Order #{formatOrderId(order.orderNumber)}</span>
-                        <span className="font-mono text-emerald-700 font-bold">{order.trackingNumber}</span>
+                      <div className="text-[11px] font-bold text-slate-700 uppercase mb-2 flex justify-between items-center print:hidden border-b border-slate-200 pb-2">
+                        <span className="flex items-center space-x-1 text-emerald-700">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>Official 4x6 Label · #{formatOrderId(order.orderNumber)}</span>
+                        </span>
+                        <span className="font-mono text-xs font-bold text-slate-900">{order.trackingNumber || 'Postage Stored'}</span>
                       </div>
-                      <img
-                        src={realLabelSrc}
-                        alt={`Official EasyPost Postage Label for Order #${formatOrderId(order.orderNumber)}`}
-                        className="w-full h-auto object-contain rounded border border-slate-200"
-                      />
+
+                      <div className="flex items-center justify-between mb-3 print:hidden bg-slate-50 p-2 rounded-lg border border-slate-200 text-xs">
+                        <button
+                          type="button"
+                          onClick={() => downloadOrOpenPdf(`/api/orders/${order.id}/label.pdf`, `EasyPost_Label_${order.orderNumber}.pdf`, { mode: 'download' })}
+                          className="flex items-center space-x-1.5 text-indigo-700 hover:text-indigo-900 font-bold px-2.5 py-1 rounded bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 cursor-pointer shadow-2xs"
+                        >
+                          <Download className="w-3.5 h-3.5 text-indigo-600" />
+                          <span>Download 4x6 PDF</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => downloadOrOpenPdf(`/api/orders/${order.id}/label.pdf`, `EasyPost_Label_${order.orderNumber}.pdf`, { mode: 'open' })}
+                          className="flex items-center space-x-1.5 text-slate-700 hover:text-slate-900 font-bold px-2.5 py-1 rounded bg-slate-100 hover:bg-slate-200 border border-slate-300 cursor-pointer shadow-2xs"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5 text-slate-600" />
+                          <span>Open in New Tab</span>
+                        </button>
+                      </div>
+
+                      {realImageSrc ? (
+                        <img
+                          src={realImageSrc}
+                          alt={`Official EasyPost Postage Label for Order #${formatOrderId(order.orderNumber)}`}
+                          className="w-full h-auto object-contain rounded border border-slate-200"
+                        />
+                      ) : (
+                        <div className="w-full h-[520px] bg-slate-50 rounded border border-slate-300 overflow-hidden relative">
+                          <object
+                            data={`/api/orders/${order.id}/label.pdf#toolbar=0&navpanes=0&scrollbar=0&view=Fit`}
+                            type="application/pdf"
+                            className="w-full h-full"
+                          >
+                            <iframe
+                              src={`/api/orders/${order.id}/label.pdf#toolbar=0&navpanes=0&scrollbar=0&view=Fit`}
+                              className="w-full h-full border-0"
+                              title={`Label for Order #${formatOrderId(order.orderNumber)}`}
+                            />
+                          </object>
+                        </div>
+                      )}
                     </div>
                   );
                 }
