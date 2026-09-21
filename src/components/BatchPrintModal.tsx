@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { ShippingOrder, AppSetting, formatOrderId, HomeEvent } from '../types';
 import { jsPDF } from 'jspdf';
-import { Printer, Download, X, FileText, PackageCheck, Sparkles, Tag, ExternalLink, RefreshCw, Zap, CheckCircle2, AlertCircle, Calendar } from 'lucide-react';
+import { Printer, Download, X, FileText, PackageCheck, Sparkles, Tag, ExternalLink, RefreshCw, Zap, CheckCircle2, AlertCircle, Calendar, Loader2 } from 'lucide-react';
 import { printPdfToQZ, getDefaultQZPrinter } from '../lib/qzTray';
+import { downloadOrOpenPdf } from '../lib/pdfDownloader';
 
 function getActiveHomeEvents(settings?: AppSetting): HomeEvent[] {
   const raw = settings?.homeEventsList;
@@ -39,6 +40,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
   const [isPurchasing, setIsPurchasing] = useState(false);
   const [qzPrinting, setQzPrinting] = useState(false);
   const [qzStatus, setQzStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+  const [downloadingPdf, setDownloadingPdf] = useState<'labels' | 'slips' | 'both' | null>(null);
 
   const activeHomeEvents = getActiveHomeEvents(settings);
 
@@ -226,17 +228,83 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
     }
   };
 
-  const handlePrintServerLabels = () => {
-    window.open(`/api/orders/batch-labels.pdf?orderIds=${orderIdsStr}`, '_blank');
+  const handlePrintServerLabels = async () => {
+    setDownloadingPdf('labels');
+    setQzStatus(null);
+    try {
+      const filename = `Batch_Labels_${orders.length}_Orders_${new Date().toISOString().slice(0, 10)}.pdf`;
+      const { opened } = await downloadOrOpenPdf(
+        `/api/orders/batch-labels.pdf?orderIds=${orderIdsStr}`,
+        filename
+      );
+      setQzStatus({
+        type: 'success',
+        msg: opened
+          ? `PDF Labels downloaded and opened in new tab (${orders.length} order${orders.length === 1 ? '' : 's'}).`
+          : `PDF Labels downloaded successfully to your computer (${orders.length} order${orders.length === 1 ? '' : 's'}).`,
+      });
+    } catch (err: any) {
+      console.error('PDF Labels generation failed:', err);
+      setQzStatus({
+        type: 'error',
+        msg: `Failed to download PDF Labels: ${err?.message || err}`,
+      });
+    } finally {
+      setDownloadingPdf(null);
+    }
   };
 
-  const handlePrintServerPackingSlips = () => {
-    window.open(`/api/orders/batch-packing-slips.pdf?orderIds=${orderIdsStr}`, '_blank');
+  const handlePrintServerPackingSlips = async () => {
+    setDownloadingPdf('slips');
+    setQzStatus(null);
+    try {
+      const filename = `Batch_Packing_Slips_${orders.length}_Orders_${new Date().toISOString().slice(0, 10)}.pdf`;
+      const { opened } = await downloadOrOpenPdf(
+        `/api/orders/batch-packing-slips.pdf?orderIds=${orderIdsStr}`,
+        filename
+      );
+      setQzStatus({
+        type: 'success',
+        msg: opened
+          ? `PDF Packing Slips downloaded and opened in new tab (${orders.length} order${orders.length === 1 ? '' : 's'}).`
+          : `PDF Packing Slips downloaded successfully to your computer (${orders.length} order${orders.length === 1 ? '' : 's'}).`,
+      });
+    } catch (err: any) {
+      console.error('PDF Packing Slips generation failed:', err);
+      setQzStatus({
+        type: 'error',
+        msg: `Failed to download PDF Packing Slips: ${err?.message || err}`,
+      });
+    } finally {
+      setDownloadingPdf(null);
+    }
   };
 
-  const handlePrintBothServer = () => {
-    window.open(`/api/orders/batch-labels.pdf?orderIds=${orderIdsStr}`, '_blank');
-    window.open(`/api/orders/batch-packing-slips.pdf?orderIds=${orderIdsStr}`, '_blank');
+  const handlePrintBothServer = async () => {
+    setDownloadingPdf('both');
+    setQzStatus(null);
+    try {
+      await downloadOrOpenPdf(
+        `/api/orders/batch-labels.pdf?orderIds=${orderIdsStr}`,
+        `Batch_Labels_${orders.length}_Orders_${new Date().toISOString().slice(0, 10)}.pdf`
+      );
+      await downloadOrOpenPdf(
+        `/api/orders/batch-packing-slips.pdf?orderIds=${orderIdsStr}`,
+        `Batch_Packing_Slips_${orders.length}_Orders_${new Date().toISOString().slice(0, 10)}.pdf`
+      );
+      setQzStatus({
+        type: 'success',
+        msg: `Both PDF Labels and Packing Slips generated, downloaded, and opened!`,
+      });
+    } catch (err: any) {
+      console.error('Print Both failed:', err);
+      setQzStatus({
+        type: 'error',
+        msg: `Failed generating batch PDFs: ${err?.message || err}`,
+      });
+    } finally {
+      setDownloadingPdf(null);
+    }
   };
 
   const handlePrint = () => {
@@ -745,29 +813,44 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
 
             <button
               onClick={handlePrintServerLabels}
-              className="flex items-center space-x-1.5 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 px-3 py-1.5 rounded-lg text-xs font-bold shadow-2xs transition-all cursor-pointer"
+              disabled={downloadingPdf !== null}
+              className="flex items-center space-x-1.5 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 disabled:opacity-60 px-3 py-1.5 rounded-lg text-xs font-bold shadow-2xs transition-all cursor-pointer"
               title="Print/Download combined PDF labels for selected batch"
             >
-              <Printer className="w-3.5 h-3.5 text-indigo-600" />
-              <span>PDF Labels</span>
+              {downloadingPdf === 'labels' ? (
+                <Loader2 className="w-3.5 h-3.5 text-indigo-600 animate-spin" />
+              ) : (
+                <Printer className="w-3.5 h-3.5 text-indigo-600" />
+              )}
+              <span>{downloadingPdf === 'labels' ? 'Generating...' : 'PDF Labels'}</span>
             </button>
 
             <button
               onClick={handlePrintServerPackingSlips}
-              className="flex items-center space-x-1.5 bg-slate-100 border border-slate-300 text-slate-800 hover:bg-slate-200 px-3 py-1.5 rounded-lg text-xs font-bold shadow-2xs transition-all cursor-pointer"
+              disabled={downloadingPdf !== null}
+              className="flex items-center space-x-1.5 bg-slate-100 border border-slate-300 text-slate-800 hover:bg-slate-200 disabled:opacity-60 px-3 py-1.5 rounded-lg text-xs font-bold shadow-2xs transition-all cursor-pointer"
               title="Print/Download combined PDF packing slips for selected batch"
             >
-              <FileText className="w-3.5 h-3.5 text-slate-600" />
-              <span>PDF Slips</span>
+              {downloadingPdf === 'slips' ? (
+                <Loader2 className="w-3.5 h-3.5 text-slate-600 animate-spin" />
+              ) : (
+                <FileText className="w-3.5 h-3.5 text-slate-600" />
+              )}
+              <span>{downloadingPdf === 'slips' ? 'Generating...' : 'PDF Slips'}</span>
             </button>
 
             <button
               onClick={handlePrintBothServer}
-              className="flex items-center space-x-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer"
+              disabled={downloadingPdf !== null}
+              className="flex items-center space-x-1.5 bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-60 px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer"
               title="Print both Labels and Packing Slips for selected batch"
             >
-              <ExternalLink className="w-3.5 h-3.5" />
-              <span>Print Both</span>
+              {downloadingPdf === 'both' ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <ExternalLink className="w-3.5 h-3.5" />
+              )}
+              <span>{downloadingPdf === 'both' ? 'Generating Both...' : 'Print Both'}</span>
             </button>
 
             <button

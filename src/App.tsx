@@ -20,9 +20,70 @@ import { EnvLoadingOverlay, EnvSwitchState } from './components/EnvLoadingOverla
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
 
 export default function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-  const [currentUser, setCurrentUser] = useState<{ username: string; fullName?: string; role?: string } | null>(null);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
+    return Boolean(localStorage.getItem('shipping_auth_token'));
+  });
+  const [currentUser, setCurrentUser] = useState<{ username: string; fullName?: string; role?: string } | null>(() => {
+    try {
+      const stored = localStorage.getItem('shipping_user');
+      return stored ? JSON.parse(stored) : null;
+    } catch {
+      return null;
+    }
+  });
   const [activeTab, setActiveTab] = useState<'dashboard' | 'search' | 'reports' | 'settings'>('dashboard');
+
+  useEffect(() => {
+    const token = localStorage.getItem('shipping_auth_token');
+    if (token) {
+      fetch('/api/auth/session', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data && data.isAuthenticated) {
+            setIsAuthenticated(true);
+            if (data.user) {
+              setCurrentUser(data.user);
+              localStorage.setItem('shipping_user', JSON.stringify(data.user));
+            }
+          } else {
+            localStorage.removeItem('shipping_auth_token');
+            localStorage.removeItem('shipping_user');
+            setIsAuthenticated(false);
+            setCurrentUser(null);
+          }
+        })
+        .catch(() => {
+          // Keep authenticated if transient network error
+        });
+    }
+  }, []);
+
+  const handleLoginSuccess = (token?: string, user?: any) => {
+    if (token) {
+      localStorage.setItem('shipping_auth_token', token);
+    }
+    if (user) {
+      localStorage.setItem('shipping_user', JSON.stringify(user));
+      setCurrentUser(user);
+    }
+    setIsAuthenticated(true);
+  };
+
+  const handleLogout = () => {
+    const token = localStorage.getItem('shipping_auth_token');
+    if (token) {
+      fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
+    localStorage.removeItem('shipping_auth_token');
+    localStorage.removeItem('shipping_user');
+    setIsAuthenticated(false);
+    setCurrentUser(null);
+  };
 
   useEffect(() => {
     if (activeTab === 'settings' && currentUser?.role?.toLowerCase() !== 'admin') {
@@ -574,10 +635,7 @@ export default function App() {
     return (
       <LoginModal
         initialMssqlConnected={settings?.mssqlConnected}
-        onLoginSuccess={(token, user) => {
-          setIsAuthenticated(true);
-          if (user) setCurrentUser(user);
-        }}
+        onLoginSuccess={handleLoginSuccess}
       />
     );
   }
@@ -629,7 +687,7 @@ export default function App() {
         easyPostMode={settings?.easyPostMode ?? 'production'}
         appEnv={settings?.appEnv || (settings?.easyPostMode === 'test' ? 'dev' : 'prod')}
         onToggleAppEnv={handleToggleAppEnv}
-        onLogout={() => setIsAuthenticated(false)}
+        onLogout={handleLogout}
         onSyncMssql={handleSyncMssql}
         currentUser={currentUser}
         walletBalance={walletBalance}
@@ -794,10 +852,7 @@ export default function App() {
 
       {!isAuthenticated && (
         <LoginModal
-          onLoginSuccess={(token, user) => {
-            setIsAuthenticated(true);
-            if (user) setCurrentUser(user);
-          }}
+          onLoginSuccess={handleLoginSuccess}
         />
       )}
     </div>

@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { ShippingOrder, AppSetting, formatOrderId } from '../types';
-import { X, Printer, FileText, CheckCircle2, Download, ExternalLink, Package, Zap, AlertCircle } from 'lucide-react';
+import { X, Printer, FileText, CheckCircle2, Download, ExternalLink, Package, Zap, AlertCircle, Loader2 } from 'lucide-react';
 import { printPdfToQZ, getDefaultQZPrinter } from '../lib/qzTray';
+import { downloadOrOpenPdf } from '../lib/pdfDownloader';
 
 interface LabelPrintDialogProps {
   order: ShippingOrder;
@@ -12,18 +13,66 @@ interface LabelPrintDialogProps {
 export const LabelPrintDialog: React.FC<LabelPrintDialogProps> = ({ order, settings, onClose }) => {
   const [qzPrinting, setQzPrinting] = useState(false);
   const [qzStatus, setQzStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
+  const [downloadingPdf, setDownloadingPdf] = useState<'label' | 'slip' | 'both' | null>(null);
 
-  const handlePrintLabel = () => {
-    window.open(`/api/orders/${order.id}/label.pdf`, '_blank');
+  const handlePrintLabel = async () => {
+    setDownloadingPdf('label');
+    setQzStatus(null);
+    try {
+      const filename = `Label_${order.orderNumber || order.id}.pdf`;
+      const { opened } = await downloadOrOpenPdf(`/api/orders/${order.id}/label.pdf`, filename);
+      setQzStatus({
+        type: 'success',
+        msg: opened ? 'PDF Label downloaded and opened in new tab.' : 'PDF Label downloaded to your computer.',
+      });
+    } catch (err: any) {
+      setQzStatus({
+        type: 'error',
+        msg: `Failed to get PDF Label: ${err?.message || err}`,
+      });
+    } finally {
+      setDownloadingPdf(null);
+    }
   };
 
-  const handlePrintPackingSlip = () => {
-    window.open(`/api/orders/${order.id}/packing-slip.pdf`, '_blank');
+  const handlePrintPackingSlip = async () => {
+    setDownloadingPdf('slip');
+    setQzStatus(null);
+    try {
+      const filename = `PackingSlip_${order.orderNumber || order.id}.pdf`;
+      const { opened } = await downloadOrOpenPdf(`/api/orders/${order.id}/packing-slip.pdf`, filename);
+      setQzStatus({
+        type: 'success',
+        msg: opened ? 'PDF Packing Slip downloaded and opened in new tab.' : 'PDF Packing Slip downloaded to your computer.',
+      });
+    } catch (err: any) {
+      setQzStatus({
+        type: 'error',
+        msg: `Failed to get PDF Slip: ${err?.message || err}`,
+      });
+    } finally {
+      setDownloadingPdf(null);
+    }
   };
 
-  const handlePrintBoth = () => {
-    window.open(`/api/orders/${order.id}/label.pdf`, '_blank');
-    window.open(`/api/orders/${order.id}/packing-slip.pdf`, '_blank');
+  const handlePrintBoth = async () => {
+    setDownloadingPdf('both');
+    setQzStatus(null);
+    try {
+      await downloadOrOpenPdf(`/api/orders/${order.id}/label.pdf`, `Label_${order.orderNumber || order.id}.pdf`);
+      await downloadOrOpenPdf(`/api/orders/${order.id}/packing-slip.pdf`, `PackingSlip_${order.orderNumber || order.id}.pdf`);
+      setQzStatus({
+        type: 'success',
+        msg: 'Both PDF Label and Packing Slip downloaded and opened!',
+      });
+    } catch (err: any) {
+      setQzStatus({
+        type: 'error',
+        msg: `Failed to get PDFs: ${err?.message || err}`,
+      });
+    } finally {
+      setDownloadingPdf(null);
+    }
   };
 
   const handleDirectQZPrint = async () => {
@@ -274,18 +323,28 @@ export const LabelPrintDialog: React.FC<LabelPrintDialogProps> = ({ order, setti
               <div className="grid grid-cols-2 gap-2">
                 <button
                   onClick={handlePrintLabel}
-                  className="flex items-center justify-center space-x-1.5 bg-slate-100 border border-slate-300 text-slate-700 hover:bg-slate-200 px-3 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer"
+                  disabled={downloadingPdf !== null}
+                  className="flex items-center justify-center space-x-1.5 bg-slate-100 border border-slate-300 text-slate-700 hover:bg-slate-200 disabled:opacity-60 px-3 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer"
                 >
-                  <Printer className="w-3.5 h-3.5 text-slate-500" />
-                  <span>PDF Label</span>
+                  {downloadingPdf === 'label' ? (
+                    <Loader2 className="w-3.5 h-3.5 text-slate-600 animate-spin" />
+                  ) : (
+                    <Printer className="w-3.5 h-3.5 text-slate-500" />
+                  )}
+                  <span>{downloadingPdf === 'label' ? 'Generating...' : 'PDF Label'}</span>
                 </button>
 
                 <button
                   onClick={handlePrintPackingSlip}
-                  className="flex items-center justify-center space-x-1.5 bg-slate-100 border border-slate-300 text-slate-700 hover:bg-slate-200 px-3 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer"
+                  disabled={downloadingPdf !== null}
+                  className="flex items-center justify-center space-x-1.5 bg-slate-100 border border-slate-300 text-slate-700 hover:bg-slate-200 disabled:opacity-60 px-3 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer"
                 >
-                  <FileText className="w-3.5 h-3.5 text-slate-500" />
-                  <span>PDF Slip</span>
+                  {downloadingPdf === 'slip' ? (
+                    <Loader2 className="w-3.5 h-3.5 text-slate-600 animate-spin" />
+                  ) : (
+                    <FileText className="w-3.5 h-3.5 text-slate-500" />
+                  )}
+                  <span>{downloadingPdf === 'slip' ? 'Generating...' : 'PDF Slip'}</span>
                 </button>
               </div>
             </div>

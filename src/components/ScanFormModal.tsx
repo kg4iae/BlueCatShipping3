@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ShippingOrder, AppSetting, ScanFormType, formatOrderId } from '../types';
 import { printPdfToQZ, getDefaultQZPrinter } from '../lib/qzTray';
+import { downloadOrOpenPdf } from '../lib/pdfDownloader';
 import {
   FileText,
   Printer,
@@ -135,11 +136,15 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
     document.body.removeChild(link);
   };
 
-  const handleOpenPdfNewTab = (scanForm?: ScanFormType | null) => {
+  const handleOpenPdfNewTab = async (scanForm?: ScanFormType | null) => {
     const sf = scanForm || activeScanForm;
     if (!sf) return;
     const pdfUrl = `/api/scan-forms/${sf.id}/pdf`;
-    window.open(pdfUrl, '_blank');
+    try {
+      await downloadOrOpenPdf(pdfUrl, `USPS_SCAN_Form_${sf.formNumber || sf.id}.pdf`);
+    } catch (err) {
+      console.error('Failed to download/open SCAN form PDF:', err);
+    }
   };
 
   const handlePrint = () => {

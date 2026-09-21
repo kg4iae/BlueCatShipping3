@@ -1,10 +1,15 @@
+// In tsx/Node ESM environments, globalThis.__dirname may be initialized to '.' which breaks
+// plugins (e.g. vite-plugin-pwa) using createRequire(typeof __dirname !== 'undefined' ? __dirname : ...)
+if ((globalThis as any).__dirname === '.') {
+  delete (globalThis as any).__dirname;
+}
+
 import dotenv from 'dotenv';
 dotenv.config();
 
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import { createServer as createViteServer } from 'vite';
 import sql from 'mssql';
 import { jsPDF } from 'jspdf';
 import crypto from 'crypto';
@@ -4127,13 +4132,51 @@ app.get('/api/orders/:id/packing-slip.pdf', (req, res) => {
 });
 
 // Batch Packing Slips PDF Endpoint
-app.get('/api/orders/batch-packing-slips.pdf', (req, res) => {
+app.get('/api/orders/batch-packing-slips.pdf', async (req, res) => {
   const orderIdsParam = req.query.orderIds as string;
-  let targetOrders: ShippingOrder[] = db.orders;
+  let targetOrders: ShippingOrder[] = [];
 
   if (orderIdsParam) {
-    const ids = orderIdsParam.split(',').map((s) => s.trim());
+    const ids = orderIdsParam.split(',').map((s) => s.trim()).filter(Boolean);
     targetOrders = db.orders.filter((o) => ids.includes(o.id) || ids.includes(o.orderNumber));
+  } else {
+    targetOrders = db.orders;
+  }
+
+  // If no matching orders found in memory, query MS SQL Server database
+  if (targetOrders.length === 0 && orderIdsParam) {
+    const ids = orderIdsParam.split(',').map((s) => s.trim()).filter(Boolean);
+    const pool = await getMssqlPool();
+    if (pool && ids.length > 0) {
+      try {
+        const tableName = getShippingTableName(db.settings);
+        const reqSql = pool.request();
+        const idPlaceholders = ids.map((idVal, idx) => {
+          reqSql.input(`psId${idx}`, sql.VarChar, idVal);
+          return `@psId${idx}`;
+        }).join(', ');
+
+        const sqlRes = await reqSql.query(`
+          SELECT 
+            [Id], [name], [address1], [address2], [city], [state], [postalCode], [country],
+            [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
+            [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
+            [TotalWeight], [box], [easypostShipmentId], [marketplacenotified]
+          FROM ${tableName}
+          WHERE CAST([Id] AS NVARCHAR(MAX)) IN (${idPlaceholders}) OR [receiptID] IN (${idPlaceholders})
+        `);
+
+        if (sqlRes.recordset && sqlRes.recordset.length > 0) {
+          targetOrders = sqlRes.recordset.map((row) => mapDbRowToShippingOrder(row, tableName));
+        }
+      } catch (err) {
+        console.warn('[Batch Packing Slips PDF] MS SQL lookup notice:', err);
+      }
+    }
+  }
+
+  if (targetOrders.length === 0) {
+    targetOrders = db.orders;
   }
 
   if (targetOrders.length === 0) {
@@ -4153,11 +4196,53 @@ app.get('/api/orders/batch-packing-slips.pdf', (req, res) => {
 // Download Combined Batch PDF Labels
 app.get('/api/orders/batch-labels.pdf', async (req, res) => {
   const orderIdsParam = req.query.orderIds as string;
-  let targetOrders: ShippingOrder[] = db.orders.filter((o) => o.status === 'shipped' || o.trackingNumber);
+  let targetOrders: ShippingOrder[] = [];
 
   if (orderIdsParam) {
-    const ids = orderIdsParam.split(',').map((s) => s.trim());
+    const ids = orderIdsParam.split(',').map((s) => s.trim()).filter(Boolean);
     targetOrders = db.orders.filter((o) => ids.includes(o.id) || ids.includes(o.orderNumber));
+  } else {
+    targetOrders = db.orders.filter((o) => o.status === 'shipped' || o.trackingNumber);
+  }
+
+  // If no matching orders found in memory, query MS SQL Server database
+  if (targetOrders.length === 0 && orderIdsParam) {
+    const ids = orderIdsParam.split(',').map((s) => s.trim()).filter(Boolean);
+    const pool = await getMssqlPool();
+    if (pool && ids.length > 0) {
+      try {
+        const tableName = getShippingTableName(db.settings);
+        const reqSql = pool.request();
+        const idPlaceholders = ids.map((idVal, idx) => {
+          reqSql.input(`pId${idx}`, sql.VarChar, idVal);
+          return `@pId${idx}`;
+        }).join(', ');
+
+        const sqlRes = await reqSql.query(`
+          SELECT 
+            [Id], [name], [address1], [address2], [city], [state], [postalCode], [country],
+            [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
+            [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
+            [TotalWeight], [box], [easypostShipmentId], [marketplacenotified], [LabelData]
+          FROM ${tableName}
+          WHERE CAST([Id] AS NVARCHAR(MAX)) IN (${idPlaceholders}) OR [receiptID] IN (${idPlaceholders})
+        `);
+
+        if (sqlRes.recordset && sqlRes.recordset.length > 0) {
+          targetOrders = sqlRes.recordset.map((row) => mapDbRowToShippingOrder(row, tableName));
+        }
+      } catch (err) {
+        console.warn('[Batch Labels PDF] MS SQL lookup for orderIds notice:', err);
+      }
+    }
+  }
+
+  // If still empty, fall back to any shipped orders or top orders
+  if (targetOrders.length === 0) {
+    targetOrders = db.orders.filter((o) => o.status === 'shipped' || o.trackingNumber || o.hasLabelData);
+    if (targetOrders.length === 0 && db.orders.length > 0) {
+      targetOrders = db.orders.slice(0, 50);
+    }
   }
 
   if (targetOrders.length === 0) {
@@ -4171,6 +4256,28 @@ app.get('/api/orders/batch-labels.pdf', async (req, res) => {
       const order = targetOrders[index];
       if (index > 0) {
         doc.addPage([4, 6], 'portrait');
+      }
+
+      // If labelBinary is missing from in-memory order, attempt to retrieve LabelData from MS SQL
+      if (!order.labelBinary && !order.labelPngBase64) {
+        try {
+          const pool = await getMssqlPool();
+          if (pool) {
+            const tableName = getShippingTableName(db.settings);
+            const lRes = await pool.request()
+              .input('oid', sql.VarChar, order.id)
+              .input('oreceipt', sql.VarChar, order.orderNumber)
+              .query(`SELECT [LabelData], [Carrier], [Service], [trackingNumber] FROM ${tableName} WHERE [Id] = @oid OR [receiptID] = @oreceipt`);
+            if (lRes.recordset.length > 0 && lRes.recordset[0].LabelData) {
+              order.labelBinary = Buffer.from(lRes.recordset[0].LabelData);
+              if (lRes.recordset[0].trackingNumber && !order.trackingNumber) {
+                order.trackingNumber = lRes.recordset[0].trackingNumber;
+              }
+            }
+          }
+        } catch (e) {
+          // non-fatal
+        }
       }
 
       // Check if order has real label image (PNG base64 or easyPostLabelUrl or labelBinary)
