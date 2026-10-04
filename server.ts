@@ -973,9 +973,7 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
   try {
     const tableName = getShippingTableName();
     const req = pool.request();
-    if (typeof (req as any).setTimeout === 'function') {
-      (req as any).setTimeout(20000);
-    }
+    (req as any).timeout = 30000;
 
     const numericId = parseInt(order.id, 10);
     const validNumId = !isNaN(numericId) && numericId > 0;
@@ -1036,9 +1034,8 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
     req.input('box', sql.VarChar(50), order.boxId || 'pkg_medium');
     req.input('easypostShipmentId', sql.NVarChar(64), order.easypostShipmentId || null);
     req.input('marketplacenotified', sql.NVarChar(50), order.marketplacenotified || 'No');
-    req.input('hasLabel', sql.Bit, hasLabel);
-    req.input('LabelData', sql.VarBinary(sql.MAX), labelBuffer);
 
+    // Stage 1: Always persist metadata and tracking info first (fast, ~1KB query)
     await req.query(`
       IF (@id > 0 AND EXISTS (SELECT 1 FROM ${tableName} WHERE [Id] = @id))
       BEGIN
@@ -1064,8 +1061,7 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
               [TotalWeight] = @TotalWeight,
               [box] = @box,
               [easypostShipmentId] = @easypostShipmentId,
-              [marketplacenotified] = @marketplacenotified,
-              [LabelData] = CASE WHEN @hasLabel = 1 THEN @LabelData ELSE [LabelData] END
+              [marketplacenotified] = @marketplacenotified
           WHERE [Id] = @id;
       END
       ELSE IF (@receiptID IS NOT NULL AND EXISTS (SELECT 1 FROM ${tableName} WHERE [receiptID] = @receiptID))
@@ -1091,8 +1087,7 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
               [TotalWeight] = @TotalWeight,
               [box] = @box,
               [easypostShipmentId] = @easypostShipmentId,
-              [marketplacenotified] = @marketplacenotified,
-              [LabelData] = CASE WHEN @hasLabel = 1 THEN @LabelData ELSE [LabelData] END
+              [marketplacenotified] = @marketplacenotified
           WHERE [receiptID] = @receiptID;
       END
       ELSE
@@ -1101,15 +1096,39 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
               [name], [address1], [address2], [city], [state], [postalCode], [country],
               [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
               [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
-              [TotalWeight], [box], [easypostShipmentId], [marketplacenotified], [LabelData]
+              [TotalWeight], [box], [easypostShipmentId], [marketplacenotified]
           ) VALUES (
               @name, @address1, @address2, @city, @state, @postalCode, @country,
               @phone, @email, @createdAt, @OrderDetails, @receiptID, @Carrier, @Service,
               @trackingNumber, @status, @shippingCost, @shippingDate, @platform,
-              @TotalWeight, @box, @easypostShipmentId, @marketplacenotified, @LabelData
+              @TotalWeight, @box, @easypostShipmentId, @marketplacenotified
           );
       END
     `);
+
+    // Stage 2: Store LabelData binary if present (handles quota / timeout gracefully)
+    if (hasLabel && labelBuffer) {
+      try {
+        const binReq = pool.request();
+        (binReq as any).timeout = 30000;
+        binReq.input('id', sql.Int, validNumId ? numericId : -1);
+        binReq.input('receiptID', sql.NVarChar(sql.MAX), order.orderNumber);
+        binReq.input('LabelData', sql.VarBinary(sql.MAX), labelBuffer);
+
+        await binReq.query(`
+          IF (@id > 0 AND EXISTS (SELECT 1 FROM ${tableName} WHERE [Id] = @id))
+          BEGIN
+              UPDATE ${tableName} SET [LabelData] = @LabelData WHERE [Id] = @id;
+          END
+          ELSE IF (@receiptID IS NOT NULL AND EXISTS (SELECT 1 FROM ${tableName} WHERE [receiptID] = @receiptID))
+          BEGIN
+              UPDATE ${tableName} SET [LabelData] = @LabelData WHERE [receiptID] = @receiptID;
+          END
+        `);
+      } catch (binErr: any) {
+        console.warn(`[MSSQL] Notice storing LabelData binary for Order #${order.orderNumber} (order status is safely preserved):`, binErr?.message || binErr);
+      }
+    }
   } catch (err: any) {
     console.warn(`[MSSQL] Non-fatal save notice for order #${order.orderNumber}:`, err?.message || err);
     // If request failed with timeout, connection error, or cancel failure, reset active pool so next attempt connects fresh
@@ -2803,6 +2822,43 @@ app.put('/api/orders/:id', async (req, res) => {
   res.json(updatedOrder);
 });
 
+// Delete Order Endpoint
+app.delete('/api/orders/:id', async (req, res) => {
+  const { id } = req.params;
+  const index = db.orders.findIndex((o) => o.id === id || o.orderNumber === id);
+  const orderToDelete = index !== -1 ? db.orders[index] : null;
+
+  if (index !== -1) {
+    db.orders.splice(index, 1);
+  }
+  db.devOrders = db.devOrders.filter((o) => o.id !== id && o.orderNumber !== id);
+  db.prodOrders = db.prodOrders.filter((o) => o.id !== id && o.orderNumber !== id);
+
+  const pool = await getMssqlPool();
+  if (pool) {
+    try {
+      const tableName = getShippingTableName();
+      const numericId = parseInt(id, 10);
+      const reqSql = pool.request();
+      reqSql.input('id', sql.Int, !isNaN(numericId) ? numericId : -1);
+      reqSql.input('orderNumber', sql.NVarChar(sql.MAX), id);
+      if (orderToDelete) {
+        reqSql.input('receiptID', sql.NVarChar(sql.MAX), orderToDelete.orderNumber);
+      } else {
+        reqSql.input('receiptID', sql.NVarChar(sql.MAX), id);
+      }
+      await reqSql.query(`
+        DELETE FROM ${tableName}
+        WHERE [Id] = @id OR [receiptID] = @orderNumber OR [receiptID] = @receiptID
+      `);
+    } catch (err: any) {
+      console.warn('[MSSQL] Notice deleting order from database:', err?.message || err);
+    }
+  }
+
+  res.json({ success: true, message: `Order #${id} deleted successfully.` });
+});
+
 // Validate Addresses Batch Endpoint
 app.post('/api/orders/validate-addresses', async (req, res) => {
   const { orderIds } = req.body;
@@ -3556,6 +3612,140 @@ app.post('/api/orders/:id/purchase-label', async (req, res) => {
       error: err.message || 'Failed to purchase label from EasyPost.',
     });
   }
+});
+
+// Request Postage Label Refund via EasyPost API & Reset Order to Completed Status
+app.post('/api/orders/:id/refund-label', async (req, res) => {
+  const { id } = req.params;
+  const pool = await getMssqlPool();
+  const tableName = getShippingTableName();
+
+  // Find order in memory or from database
+  let order = db.orders.find((o) => o.id === id || o.orderNumber === id);
+  if (!order && pool) {
+    const numericId = parseInt(id, 10);
+    const dbRes = await pool.request()
+      .input('id', sql.Int, !isNaN(numericId) ? numericId : -1)
+      .input('receiptID', sql.NVarChar(sql.MAX), id)
+      .query(`SELECT * FROM ${tableName} WHERE [Id] = @id OR [receiptID] = @receiptID`);
+    if (dbRes.recordset && dbRes.recordset.length > 0) {
+      order = mapDbRowToShippingOrder(dbRes.recordset[0], tableName);
+    }
+  }
+
+  if (!order) {
+    return res.status(404).json({ error: 'Order not found.' });
+  }
+
+  const shipmentId = order.easypostShipmentId;
+  const trackingNumber = order.trackingNumber;
+  let refundStatus = 'submitted';
+  let refundNotice = '';
+
+  // 1. If EasyPost shipment ID is present, request refund via EasyPost API
+  const apiKey = getActiveEasyPostKey(db.settings);
+  if (shipmentId && apiKey) {
+    try {
+      const authHeader = `Basic ${Buffer.from(apiKey + ':').toString('base64')}`;
+      const epRes = await fetch(`https://api.easypost.com/v2/shipments/${shipmentId}/refund`, {
+        method: 'POST',
+        headers: {
+          Authorization: authHeader,
+          'Content-Type': 'application/json',
+        },
+      });
+      const epData = (await epRes.json().catch(() => ({}))) as any;
+      if (!epRes.ok) {
+        const errorMsg = epData.error?.message || epData.error || `HTTP ${epRes.status}`;
+        console.warn(`[EasyPost Refund] Refund request notice for shipment ${shipmentId}:`, errorMsg);
+        if (!String(errorMsg).toLowerCase().includes('already') && !String(errorMsg).toLowerCase().includes('submitted')) {
+          return res.status(400).json({
+            error: `EasyPost Refund Request Failed: ${errorMsg}`,
+            easyPostError: epData.error,
+          });
+        }
+      }
+      refundStatus = epData.refund_status || 'submitted';
+      refundNotice = `EasyPost postage refund request submitted (Status: ${refundStatus}).`;
+    } catch (epErr: any) {
+      console.warn('[EasyPost Refund Error]', epErr);
+      return res.status(500).json({ error: `Failed to communicate with EasyPost refund service: ${epErr.message || epErr}` });
+    }
+  } else if (!shipmentId && trackingNumber) {
+    refundNotice = 'Shipping information cleared from database (no EasyPost shipment ID was attached).';
+  }
+
+  // 2. Remove shipping information from the database and return it to Completed status
+  if (pool) {
+    try {
+      const numericId = parseInt(order.id, 10);
+      const reqSql = pool.request();
+      (reqSql as any).timeout = 30000;
+      reqSql.input('id', sql.Int, !isNaN(numericId) ? numericId : -1);
+      reqSql.input('receiptID', sql.NVarChar(sql.MAX), order.orderNumber);
+
+      await reqSql.query(`
+        UPDATE ${tableName} SET
+          [status] = 'Complete',
+          [trackingNumber] = '',
+          [shippingCost] = 0,
+          [shippingDate] = '1900-01-01',
+          [Carrier] = NULL,
+          [Service] = NULL,
+          [easypostShipmentId] = NULL,
+          [LabelData] = NULL,
+          [marketplacenotified] = 'No'
+        WHERE [Id] = @id OR [receiptID] = @receiptID;
+      `);
+      console.log(`[MSSQL] Successfully cleared shipping info and reset Order #${order.orderNumber} to Complete.`);
+    } catch (dbErr: any) {
+      console.error('[MSSQL] Error resetting order status to Complete in database:', dbErr);
+      return res.status(500).json({ error: `Database error removing shipping info: ${dbErr.message || dbErr}` });
+    }
+  }
+
+  // 3. Update in-memory state
+  order.status = 'ready_to_ship';
+  order.dbStatus = 'Complete';
+  order.shippingStatus = 'Complete';
+  order.trackingNumber = undefined;
+  order.shippingCost = 0;
+  order.shippingDate = undefined;
+  order.carrier = !isInternationalOrder(order)
+    ? (db.settings.defaultDomesticCarrier || 'USPS')
+    : (db.settings.defaultInternationalCarrier || 'UPS');
+  order.serviceLevel = !isInternationalOrder(order)
+    ? (db.settings.defaultDomesticService || 'Priority')
+    : (db.settings.defaultInternationalService || 'UPS Worldwide Expedited');
+  order.easypostShipmentId = undefined;
+  order.labelBinary = undefined;
+  order.hasLabelData = false;
+  order.LabelData = null;
+  order.labelPngBase64 = undefined;
+  order.labelPngData = undefined;
+  order.marketplacenotified = 'No';
+
+  // Sync caches
+  const devIdx = db.devOrders.findIndex((o) => o.id === order.id || o.orderNumber === order.orderNumber);
+  if (devIdx !== -1) db.devOrders[devIdx] = order;
+  const prodIdx = db.prodOrders.findIndex((o) => o.id === order.id || o.orderNumber === order.orderNumber);
+  if (prodIdx !== -1) db.prodOrders[prodIdx] = order;
+  const memIdx = db.orders.findIndex((o) => o.id === order.id || o.orderNumber === order.orderNumber);
+  if (memIdx !== -1) db.orders[memIdx] = order;
+
+  // Refresh total shipped count
+  if (db.totalShippedCount && db.totalShippedCount > 0) {
+    db.totalShippedCount--;
+  }
+
+  res.json({
+    success: true,
+    message: refundNotice
+      ? `${refundNotice} Shipping details removed and Order #${order.orderNumber} returned to Ready to Ship (Completed).`
+      : `Shipping information removed and Order #${order.orderNumber} returned to Ready to Ship (Completed).`,
+    refundStatus,
+    order,
+  });
 });
 
 // Bulk Batch Purchase Labels Endpoint

@@ -12,6 +12,7 @@ import { BatchPrintModal } from './components/BatchPrintModal';
 import { LabelPrintDialog } from './components/LabelPrintDialog';
 import { SearchShipped } from './components/SearchShipped';
 import { ReshipModal } from './components/ReshipModal';
+import { RefundConfirmModal } from './components/RefundConfirmModal';
 import { ScanFormModal } from './components/ScanFormModal';
 import { Reports } from './components/Reports';
 import { SettingsPage } from './components/SettingsPage';
@@ -120,6 +121,7 @@ export default function App() {
   const [printOrders, setPrintOrders] = useState<ShippingOrder[] | null>(null);
   const [purchasedLabelOrder, setPurchasedLabelOrder] = useState<ShippingOrder | null>(null);
   const [reshipTargetOrder, setReshipTargetOrder] = useState<ShippingOrder | null>(null);
+  const [refundConfirmOrder, setRefundConfirmOrder] = useState<ShippingOrder | null>(null);
 
   // Notification Toast state
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
@@ -495,6 +497,53 @@ export default function App() {
     }
   };
 
+  // Request Postage Label Refund & Return Order to Completed Status
+  const handleConfirmRefund = async (order: ShippingOrder) => {
+    try {
+      const res = await fetch(`/api/orders/${order.id}/refund-label`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to submit refund request to EasyPost.');
+      }
+
+      const updatedOrder: ShippingOrder = data.order || {
+        ...order,
+        status: 'ready_to_ship',
+        dbStatus: 'Complete',
+        shippingStatus: 'Complete',
+        trackingNumber: undefined,
+        shippingCost: 0,
+        shippingDate: undefined,
+        easypostShipmentId: undefined,
+        hasLabelData: false,
+        LabelData: null,
+        labelBinary: undefined,
+        marketplacenotified: 'No',
+      };
+
+      setOrders((prev) =>
+        prev.map((o) => (o.id === order.id || o.orderNumber === order.orderNumber ? updatedOrder : o))
+      );
+
+      if (orderDetailOrder?.id === order.id || orderDetailOrder?.orderNumber === order.orderNumber) {
+        setOrderDetailOrder(updatedOrder);
+      }
+
+      setRefundConfirmOrder(null);
+      fetchWalletBalance();
+      refreshAllData();
+      showToast(
+        data.message || `Postage refund requested for Order #${order.orderNumber}! Shipping info cleared.`,
+        'success'
+      );
+    } catch (err: any) {
+      throw err;
+    }
+  };
+
   // Environment Switch Handler with dedicated loading screen
   const handleToggleAppEnv = async (targetEnv: 'dev' | 'prod') => {
     if (envSwitchState?.isSwitching) return;
@@ -728,6 +777,7 @@ export default function App() {
             onOpenPrintModal={(ordersToPrint) => setPrintOrders(ordersToPrint)}
             onOpenScanFormModal={() => setShowScanFormModal(true)}
             onOpenOrderDetailModal={(order) => setOrderDetailOrder(order)}
+            onRefundLabel={(order) => setRefundConfirmOrder(order)}
             totalShippedCount={totalShippedCount}
           />
         )}
@@ -787,10 +837,22 @@ export default function App() {
           onClose={() => setOrderDetailOrder(null)}
           onSaveOrder={handleSaveOrderDetails}
           onPurchaseLabel={handlePurchaseSingleLabel}
+          onRefundLabel={async (order) => {
+            setOrderDetailOrder(null);
+            setRefundConfirmOrder(order);
+          }}
           onOpenCompareRatesModal={(order) => {
             setOrderDetailOrder(null);
             setCompareRatesOrder(order);
           }}
+        />
+      )}
+
+      {refundConfirmOrder && (
+        <RefundConfirmModal
+          order={refundConfirmOrder}
+          onClose={() => setRefundConfirmOrder(null)}
+          onConfirmRefund={handleConfirmRefund}
         />
       )}
 

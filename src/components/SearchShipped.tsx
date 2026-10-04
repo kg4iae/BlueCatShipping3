@@ -19,6 +19,7 @@ import {
   ChevronsRight,
   Loader2,
   RefreshCw,
+  Undo2,
 } from 'lucide-react';
 
 interface SearchShippedProps {
@@ -28,6 +29,7 @@ interface SearchShippedProps {
   onOpenPrintModal: (orders: ShippingOrder[]) => void;
   onOpenScanFormModal?: () => void;
   onOpenOrderDetailModal?: (order: ShippingOrder) => void;
+  onRefundLabel?: (order: ShippingOrder) => void;
   totalShippedCount?: number;
 }
 
@@ -38,6 +40,7 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
   onOpenPrintModal,
   onOpenScanFormModal,
   onOpenOrderDetailModal,
+  onRefundLabel,
   totalShippedCount: initialTotalCount,
 }) => {
   // Pagination State: Default 20 records per page, support 20, 50, 100
@@ -522,12 +525,24 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
 
                         <button
                           onClick={() => onReshipOrder(order)}
-                          className="flex items-center space-x-1.5 bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition-all shadow-sm cursor-pointer"
+                          className="flex items-center space-x-1.5 bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg text-xs font-semibold transition-all shadow-xs cursor-pointer"
                           title="Creates a new replacement shipping label with same recipient information"
                         >
                           <RotateCcw className="w-3.5 h-3.5" />
                           <span>Re-Ship</span>
                         </button>
+
+                        {onRefundLabel && (
+                          <button
+                            type="button"
+                            onClick={() => onRefundLabel(order)}
+                            className="flex items-center space-x-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all shadow-xs cursor-pointer"
+                            title="Request postage refund via EasyPost API and return order to Completed status"
+                          >
+                            <Undo2 className="w-3.5 h-3.5 text-rose-600" />
+                            <span>Refund</span>
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>

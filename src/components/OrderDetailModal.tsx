@@ -28,6 +28,7 @@ import {
   Tag,
   Download,
   RefreshCw,
+  Undo2,
 } from 'lucide-react';
 
 interface OrderDetailModalProps {
@@ -38,6 +39,7 @@ interface OrderDetailModalProps {
   onSaveOrder: (orderId: string, updates: Partial<ShippingOrder>) => Promise<void>;
   onOpenCompareRatesModal?: (order: ShippingOrder) => void;
   onPurchaseLabel?: (orderId: string, carrier?: CarrierType, serviceLevel?: string, rateCost?: number) => Promise<void>;
+  onRefundLabel?: (order: ShippingOrder) => Promise<void>;
 }
 
 export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
@@ -48,6 +50,7 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
   onSaveOrder,
   onOpenCompareRatesModal,
   onPurchaseLabel,
+  onRefundLabel,
 }) => {
   // Address Form States
   const [recipientName, setRecipientName] = useState(order.recipientName || '');
@@ -816,6 +819,18 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
               >
                 <Download className="w-4 h-4 text-indigo-600" />
                 <span>Download Label PDF</span>
+              </button>
+            )}
+
+            {(order.status === 'shipped' || order.trackingNumber) && onRefundLabel && (
+              <button
+                type="button"
+                onClick={() => onRefundLabel(order)}
+                className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-xs px-4 py-2.5 rounded-lg flex items-center space-x-1.5 transition-all cursor-pointer"
+                title="Request postage refund via EasyPost API and return order to Completed status"
+              >
+                <Undo2 className="w-4 h-4 text-rose-600" />
+                <span>Request Label Refund</span>
               </button>
             )}
 
