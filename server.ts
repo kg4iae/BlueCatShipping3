@@ -3,10 +3,14 @@
 if ((globalThis as any).__dirname === '.') {
   delete (globalThis as any).__dirname;
 }
+if ((global as any).__dirname === '.') {
+  delete (global as any).__dirname;
+}
 
 import dotenv from 'dotenv';
 dotenv.config();
 
+import http from 'http';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
@@ -5988,14 +5992,22 @@ async function startServer() {
       });
   }
 
+  const listenPort = process.env.PORT || PORT || 3000;
+  const httpServer = http.createServer(app);
+
   if (process.env.NODE_ENV !== 'production') {
-  const { createServer: createViteServer } = await import('vite');
-  const vite = await createViteServer({
-    server: { middlewareMode: true },
-    appType: 'spa',
-  });
-  app.use(vite.middlewares);
-} else {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: {
+        middlewareMode: true,
+        hmr: {
+          server: httpServer,
+        },
+      },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
@@ -6003,8 +6015,7 @@ async function startServer() {
     });
   }
 
-  const listenPort = process.env.PORT || PORT || 3000;
-  app.listen(listenPort, () => {
+  httpServer.listen(listenPort, () => {
     console.log(`BlueCat Bobbins Shipping Server running on Port ${listenPort} (NODE_ENV=${process.env.NODE_ENV || 'development'})`);
   });
 }
