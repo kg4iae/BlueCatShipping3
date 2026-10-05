@@ -91,6 +91,24 @@ export interface PackageType {
   isActive: boolean;
 }
 
+export interface BobbinPackagingRule {
+  id: number;
+  pattern: string;
+  classification: 'Oversized' | 'Bulky' | 'Standard' | string;
+  maxCubeQty: number;
+  maxRateBoxQty: number;
+  notes?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface BoxDeterminationResult {
+  boxId: string | null;
+  boxName: string | null;
+  reason?: string;
+  error?: string;
+}
+
 export interface ReturnAddress {
   name: string;
   company: string;

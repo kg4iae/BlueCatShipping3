@@ -16,6 +16,7 @@ import { RefundConfirmModal } from './components/RefundConfirmModal';
 import { ScanFormModal } from './components/ScanFormModal';
 import { Reports } from './components/Reports';
 import { SettingsPage } from './components/SettingsPage';
+import { PackagingRulesConfig } from './components/PackagingRulesConfig';
 import { EasyPostErrorModal, EasyPostErrorInfo } from './components/EasyPostErrorModal';
 import { EnvLoadingOverlay, EnvSwitchState } from './components/EnvLoadingOverlay';
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
@@ -32,7 +33,7 @@ export default function App() {
       return null;
     }
   });
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'search' | 'reports' | 'settings'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'search' | 'reports' | 'settings' | 'packaging-rules'>('dashboard');
 
   useEffect(() => {
     const token = localStorage.getItem('shipping_auth_token');
@@ -783,6 +784,14 @@ export default function App() {
         )}
 
         {activeTab === 'reports' && <Reports />}
+
+        {activeTab === 'packaging-rules' && (
+          <PackagingRulesConfig
+            packages={packages}
+            showToast={showToast}
+            onRefreshOrders={refreshAllData}
+          />
+        )}
 
         {activeTab === 'settings' && settings && (
           <SettingsPage

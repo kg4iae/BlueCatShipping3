@@ -555,14 +555,31 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
 
               {/* Box Selection */}
               <div>
+                {order.validationErrors?.some((e) => e.toLowerCase().includes('box')) && (
+                  <div className="mb-3 bg-rose-50 border border-rose-300 rounded-xl p-3 flex items-start space-x-2 text-rose-800">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    <div className="text-xs">
+                      <strong className="block font-bold">Box Size Undetermined</strong>
+                      <span>{order.validationErrors.find((e) => e.toLowerCase().includes('box'))}</span>
+                    </div>
+                  </div>
+                )}
+
                 <label className="block text-xs font-semibold text-slate-700 mb-1.5">
                   Select Packaging Box Type *
                 </label>
                 <select
-                  value={boxId}
+                  value={boxId || ''}
                   onChange={(e) => setBoxId(e.target.value)}
-                  className="w-full bg-white border border-slate-300 rounded-xl p-3 text-xs font-bold text-slate-900 focus:ring-2 focus:ring-indigo-500 focus:outline-none cursor-pointer"
+                  className={`w-full border rounded-xl p-3 text-xs font-bold focus:ring-2 focus:outline-none cursor-pointer ${
+                    !boxId || boxId === 'undetermined'
+                      ? 'bg-rose-50 border-rose-300 text-rose-900 focus:ring-rose-500'
+                      : 'bg-white border-slate-300 text-slate-900 focus:ring-indigo-500'
+                  }`}
                 >
+                  {(!boxId || boxId === 'undetermined') && (
+                    <option value="">-- Please Select Packaging Box (Required) --</option>
+                  )}
                   {packages.map((pkg) => (
                     <option key={pkg.id} value={pkg.id}>
                       {pkg.name} — Inner ({pkg.innerLength}" x {pkg.innerWidth}" x {pkg.innerHeight}") | Max {pkg.maxWeightOz / 16} lbs

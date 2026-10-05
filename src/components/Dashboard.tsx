@@ -589,17 +589,45 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
                       {/* Box Dropdown */}
                       <td className="py-3 px-3">
-                        <select
-                          value={order.boxId}
-                          onChange={(e) => onUpdateOrderBox(order.id, e.target.value)}
-                          className="bg-slate-100 border border-slate-300 text-xs rounded px-2 py-1 outline-none focus:ring-2 focus:ring-indigo-500 text-slate-800 w-36 cursor-pointer"
-                        >
-                          {packages.map((pkg) => (
-                            <option key={pkg.id} value={pkg.id}>
-                              {pkg.name} ({pkg.code})
-                            </option>
-                          ))}
-                        </select>
+                        {(() => {
+                          const boxError = order.validationErrors?.find((e) => e.toLowerCase().includes('box'));
+                          const isUndetermined = !order.boxId || order.boxId === 'undetermined' || Boolean(boxError);
+
+                          return (
+                            <div className="space-y-1">
+                              {isUndetermined && (
+                                <div className="inline-flex items-center space-x-1 px-1.5 py-0.5 rounded bg-rose-100 border border-rose-300 text-rose-800 font-bold text-[10px]">
+                                  <AlertTriangle className="w-3 h-3 text-rose-600 shrink-0" />
+                                  <span>Box Needed</span>
+                                </div>
+                              )}
+                              <select
+                                value={order.boxId || ''}
+                                onChange={(e) => onUpdateOrderBox(order.id, e.target.value)}
+                                className={`text-xs rounded px-2 py-1 outline-none w-36 cursor-pointer transition-all ${
+                                  isUndetermined
+                                    ? 'bg-rose-50 border-2 border-rose-400 text-rose-900 font-semibold focus:ring-2 focus:ring-rose-500'
+                                    : 'bg-slate-100 border border-slate-300 text-slate-800 focus:ring-2 focus:ring-indigo-500'
+                                }`}
+                                title={boxError || (isUndetermined ? 'Box size undetermined. Please select a package box.' : `Assigned: ${order.boxName || 'Package'}`)}
+                              >
+                                {isUndetermined && (
+                                  <option value="">-- Select Box (Required) --</option>
+                                )}
+                                {packages.map((pkg) => (
+                                  <option key={pkg.id} value={pkg.id}>
+                                    {pkg.name} ({pkg.code})
+                                  </option>
+                                ))}
+                              </select>
+                              {boxError && (
+                                <div className="text-[10px] text-rose-600 leading-tight max-w-[150px] truncate" title={boxError}>
+                                  {boxError}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </td>
 
                       {/* Carrier Rates / Shipping Cost */}
@@ -674,7 +702,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         {order.status === 'address_error' && (
                           <span className="inline-flex items-center gap-1 text-rose-700 font-bold text-[10px] uppercase tracking-wide bg-rose-50 border border-rose-200 px-2 py-0.5 rounded">
                             <AlertTriangle className="w-3 h-3 text-rose-600" />
-                            <span>{order.weightOz <= 0 && (!order.validationErrors || order.validationErrors.every((e) => e.toLowerCase().includes('weight'))) ? 'Weight Req' : 'Issue'}</span>
+                            <span>
+                              {order.validationErrors?.some((e) => e.toLowerCase().includes('box'))
+                                ? 'Box Needed'
+                                : order.weightOz <= 0 && (!order.validationErrors || order.validationErrors.every((e) => e.toLowerCase().includes('weight')))
+                                ? 'Weight Req'
+                                : 'Issue'}
+                            </span>
                           </span>
                         )}
                       </td>
@@ -682,7 +716,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       {/* Action */}
                       <td className="py-3 px-3 text-right">
                         {order.status === 'address_error' ? (
-                          order.weightOz <= 0 && (!order.validationErrors || order.validationErrors.every((e) => e.toLowerCase().includes('weight'))) ? (
+                          order.validationErrors?.some((e) => e.toLowerCase().includes('box')) ? (
+                            <button
+                              onClick={() => onOpenOrderDetailModal && onOpenOrderDetailModal(order)}
+                              className="text-rose-600 font-bold text-xs hover:underline cursor-pointer"
+                            >
+                              Choose Box
+                            </button>
+                          ) : order.weightOz <= 0 && (!order.validationErrors || order.validationErrors.every((e) => e.toLowerCase().includes('weight'))) ? (
                             <button
                               onClick={() => onOpenWeightCorrectionModal && onOpenWeightCorrectionModal(order)}
                               className="text-rose-600 font-semibold text-xs hover:underline cursor-pointer"

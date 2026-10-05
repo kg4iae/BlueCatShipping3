@@ -15,7 +15,7 @@ import { jsPDF } from 'jspdf';
 import { PDFDocument } from 'pdf-lib';
 import crypto from 'crypto';
 import sharp from 'sharp';
-import { ShippingOrder, PackageType, AppSetting, MonthlyReportData, OrderStatus, CarrierType, ScanFormType, OrderItem, ReturnAddress, formatOrderId, User, HomeEvent } from './src/types.js';
+import { ShippingOrder, PackageType, AppSetting, MonthlyReportData, OrderStatus, CarrierType, ScanFormType, OrderItem, ReturnAddress, formatOrderId, User, HomeEvent, BobbinPackagingRule, BoxDeterminationResult } from './src/types.js';
 
 const app = express();
 const PORT = 3000;
@@ -658,6 +658,31 @@ async function ensureMssqlTables(pool: sql.ConnectionPool): Promise<void> {
                 [LastLoginAt] [datetime2](7) NULL
             );
         END;
+
+        -- 5. BobbinPackagingRules table
+        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'BobbinPackagingRules')
+        BEGIN
+            CREATE TABLE [dbo].[BobbinPackagingRules] (
+                [Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY CLUSTERED,
+                [Pattern] [nvarchar](255) NOT NULL,
+                [Classification] [nvarchar](50) NOT NULL,
+                [MaxCubeQty] [int] NOT NULL DEFAULT 0,
+                [MaxRateBoxQty] [int] NOT NULL DEFAULT 0,
+                [Notes] [nvarchar](max) NULL,
+                [CreatedAt] [datetime2](7) NOT NULL DEFAULT sysutcdatetime(),
+                [UpdatedAt] [datetime2](7) NOT NULL DEFAULT sysutcdatetime()
+            );
+
+            INSERT INTO [dbo].[BobbinPackagingRules] ([Pattern], [Classification], [MaxCubeQty], [MaxRateBoxQty], [Notes])
+            VALUES 
+                ('Spinolution 16oz', 'Oversized', 0, 0, 'Will not fit in small box or rate box; only goes in Large Box.'),
+                ('Ashford Country Spinner', 'Oversized', 0, 0, 'Extra large bobbin; only goes in Large Box.'),
+                ('Spinolution 8oz', 'Bulky', 1, 4, 'Fits Cube if qty = 1. Fits Rate Box for 2-4. More goes in Large Box.'),
+                ('Louet S10', 'Bulky', 1, 4, 'Fits Cube if qty = 1. Fits Rate Box for 2-4. More goes in Large Box.'),
+                ('Spinolution 12oz', 'Standard', 4, 10, 'Fits Cube up to 4. Fits Rate Box for 5-10. 11+ goes in Large Box.'),
+                ('Spinolution 4oz', 'Standard', 4, 10, 'Fits Cube up to 4. Fits Rate Box for 5-10. 11+ goes in Large Box.'),
+                ('*Bobbin*', 'Standard', 4, 10, 'Default rule for general bobbins: 1-4 Cube, 5-10 Rate Box, 11+ Large Box.');
+        END;
       `;
 
       await pool.request().query(schemaBatch);
@@ -966,6 +991,310 @@ async function fetchPackagesFromMssql(): Promise<PackageType[] | null> {
     console.error('[MSSQL] Error fetching packages from MS SQL [dbo].[Package]:', err);
     return null;
   }
+}
+
+// Initial default packaging rules for BlueCat Bobbins
+const initialPackagingRules: BobbinPackagingRule[] = [
+  {
+    id: 1,
+    pattern: 'Spinolution 16oz',
+    classification: 'Oversized',
+    maxCubeQty: 0,
+    maxRateBoxQty: 0,
+    notes: 'Will not fit in small box or rate box; only goes in Large Box.',
+  },
+  {
+    id: 2,
+    pattern: 'Ashford Country Spinner',
+    classification: 'Oversized',
+    maxCubeQty: 0,
+    maxRateBoxQty: 0,
+    notes: 'Extra large bobbin; only goes in Large Box.',
+  },
+  {
+    id: 3,
+    pattern: 'Spinolution 8oz',
+    classification: 'Bulky',
+    maxCubeQty: 1,
+    maxRateBoxQty: 4,
+    notes: 'Fits Cube if qty = 1. Fits Rate Box for 2-4. More goes in Large Box.',
+  },
+  {
+    id: 4,
+    pattern: 'Louet S10',
+    classification: 'Bulky',
+    maxCubeQty: 1,
+    maxRateBoxQty: 4,
+    notes: 'Fits Cube if qty = 1. Fits Rate Box for 2-4. More goes in Large Box.',
+  },
+  {
+    id: 5,
+    pattern: 'Spinolution 12oz',
+    classification: 'Standard',
+    maxCubeQty: 4,
+    maxRateBoxQty: 10,
+    notes: 'Fits Cube up to 4. Fits Rate Box for 5-10. 11+ goes in Large Box.',
+  },
+  {
+    id: 6,
+    pattern: 'Spinolution 4oz',
+    classification: 'Standard',
+    maxCubeQty: 4,
+    maxRateBoxQty: 10,
+    notes: 'Fits Cube up to 4. Fits Rate Box for 5-10. 11+ goes in Large Box.',
+  },
+  {
+    id: 7,
+    pattern: '*Bobbin*',
+    classification: 'Standard',
+    maxCubeQty: 4,
+    maxRateBoxQty: 10,
+    notes: 'Default rule for general bobbins: 1-4 Cube, 5-10 Rate Box, 11+ Large Box.',
+  },
+];
+
+// Fetch BobbinPackagingRules from MS SQL Server [dbo].[BobbinPackagingRules]
+async function fetchPackagingRulesFromMssql(): Promise<BobbinPackagingRule[] | null> {
+  const pool = await getMssqlPool();
+  if (!pool) return null;
+
+  try {
+    await ensureMssqlTables(pool);
+    const result = await pool.request().query(`
+      SELECT [Id], [Pattern], [Classification], [MaxCubeQty], [MaxRateBoxQty], [Notes], [CreatedAt], [UpdatedAt]
+      FROM [dbo].[BobbinPackagingRules]
+      ORDER BY [Id] ASC
+    `);
+
+    const rules: BobbinPackagingRule[] = result.recordset.map((row: any) => ({
+      id: row.Id,
+      pattern: String(row.Pattern || ''),
+      classification: String(row.Classification || 'Standard'),
+      maxCubeQty: Number(row.MaxCubeQty) || 0,
+      maxRateBoxQty: Number(row.MaxRateBoxQty) || 0,
+      notes: row.Notes ? String(row.Notes) : '',
+      createdAt: row.CreatedAt ? new Date(row.CreatedAt).toISOString() : undefined,
+      updatedAt: row.UpdatedAt ? new Date(row.UpdatedAt).toISOString() : undefined,
+    }));
+
+    if (rules.length > 0) {
+      db.packagingRules = rules;
+    }
+    return rules;
+  } catch (err: any) {
+    console.error('[MSSQL] Error fetching BobbinPackagingRules from MS SQL:', err);
+    return null;
+  }
+}
+
+// Save or Update a single packaging rule in MS SQL Server [dbo].[BobbinPackagingRules]
+async function savePackagingRuleToMssqlPool(pool: sql.ConnectionPool, rule: Partial<BobbinPackagingRule>): Promise<BobbinPackagingRule | null> {
+  try {
+    const req = pool.request();
+    const numericId = rule.id ? parseInt(String(rule.id), 10) : -1;
+    const validNumId = !isNaN(numericId) && numericId > 0;
+
+    req.input('id', sql.Int, validNumId ? numericId : -1);
+    req.input('pattern', sql.NVarChar(255), rule.pattern || '');
+    req.input('classification', sql.NVarChar(50), rule.classification || 'Standard');
+    req.input('maxCubeQty', sql.Int, Number(rule.maxCubeQty) || 0);
+    req.input('maxRateBoxQty', sql.Int, Number(rule.maxRateBoxQty) || 0);
+    req.input('notes', sql.NVarChar(sql.MAX), rule.notes || '');
+
+    if (validNumId) {
+      await req.query(`
+        UPDATE [dbo].[BobbinPackagingRules] SET
+          [Pattern] = @pattern,
+          [Classification] = @classification,
+          [MaxCubeQty] = @maxCubeQty,
+          [MaxRateBoxQty] = @maxRateBoxQty,
+          [Notes] = @notes,
+          [UpdatedAt] = sysutcdatetime()
+        WHERE [Id] = @id;
+      `);
+      return {
+        id: numericId,
+        pattern: rule.pattern || '',
+        classification: rule.classification || 'Standard',
+        maxCubeQty: Number(rule.maxCubeQty) || 0,
+        maxRateBoxQty: Number(rule.maxRateBoxQty) || 0,
+        notes: rule.notes || '',
+      };
+    } else {
+      const insertRes = await req.query(`
+        INSERT INTO [dbo].[BobbinPackagingRules] (
+          [Pattern], [Classification], [MaxCubeQty], [MaxRateBoxQty], [Notes]
+        ) OUTPUT INSERTED.Id, INSERTED.CreatedAt, INSERTED.UpdatedAt
+        VALUES (
+          @pattern, @classification, @maxCubeQty, @maxRateBoxQty, @notes
+        );
+      `);
+      const inserted = insertRes.recordset[0];
+      return {
+        id: inserted?.Id || Date.now(),
+        pattern: rule.pattern || '',
+        classification: rule.classification || 'Standard',
+        maxCubeQty: Number(rule.maxCubeQty) || 0,
+        maxRateBoxQty: Number(rule.maxRateBoxQty) || 0,
+        notes: rule.notes || '',
+        createdAt: inserted?.CreatedAt ? new Date(inserted.CreatedAt).toISOString() : undefined,
+        updatedAt: inserted?.UpdatedAt ? new Date(inserted.UpdatedAt).toISOString() : undefined,
+      };
+    }
+  } catch (err: any) {
+    console.error('[MSSQL] Error in savePackagingRuleToMssqlPool:', err);
+    throw err;
+  }
+}
+
+// Determine recommended box using BobbinPackagingRules
+function determineBoxForOrder(
+  items: OrderItem[] | undefined | null,
+  rules: BobbinPackagingRule[],
+  packages: PackageType[]
+): BoxDeterminationResult {
+  if (!items || items.length === 0) {
+    return {
+      boxId: null,
+      boxName: null,
+      error: 'Order has no items to determine box size.',
+    };
+  }
+
+  // Find standard box types from packages list
+  const cubePkg = packages.find((p) => p.name.toLowerCase().includes('cube')) ||
+    packages.find((p) => p.id === '1') || { id: '1', name: 'Cube' };
+  const rateBoxPkg = packages.find((p) => p.name.toLowerCase().includes('rate')) ||
+    packages.find((p) => p.id === '2') || { id: '2', name: 'Rate Box' };
+  const largeBoxPkg = packages.find((p) => p.name.toLowerCase().includes('large') && !p.name.toLowerCase().includes('intl')) ||
+    packages.find((p) => p.id === '3') || { id: '3', name: 'Large Box' };
+
+  // Sort rules: exact / longer patterns first, wildcard '*' rules last
+  const activeRules = rules && rules.length > 0 ? rules : initialPackagingRules;
+  const sortedRules = [...activeRules].sort((a, b) => {
+    const aWild = a.pattern.includes('*');
+    const bWild = b.pattern.includes('*');
+    if (aWild && !bWild) return 1;
+    if (!aWild && bWild) return -1;
+    return b.pattern.length - a.pattern.length;
+  });
+
+  function matchItemRule(item: OrderItem): BobbinPackagingRule | null {
+    const text = `${item.name || ''} ${item.sku || ''}`.toLowerCase();
+    for (const rule of sortedRules) {
+      const pat = (rule.pattern || '').trim().toLowerCase();
+      if (!pat) continue;
+      if (pat === '*' || pat === 'default') return rule;
+      if (pat.startsWith('*') && pat.endsWith('*')) {
+        const sub = pat.slice(1, -1);
+        if (sub && text.includes(sub)) return rule;
+      } else if (text.includes(pat)) {
+        return rule;
+      }
+    }
+    return null;
+  }
+
+  // Check if any item cannot be classified
+  for (const item of items) {
+    const matchedRule = matchItemRule(item);
+    if (!matchedRule) {
+      return {
+        boxId: null,
+        boxName: null,
+        error: `Box Size Undetermined: "${item.name}" does not match any bobbin packaging rule in [dbo].[BobbinPackagingRules].`,
+      };
+    }
+  }
+
+  let oversizedQty = 0;
+  let bulkyQty = 0;
+  let standardQty = 0;
+
+  for (const item of items) {
+    const qty = Math.max(1, Number(item.quantity) || 1);
+    const rule = matchItemRule(item)!;
+    const cls = (rule.classification || '').toLowerCase();
+    if (cls === 'oversized' || (rule.maxCubeQty === 0 && rule.maxRateBoxQty === 0)) {
+      oversizedQty += qty;
+    } else if (cls === 'bulky' || (rule.maxCubeQty === 1 && rule.maxRateBoxQty <= 4)) {
+      bulkyQty += qty;
+    } else {
+      standardQty += qty;
+    }
+  }
+
+  // Rule 1: Any oversized bobbins (Spinolution 16oz, Ashford Country Spinner)
+  if (oversizedQty > 0) {
+    return {
+      boxId: String(largeBoxPkg.id),
+      boxName: largeBoxPkg.name,
+      reason: `Contains oversized bobbin (${oversizedQty}x). Oversized bobbins only fit in Large Box.`,
+    };
+  }
+
+  // Rule 2: Only standard bobbins (4oz, 12oz, standard)
+  if (bulkyQty === 0) {
+    if (standardQty <= 4) {
+      return {
+        boxId: String(cubePkg.id),
+        boxName: cubePkg.name,
+        reason: `${standardQty} standard bobbins (1-4 fit in Cube).`,
+      };
+    }
+    if (standardQty <= 10) {
+      return {
+        boxId: String(rateBoxPkg.id),
+        boxName: rateBoxPkg.name,
+        reason: `${standardQty} standard bobbins (5-10 upgrade to Rate Box).`,
+      };
+    }
+    return {
+      boxId: String(largeBoxPkg.id),
+      boxName: largeBoxPkg.name,
+      reason: `${standardQty} standard bobbins (>10 requires Large Box).`,
+    };
+  }
+
+  // Rule 3: Only bulky bobbins (Spinolution 8oz, Louet S10)
+  if (standardQty === 0) {
+    if (bulkyQty === 1) {
+      return {
+        boxId: String(cubePkg.id),
+        boxName: cubePkg.name,
+        reason: `1 bulky bobbin fits in Cube.`,
+      };
+    }
+    if (bulkyQty <= 4) {
+      return {
+        boxId: String(rateBoxPkg.id),
+        boxName: rateBoxPkg.name,
+        reason: `${bulkyQty} bulky bobbins (2-4 fit in Rate Box).`,
+      };
+    }
+    return {
+      boxId: String(largeBoxPkg.id),
+      boxName: largeBoxPkg.name,
+      reason: `${bulkyQty} bulky bobbins (>4 requires Large Box).`,
+    };
+  }
+
+  // Rule 4: Mixed bulky + standard bobbins
+  // "The Spinolution 8oz, and Louet S10 will fit a cube if there is only 1. Between 2-4 will fit in a RateBox. More will have to go in a Large Box."
+  // When mixed, cannot fit in Cube.
+  const equivalentUnits = (bulkyQty * 2.5) + standardQty;
+  if (equivalentUnits <= 10 && bulkyQty <= 4) {
+    return {
+      boxId: String(rateBoxPkg.id),
+      boxName: rateBoxPkg.name,
+      reason: `Mixed order (${bulkyQty} bulky + ${standardQty} standard) fits in Rate Box.`,
+    };
+  }
+  return {
+    boxId: String(largeBoxPkg.id),
+    boxName: largeBoxPkg.name,
+    reason: `Mixed order (${bulkyQty} bulky + ${standardQty} standard) exceeds Rate Box capacity, requires Large Box.`,
+  };
 }
 
 // Save or Update a single order in MS SQL Server ([dbo].[Shipping] or [dbo].[shippingdev])
@@ -1349,6 +1678,45 @@ function mapDbRowToShippingOrder(row: any, tableName: string): ShippingOrder {
     (row.LabelData && (Buffer.isBuffer(row.LabelData) ? row.LabelData.length > 0 : true))
   );
 
+  // Resolve Box Packaging from database row or BobbinPackagingRules
+  const rawBox = row.box ? String(row.box).trim() : '';
+  let resolvedBoxId = '';
+  let resolvedBoxName = '';
+
+  if (rawBox && rawBox !== 'pkg_medium' && rawBox !== 'undetermined' && rawBox !== 'Undetermined') {
+    const matchedPkg = (db.packages || []).find((p) => p.id === rawBox || p.name.toLowerCase() === rawBox.toLowerCase());
+    if (matchedPkg) {
+      resolvedBoxId = matchedPkg.id;
+      resolvedBoxName = matchedPkg.name;
+    } else {
+      resolvedBoxId = rawBox;
+      resolvedBoxName = rawBox;
+    }
+  }
+
+  // If no box is assigned or box was default pkg_medium, determine using BobbinPackagingRules
+  if (!resolvedBoxId || resolvedBoxId === 'pkg_medium') {
+    const determined = determineBoxForOrder(items, db.packagingRules || initialPackagingRules, db.packages || initialPackages);
+    if (determined.boxId && !determined.error) {
+      resolvedBoxId = determined.boxId;
+      resolvedBoxName = determined.boxName || '';
+    } else {
+      resolvedBoxId = '';
+      resolvedBoxName = 'Undetermined';
+      if (statusVal !== 'shipped' && statusVal !== 'cancelled') {
+        if (determined.error) {
+          validationErrors.push(determined.error);
+        } else {
+          validationErrors.push('Box Size Undetermined: No matching packaging rule. Please choose a box manually.');
+        }
+      }
+    }
+  }
+
+  if (validationErrors.length > 0 && statusVal !== 'shipped' && statusVal !== 'cancelled') {
+    statusVal = 'address_error';
+  }
+
   return {
     id: String(row.Id),
     orderNumber: row.receiptID ? String(row.receiptID) : `ORD-${row.Id}`,
@@ -1367,8 +1735,8 @@ function mapDbRowToShippingOrder(row: any, tableName: string): ShippingOrder {
     status: statusVal,
     dbStatus: rawStatus || (hasTracking || statusVal === 'shipped' ? 'shipped' : 'New'),
     shippingStatus: rawStatus || (hasTracking || statusVal === 'shipped' ? 'shipped' : 'New'),
-    boxId: row.box ? String(row.box) : 'pkg_medium',
-    boxName: row.box ? String(row.box) : 'Medium Flat Rate Box',
+    boxId: resolvedBoxId,
+    boxName: resolvedBoxName || (resolvedBoxId ? `Box ${resolvedBoxId}` : 'Undetermined'),
     weightOz: rawWeight,
     declaredValue: 0,
     addressValidated: Boolean(
@@ -1535,6 +1903,7 @@ async function fetchShippedOrdersFromMssql(options: {
 // In-Memory Database Store with persistence simulator
 interface DatabaseSchema {
   packages: PackageType[];
+  packagingRules: BobbinPackagingRule[];
   orders: ShippingOrder[];
   devOrders: ShippingOrder[];
   prodOrders: ShippingOrder[];
@@ -2153,6 +2522,7 @@ const initialProdOrders: ShippingOrder[] = [
 
 const db: DatabaseSchema = {
   packages: [...initialPackages],
+  packagingRules: [...initialPackagingRules],
   settings: mergedSettings,
   scanForms: [],
   users: [
@@ -2758,10 +3128,13 @@ app.put('/api/orders/:id', async (req, res) => {
   const updates = req.body;
 
   // If boxId changed, update boxName
-  if (updates.boxId && updates.boxId !== current.boxId) {
-    const p = db.packages.find((pkg) => pkg.id === updates.boxId);
-    if (p) {
-      updates.boxName = p.name;
+  if (updates.boxId !== undefined) {
+    if (updates.boxId) {
+      const p = db.packages.find((pkg) => pkg.id === updates.boxId || pkg.name.toLowerCase() === updates.boxId.toLowerCase());
+      if (p) {
+        updates.boxName = p.name;
+        updates.boxId = p.id;
+      }
     }
   }
 
@@ -2773,6 +3146,7 @@ app.put('/api/orders/:id', async (req, res) => {
   const effectiveZip = updates.zip ?? current.zip ?? '';
   const effectiveCountry = updates.country ?? current.country ?? 'US';
   const effectiveWeight = updates.weightOz !== undefined ? Number(updates.weightOz) : Number(current.weightOz);
+  const effectiveBoxId = updates.boxId !== undefined ? updates.boxId : current.boxId;
 
   // Validate address syntax
   const val = validateAddressWithEasyPost({
@@ -2790,6 +3164,9 @@ app.put('/api/orders/:id', async (req, res) => {
   }
   if (effectiveWeight <= 0) {
     allErrors.push('Total Weight is set to 0 oz - Needs weight correction');
+  }
+  if (!effectiveBoxId || effectiveBoxId === 'undetermined' || effectiveBoxId === 'Undetermined') {
+    allErrors.push('Box Size Undetermined: Please select a package box.');
   }
 
   updates.addressValidated = val.isValid;
@@ -5063,6 +5440,186 @@ app.delete('/api/packages/:id', async (req, res) => {
   }
 
   res.json({ success: true });
+});
+
+// ==========================================
+// Bobbin Packaging Rules API (CRUD & Engine)
+// ==========================================
+
+// 1. Get all Bobbin Packaging Rules
+app.get('/api/packaging-rules', async (req, res) => {
+  const pool = await getMssqlPool();
+  if (pool) {
+    const liveRules = await fetchPackagingRulesFromMssql();
+    if (liveRules && liveRules.length > 0) {
+      db.packagingRules = liveRules;
+    }
+  }
+  res.json(db.packagingRules || initialPackagingRules);
+});
+
+// 2. Create a new packaging rule
+app.post('/api/packaging-rules', async (req, res) => {
+  const { pattern, classification, maxCubeQty, maxRateBoxQty, notes } = req.body;
+  if (!pattern || !String(pattern).trim()) {
+    return res.status(400).json({ error: 'Product match pattern / keyword is required.' });
+  }
+
+  const pool = await getMssqlPool();
+  let createdRule: BobbinPackagingRule;
+
+  if (pool) {
+    try {
+      const saved = await savePackagingRuleToMssqlPool(pool, {
+        pattern: String(pattern).trim(),
+        classification: classification || 'Standard',
+        maxCubeQty: Number(maxCubeQty) || 0,
+        maxRateBoxQty: Number(maxRateBoxQty) || 0,
+        notes: notes ? String(notes).trim() : '',
+      });
+      createdRule = saved || {
+        id: Date.now(),
+        pattern: String(pattern).trim(),
+        classification: classification || 'Standard',
+        maxCubeQty: Number(maxCubeQty) || 0,
+        maxRateBoxQty: Number(maxRateBoxQty) || 0,
+        notes: notes ? String(notes).trim() : '',
+      };
+      const refreshed = await fetchPackagingRulesFromMssql();
+      if (refreshed) db.packagingRules = refreshed;
+    } catch (err: any) {
+      return res.status(500).json({ error: 'Database error saving packaging rule: ' + err.message });
+    }
+  } else {
+    createdRule = {
+      id: Date.now(),
+      pattern: String(pattern).trim(),
+      classification: classification || 'Standard',
+      maxCubeQty: Number(maxCubeQty) || 0,
+      maxRateBoxQty: Number(maxRateBoxQty) || 0,
+      notes: notes ? String(notes).trim() : '',
+    };
+    db.packagingRules.push(createdRule);
+  }
+
+  res.status(201).json(createdRule);
+});
+
+// 3. Update an existing packaging rule
+app.put('/api/packaging-rules/:id', async (req, res) => {
+  const { id } = req.params;
+  const numId = parseInt(id, 10);
+  const { pattern, classification, maxCubeQty, maxRateBoxQty, notes } = req.body;
+
+  const pool = await getMssqlPool();
+  if (pool) {
+    try {
+      const updated = await savePackagingRuleToMssqlPool(pool, {
+        id: numId,
+        pattern: pattern ? String(pattern).trim() : '',
+        classification: classification || 'Standard',
+        maxCubeQty: Number(maxCubeQty) || 0,
+        maxRateBoxQty: Number(maxRateBoxQty) || 0,
+        notes: notes ? String(notes).trim() : '',
+      });
+      const refreshed = await fetchPackagingRulesFromMssql();
+      if (refreshed) db.packagingRules = refreshed;
+      return res.json(updated);
+    } catch (err: any) {
+      return res.status(500).json({ error: 'Database error updating packaging rule: ' + err.message });
+    }
+  } else {
+    const idx = db.packagingRules.findIndex((r) => r.id === numId);
+    if (idx === -1) return res.status(404).json({ error: 'Rule not found' });
+    db.packagingRules[idx] = { ...db.packagingRules[idx], ...req.body, id: numId };
+    return res.json(db.packagingRules[idx]);
+  }
+});
+
+// 4. Delete a packaging rule
+app.delete('/api/packaging-rules/:id', async (req, res) => {
+  const { id } = req.params;
+  const numId = parseInt(id, 10);
+
+  const pool = await getMssqlPool();
+  if (pool) {
+    try {
+      const reqMssql = pool.request();
+      reqMssql.input('id', sql.Int, numId);
+      await reqMssql.query('DELETE FROM [dbo].[BobbinPackagingRules] WHERE [Id] = @id');
+      const refreshed = await fetchPackagingRulesFromMssql();
+      if (refreshed) db.packagingRules = refreshed;
+    } catch (err: any) {
+      console.error('[MSSQL] Error deleting packaging rule:', err);
+      return res.status(500).json({ error: 'Database error deleting rule: ' + err.message });
+    }
+  } else {
+    db.packagingRules = db.packagingRules.filter((r) => r.id !== numId);
+  }
+
+  res.json({ success: true });
+});
+
+// 5. Test / Simulate Box Determination on given items
+app.post('/api/packaging-rules/test', async (req, res) => {
+  const { items } = req.body;
+  const pool = await getMssqlPool();
+  if (pool && (!db.packagingRules || db.packagingRules.length === 0)) {
+    const live = await fetchPackagingRulesFromMssql();
+    if (live) db.packagingRules = live;
+  }
+  const result = determineBoxForOrder(items, db.packagingRules || initialPackagingRules, db.packages || initialPackages);
+  res.json(result);
+});
+
+// 6. Re-evaluate and re-apply packaging rules to all open dashboard orders
+app.post('/api/orders/reapply-packaging-rules', async (req, res) => {
+  const pool = await getMssqlPool();
+  if (pool && (!db.packagingRules || db.packagingRules.length === 0)) {
+    const live = await fetchPackagingRulesFromMssql();
+    if (live) db.packagingRules = live;
+  }
+
+  const activeRules = db.packagingRules && db.packagingRules.length > 0 ? db.packagingRules : initialPackagingRules;
+  const packagesList = db.packages && db.packages.length > 0 ? db.packages : initialPackages;
+  let updatedCount = 0;
+
+  for (const order of db.orders) {
+    if (order.status === 'shipped' || order.status === 'cancelled') continue;
+    const determined = determineBoxForOrder(order.items, activeRules, packagesList);
+
+    // Clean existing box errors
+    let errors = (order.validationErrors || []).filter((e) => !e.toLowerCase().includes('box'));
+
+    if (determined.boxId && !determined.error) {
+      order.boxId = determined.boxId;
+      order.boxName = determined.boxName || '';
+      updatedCount++;
+    } else {
+      order.boxId = '';
+      order.boxName = 'Undetermined';
+      errors.push(determined.error || 'Box Size Undetermined: No matching packaging rule. Please choose a box manually.');
+      updatedCount++;
+    }
+
+    order.validationErrors = errors.length > 0 ? errors : undefined;
+    if (errors.length > 0) {
+      order.status = 'address_error';
+    } else if (order.status === 'address_error') {
+      order.status = 'ready_to_ship';
+    }
+
+    // Persist to MS SQL Server
+    if (pool) {
+      await saveOrderToMssqlPool(pool, order);
+    }
+  }
+
+  res.json({
+    success: true,
+    updatedCount,
+    orders: db.orders,
+  });
 });
 
 // Settings API (including Packing Slip Content custom editor)
