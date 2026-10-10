@@ -9,12 +9,7 @@ import {
   AlertTriangle,
   RefreshCw,
   Zap,
-  Info,
   Package,
-  Layers,
-  Sparkles,
-  ArrowRight,
-  ShieldAlert,
   Save,
   X,
   Play,
@@ -273,151 +268,226 @@ export const PackagingRulesConfig: React.FC<PackagingRulesConfigProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Top Header Card */}
-      <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 rounded-2xl p-6 sm:p-8 text-white shadow-xl border border-indigo-900/50 relative overflow-hidden">
-        <div className="absolute right-0 top-0 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
-        <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
+      {/* Combined Header and Rules Table Panel */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+        {/* Header Section */}
+        <div className="p-6 border-b border-slate-200">
           <div>
-            <div className="flex items-center space-x-3 mb-2">
-              <span className="p-2.5 bg-indigo-600/40 border border-indigo-400/30 rounded-xl text-indigo-300">
-                <Boxes className="w-6 h-6" />
-              </span>
-              <h1 className="text-2xl sm:text-3xl font-black tracking-tight">
-                Bobbin Packaging Rules
-              </h1>
-              <span className="px-3 py-1 bg-emerald-500/20 border border-emerald-400/30 text-emerald-300 text-xs font-bold rounded-full">
-                MS SQL: [dbo].[BobbinPackagingRules]
-              </span>
-            </div>
-            <p className="text-sm text-slate-300 max-w-2xl leading-relaxed">
-              Define product-level box sizing rules for your bobbin catalog. The packaging engine automatically selects between{' '}
-              <strong className="text-white">Cube</strong>, <strong className="text-white">Rate Box</strong>, and{' '}
-              <strong className="text-white">Large Box</strong>, or alerts you if an order contains unclassified items.
+            <h3 className="text-base font-bold text-slate-900 flex items-center space-x-2">
+              <Boxes className="w-5 h-5 text-indigo-600" />
+              <span>Bobbin Packaging Rules</span>
+            </h3>
+            <p className="text-xs text-slate-500 mt-1">
+              Automated box determination engine for wire bobbins, spools, and custom packaging. Evaluated dynamically when orders load and saved directly to the <code className="text-indigo-700 font-mono font-bold">packaging_rules</code> table.
             </p>
           </div>
+        </div>
 
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              onClick={handleReapplyRulesToOrders}
-              disabled={reapplying}
-              className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-bold text-xs shadow-md hover:shadow-indigo-500/25 flex items-center space-x-2 transition-all cursor-pointer disabled:opacity-50"
-              title="Re-run rules engine across all active orders in the database"
-            >
-              <RefreshCw className={`w-4 h-4 ${reapplying ? 'animate-spin' : ''}`} />
-              <span>{reapplying ? 'Re-evaluating...' : 'Re-apply to Open Orders'}</span>
-            </button>
+        {/* Table Filter & Actions Bar */}
+        <div className="p-4 sm:p-6 border-b border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="flex flex-wrap items-center gap-3 flex-1">
+            {/* Search Input */}
+            <div className="relative flex-1 min-w-[240px] max-w-md">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                placeholder="Search rules by bobbin name, classification, or notes..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 placeholder-slate-400 outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all"
+              />
+            </div>
 
+            {/* Add Bobbin Rule Button (Placed directly next to Search Rules) */}
             <button
+              type="button"
               onClick={openAddModal}
-              className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-xs shadow-md hover:shadow-emerald-500/25 flex items-center space-x-2 transition-all cursor-pointer"
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-xs shadow-sm hover:shadow flex items-center space-x-1.5 transition-all cursor-pointer whitespace-nowrap shrink-0"
+              title="Add a new bobbin packaging rule to MS SQL database"
             >
               <Plus className="w-4 h-4" />
               <span>Add Bobbin Rule</span>
             </button>
+
+            {/* Classification Filter Tabs */}
+            <div className="flex items-center space-x-1 bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
+              {(['all', 'Oversized', 'Bulky', 'Standard'] as const).map((tab) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setFilterClass(tab)}
+                  className={`px-3 py-1.5 rounded-lg font-bold transition-all cursor-pointer ${
+                    filterClass.toLowerCase() === tab.toLowerCase()
+                      ? 'bg-white text-indigo-700 shadow-sm'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  {tab === 'all' ? 'All Rules' : tab}
+                </button>
+              ))}
+            </div>
           </div>
+
+          <div className="flex items-center space-x-3 shrink-0">
+            <button
+              type="button"
+              onClick={handleReapplyRulesToOrders}
+              disabled={reapplying}
+              className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-bold text-xs shadow-sm flex items-center space-x-1.5 transition-all cursor-pointer disabled:opacity-50 whitespace-nowrap"
+              title="Re-run rules engine across all active orders in the database"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${reapplying ? 'animate-spin' : ''}`} />
+              <span>{reapplying ? 'Re-evaluating...' : 'Re-apply to Open Orders'}</span>
+            </button>
+
+            <span className="text-xs text-slate-500 font-medium">
+              Showing <strong>{filteredRules.length}</strong> of <strong>{rules.length}</strong> rules
+            </span>
+            <button
+              type="button"
+              onClick={fetchRules}
+              className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+              title="Refresh from MS SQL table"
+            >
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+        </div>
+
+        {/* Rules Table */}
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="bg-slate-50/80 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                <th className="py-3 px-4">Pattern / Product Keyword</th>
+                <th className="py-3 px-4">Classification</th>
+                <th className="py-3 px-4 text-center">Max in Cube</th>
+                <th className="py-3 px-4 text-center">Max in Rate Box</th>
+                <th className="py-3 px-4">Box Determination Summary</th>
+                <th className="py-3 px-4">Notes</th>
+                <th className="py-3 px-4 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 text-xs">
+              {loading ? (
+                <tr>
+                  <td colSpan={7} className="py-12 text-center text-slate-400">
+                    <RefreshCw className="w-6 h-6 mx-auto animate-spin mb-2 text-indigo-600" />
+                    <span>Loading packaging rules from MS SQL Server...</span>
+                  </td>
+                </tr>
+              ) : filteredRules.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="py-12 text-center text-slate-500">
+                    <Boxes className="w-8 h-8 mx-auto text-slate-400 opacity-50 mb-2" />
+                    <p className="font-semibold text-slate-700">No matching packaging rules found</p>
+                    <p className="text-xs text-slate-400 mt-1">
+                      {searchQuery ? 'Try clearing your search query.' : 'Click "Add Bobbin Rule" to create one.'}
+                    </p>
+                  </td>
+                </tr>
+              ) : (
+                filteredRules.map((rule) => {
+                  const isOversized = rule.classification.toLowerCase() === 'oversized' || (rule.maxCubeQty === 0 && rule.maxRateBoxQty === 0);
+                  const isBulky = rule.classification.toLowerCase() === 'bulky';
+
+                  return (
+                    <tr key={rule.id} className="hover:bg-slate-50/80 transition-colors group">
+                      <td className="py-3 px-4 font-mono font-bold text-slate-900">
+                        <div className="flex items-center space-x-2">
+                          <span className="text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100">
+                            {rule.pattern}
+                          </span>
+                          {rule.pattern.includes('*') && (
+                            <span className="text-[10px] text-slate-400 font-sans font-medium">
+                              (Wildcard)
+                            </span>
+                          )}
+                        </div>
+                      </td>
+
+                      <td className="py-3 px-4">
+                        {isOversized ? (
+                          <span className="px-2.5 py-1 bg-purple-100 text-purple-800 font-black text-[10px] rounded-full uppercase tracking-wider border border-purple-200">
+                            Oversized (Large Only)
+                          </span>
+                        ) : isBulky ? (
+                          <span className="px-2.5 py-1 bg-amber-100 text-amber-800 font-black text-[10px] rounded-full uppercase tracking-wider border border-amber-200">
+                            Bulky (1 Cube, 2-4 Rate)
+                          </span>
+                        ) : (
+                          <span className="px-2.5 py-1 bg-sky-100 text-sky-800 font-black text-[10px] rounded-full uppercase tracking-wider border border-sky-200">
+                            Standard
+                          </span>
+                        )}
+                      </td>
+
+                      <td className="py-3 px-4 text-center font-bold">
+                        {rule.maxCubeQty > 0 ? (
+                          <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                            ≤ {rule.maxCubeQty}
+                          </span>
+                        ) : (
+                          <span className="text-rose-500 bg-rose-50 px-2 py-0.5 rounded border border-rose-100">
+                            0 (No)
+                          </span>
+                        )}
+                      </td>
+
+                      <td className="py-3 px-4 text-center font-bold">
+                        {rule.maxRateBoxQty > 0 ? (
+                          <span className="text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200">
+                            ≤ {rule.maxRateBoxQty}
+                          </span>
+                        ) : (
+                          <span className="text-rose-500 bg-rose-50 px-2 py-0.5 rounded border border-rose-100">
+                            0 (No)
+                          </span>
+                        )}
+                      </td>
+
+                      <td className="py-3 px-4 text-slate-700">
+                        {isOversized ? (
+                          <span className="font-semibold text-purple-900">Always requires Large Box</span>
+                        ) : isBulky ? (
+                          <span>1 → Cube &bull; 2–4 → Rate Box &bull; 5+ → Large Box</span>
+                        ) : (
+                          <span>1–4 → Cube &bull; 5–10 → Rate Box &bull; 11+ → Large Box</span>
+                        )}
+                      </td>
+
+                      <td className="py-3 px-4 text-slate-500 text-[11px] max-w-xs truncate" title={rule.notes || ''}>
+                        {rule.notes || '—'}
+                      </td>
+
+                      <td className="py-3 px-4 text-right">
+                        <div className="flex items-center justify-end space-x-1.5">
+                          <button
+                            onClick={() => openEditModal(rule)}
+                            className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors cursor-pointer"
+                            title="Edit rule in database"
+                          >
+                            <Edit2 className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => setDeleteConfirmRule(rule)}
+                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                            title="Delete rule from database"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
 
-      {/* Sizing Matrix Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        {/* Cube Box Card */}
-        <div className="bg-white rounded-xl p-5 border border-slate-200 shadow-sm relative overflow-hidden group hover:border-indigo-300 transition-all">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center space-x-2.5">
-              <div className="w-9 h-9 rounded-lg bg-sky-50 border border-sky-200 flex items-center justify-center text-sky-700 font-black text-sm">
-                1
-              </div>
-              <div>
-                <h3 className="text-sm font-bold text-slate-900">Cube Box</h3>
-                <div className="text-[11px] text-slate-500 font-mono">7.25" × 7.25" × 6.5"</div>
-              </div>
-            </div>
-            <span className="px-2 py-0.5 bg-sky-100 text-sky-800 text-[10px] font-bold rounded-md uppercase tracking-wider">
-              Small / Cube
-            </span>
-          </div>
-          <div className="space-y-1.5 text-xs text-slate-600">
-            <div className="flex items-center space-x-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-sky-500" />
-              <span><strong>1 to 4</strong> Standard Bobbins (4oz, 12oz)</span>
-            </div>
-            <div className="flex items-center space-x-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-              <span><strong>Exactly 1</strong> Bulky Bobbin (8oz, Louet S10)</span>
-            </div>
-            <div className="flex items-center space-x-2 text-rose-600 text-[11px]">
-              <X className="w-3 h-3 text-rose-500" />
-              <span>Never fits Oversized bobbins (16oz / Ashford)</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Rate Box Card */}
-        <div className="bg-white rounded-xl p-5 border border-slate-200 shadow-sm relative overflow-hidden group hover:border-indigo-300 transition-all">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center space-x-2.5">
-              <div className="w-9 h-9 rounded-lg bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-700 font-black text-sm">
-                2
-              </div>
-              <div>
-                <h3 className="text-sm font-bold text-slate-900">Rate Box</h3>
-                <div className="text-[11px] text-slate-500 font-mono">11.25" × 8.75" × 6.0"</div>
-              </div>
-            </div>
-            <span className="px-2 py-0.5 bg-indigo-100 text-indigo-800 text-[10px] font-bold rounded-md uppercase tracking-wider">
-              Medium / Flat Rate
-            </span>
-          </div>
-          <div className="space-y-1.5 text-xs text-slate-600">
-            <div className="flex items-center space-x-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
-              <span><strong>5 to 10</strong> Standard Bobbins (4oz, 12oz)</span>
-            </div>
-            <div className="flex items-center space-x-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-              <span><strong>2 to 4</strong> Bulky Bobbins (8oz, Louet S10)</span>
-            </div>
-            <div className="flex items-center space-x-2 text-indigo-700 font-medium">
-              <CheckCircle2 className="w-3 h-3 text-indigo-500" />
-              <span>Mixed bulky + standard within capacity limit</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Large Box Card */}
-        <div className="bg-white rounded-xl p-5 border border-slate-200 shadow-sm relative overflow-hidden group hover:border-indigo-300 transition-all">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center space-x-2.5">
-              <div className="w-9 h-9 rounded-lg bg-purple-50 border border-purple-200 flex items-center justify-center text-purple-700 font-black text-sm">
-                3
-              </div>
-              <div>
-                <h3 className="text-sm font-bold text-slate-900">Large Box</h3>
-                <div className="text-[11px] text-slate-500 font-mono">12.25" × 12.0" × 8.5"</div>
-              </div>
-            </div>
-            <span className="px-2 py-0.5 bg-purple-100 text-purple-800 text-[10px] font-bold rounded-md uppercase tracking-wider">
-              Large Package
-            </span>
-          </div>
-          <div className="space-y-1.5 text-xs text-slate-600">
-            <div className="flex items-center space-x-2 text-purple-900 font-semibold">
-              <span className="w-1.5 h-1.5 rounded-full bg-purple-600" />
-              <span><strong>ANY</strong> Spinolution 16oz or Ashford Country Spinner</span>
-            </div>
-            <div className="flex items-center space-x-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
-              <span><strong>11+</strong> Standard Bobbins</span>
-            </div>
-            <div className="flex items-center space-x-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-              <span><strong>5+</strong> Bulky Bobbins (8oz / Louet S10)</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Interactive Rules Simulator Bench */}
+      {/* Interactive Rules Simulator Bench (Moved to bottom of page) */}
       <div className="bg-slate-900 rounded-2xl p-6 text-white border border-slate-800 shadow-md">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4 pb-4 border-b border-slate-800">
           <div className="flex items-center space-x-3">
@@ -588,189 +658,6 @@ export const PackagingRulesConfig: React.FC<PackagingRulesConfigProps> = ({
               </div>
             )}
           </div>
-        </div>
-      </div>
-
-      {/* Rules Table & CRUD Section */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-        {/* Table Filter & Actions Bar */}
-        <div className="p-4 sm:p-6 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3 flex-1">
-            {/* Search Input */}
-            <div className="relative flex-1 max-w-md">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                placeholder="Search rules by bobbin name, classification, or notes..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 placeholder-slate-400 outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all"
-              />
-            </div>
-
-            {/* Classification Filter Tabs */}
-            <div className="flex items-center space-x-1 bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
-              {(['all', 'Oversized', 'Bulky', 'Standard'] as const).map((tab) => (
-                <button
-                  key={tab}
-                  type="button"
-                  onClick={() => setFilterClass(tab)}
-                  className={`px-3 py-1.5 rounded-lg font-bold transition-all cursor-pointer ${
-                    filterClass.toLowerCase() === tab.toLowerCase()
-                      ? 'bg-white text-indigo-700 shadow-sm'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  {tab === 'all' ? 'All Rules' : tab}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex items-center space-x-3">
-            <span className="text-xs text-slate-500 font-medium">
-              Showing <strong>{filteredRules.length}</strong> of <strong>{rules.length}</strong> rules
-            </span>
-            <button
-              onClick={fetchRules}
-              className="p-2 text-slate-500 hover:text-indigo-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
-              title="Refresh from MS SQL table"
-            >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-            </button>
-          </div>
-        </div>
-
-        {/* Rules Table */}
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="bg-slate-50/80 border-b border-slate-200 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                <th className="py-3 px-4">Pattern / Product Keyword</th>
-                <th className="py-3 px-4">Classification</th>
-                <th className="py-3 px-4 text-center">Max in Cube</th>
-                <th className="py-3 px-4 text-center">Max in Rate Box</th>
-                <th className="py-3 px-4">Box Determination Summary</th>
-                <th className="py-3 px-4">Notes</th>
-                <th className="py-3 px-4 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 text-xs">
-              {loading ? (
-                <tr>
-                  <td colSpan={7} className="py-12 text-center text-slate-400">
-                    <RefreshCw className="w-6 h-6 mx-auto animate-spin mb-2 text-indigo-600" />
-                    <span>Loading packaging rules from MS SQL Server...</span>
-                  </td>
-                </tr>
-              ) : filteredRules.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="py-12 text-center text-slate-500">
-                    <Boxes className="w-8 h-8 mx-auto text-slate-400 opacity-50 mb-2" />
-                    <p className="font-semibold text-slate-700">No matching packaging rules found</p>
-                    <p className="text-xs text-slate-400 mt-1">
-                      {searchQuery ? 'Try clearing your search query.' : 'Click "Add Bobbin Rule" to create one.'}
-                    </p>
-                  </td>
-                </tr>
-              ) : (
-                filteredRules.map((rule) => {
-                  const isOversized = rule.classification.toLowerCase() === 'oversized' || (rule.maxCubeQty === 0 && rule.maxRateBoxQty === 0);
-                  const isBulky = rule.classification.toLowerCase() === 'bulky';
-
-                  return (
-                    <tr key={rule.id} className="hover:bg-slate-50/80 transition-colors group">
-                      <td className="py-3 px-4 font-mono font-bold text-slate-900">
-                        <div className="flex items-center space-x-2">
-                          <span className="text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100">
-                            {rule.pattern}
-                          </span>
-                          {rule.pattern.includes('*') && (
-                            <span className="text-[10px] text-slate-400 font-sans font-medium">
-                              (Wildcard)
-                            </span>
-                          )}
-                        </div>
-                      </td>
-
-                      <td className="py-3 px-4">
-                        {isOversized ? (
-                          <span className="px-2.5 py-1 bg-purple-100 text-purple-800 font-black text-[10px] rounded-full uppercase tracking-wider border border-purple-200">
-                            Oversized (Large Only)
-                          </span>
-                        ) : isBulky ? (
-                          <span className="px-2.5 py-1 bg-amber-100 text-amber-800 font-black text-[10px] rounded-full uppercase tracking-wider border border-amber-200">
-                            Bulky (1 Cube, 2-4 Rate)
-                          </span>
-                        ) : (
-                          <span className="px-2.5 py-1 bg-sky-100 text-sky-800 font-black text-[10px] rounded-full uppercase tracking-wider border border-sky-200">
-                            Standard
-                          </span>
-                        )}
-                      </td>
-
-                      <td className="py-3 px-4 text-center font-bold">
-                        {rule.maxCubeQty > 0 ? (
-                          <span className="text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                            ≤ {rule.maxCubeQty}
-                          </span>
-                        ) : (
-                          <span className="text-rose-500 bg-rose-50 px-2 py-0.5 rounded border border-rose-100">
-                            0 (No)
-                          </span>
-                        )}
-                      </td>
-
-                      <td className="py-3 px-4 text-center font-bold">
-                        {rule.maxRateBoxQty > 0 ? (
-                          <span className="text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-200">
-                            ≤ {rule.maxRateBoxQty}
-                          </span>
-                        ) : (
-                          <span className="text-rose-500 bg-rose-50 px-2 py-0.5 rounded border border-rose-100">
-                            0 (No)
-                          </span>
-                        )}
-                      </td>
-
-                      <td className="py-3 px-4 text-slate-700">
-                        {isOversized ? (
-                          <span className="font-semibold text-purple-900">Always requires Large Box</span>
-                        ) : isBulky ? (
-                          <span>1 → Cube &bull; 2–4 → Rate Box &bull; 5+ → Large Box</span>
-                        ) : (
-                          <span>1–4 → Cube &bull; 5–10 → Rate Box &bull; 11+ → Large Box</span>
-                        )}
-                      </td>
-
-                      <td className="py-3 px-4 text-slate-500 text-[11px] max-w-xs truncate" title={rule.notes || ''}>
-                        {rule.notes || '—'}
-                      </td>
-
-                      <td className="py-3 px-4 text-right">
-                        <div className="flex items-center justify-end space-x-1.5">
-                          <button
-                            onClick={() => openEditModal(rule)}
-                            className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors cursor-pointer"
-                            title="Edit rule in database"
-                          >
-                            <Edit2 className="w-4 h-4" />
-                          </button>
-                          <button
-                            onClick={() => setDeleteConfirmRule(rule)}
-                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                            title="Delete rule from database"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
         </div>
       </div>
 

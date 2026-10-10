@@ -24,6 +24,7 @@ import {
   DollarSign,
   Tag,
   Download,
+  Boxes,
 } from 'lucide-react';
 
 export function getCountryFlag(country?: string): { flag: React.ReactNode; label: string; code: string } | null {
@@ -80,6 +81,8 @@ interface DashboardProps {
   onSyncMssql?: (action?: 'pull' | 'push') => Promise<void>;
   onOpenScanFormModal?: () => void;
   onToggleAppEnv?: (targetEnv: 'dev' | 'prod') => Promise<void>;
+  onRerunPackagingRules?: () => Promise<void>;
+  onRefreshRates?: () => Promise<void>;
   loading: boolean;
 }
 
@@ -99,6 +102,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onSyncMssql,
   onOpenScanFormModal,
   onToggleAppEnv,
+  onRerunPackagingRules,
+  onRefreshRates,
   loading,
 }) => {
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -107,7 +112,23 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [isValidating, setIsValidating] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isRerunningRules, setIsRerunningRules] = useState(false);
+  const [isUpdatingRates, setIsUpdatingRates] = useState(false);
   const [purchasingOrderId, setPurchasingOrderId] = useState<string | null>(null);
+
+  const handleRerunRulesClick = async () => {
+    if (!onRerunPackagingRules) return;
+    setIsRerunningRules(true);
+    await onRerunPackagingRules();
+    setIsRerunningRules(false);
+  };
+
+  const handleRefreshRatesClick = async () => {
+    if (!onRefreshRates) return;
+    setIsUpdatingRates(true);
+    await onRefreshRates();
+    setIsUpdatingRates(false);
+  };
 
   const handleSinglePurchaseLabel = async (order: ShippingOrder) => {
     setPurchasingOrderId(order.id);
@@ -320,6 +341,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
           {/* Quick Action Buttons */}
           <div className="flex items-center space-x-2.5">
+            {onRerunPackagingRules && (
+              <button
+                onClick={handleRerunRulesClick}
+                disabled={isRerunningRules || loading}
+                className="flex items-center space-x-1.5 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 hover:border-indigo-300 px-3.5 py-2 rounded-lg text-xs font-bold shadow-xs transition-all cursor-pointer disabled:opacity-50"
+                title="Rerun bobbin packaging rules across all open orders and update Package Boxes in SQL database"
+              >
+                <Boxes className={`w-3.5 h-3.5 text-indigo-600 ${isRerunningRules ? 'animate-spin' : ''}`} />
+                <span>{isRerunningRules ? 'Rerunning Rules...' : 'Rerun Packaging Rules'}</span>
+              </button>
+            )}
+
             <button
               onClick={handleValidateClick}
               disabled={isValidating || loading}
@@ -418,7 +451,21 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 <th className="py-3 px-3">Recipient</th>
                 <th className="py-3 px-3">Order Details</th>
                 <th className="py-3 px-3">Package Box</th>
-                <th className="py-3 px-3">Carrier Rates</th>
+                <th className="py-3 px-3">
+                  <div className="flex items-center space-x-1.5">
+                    <span>Carrier Rates</span>
+                    {onRefreshRates && (
+                      <button
+                        onClick={handleRefreshRatesClick}
+                        disabled={isUpdatingRates || loading}
+                        className="p-0.5 text-slate-400 hover:text-indigo-600 rounded transition-colors cursor-pointer disabled:opacity-50"
+                        title="Update live carrier rates from EasyPost for all open orders"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${isUpdatingRates ? 'animate-spin text-indigo-600' : ''}`} />
+                      </button>
+                    )}
+                  </div>
+                </th>
                 <th className="py-3 px-3">Status</th>
                 <th className="py-3 px-3 text-right">Action</th>
               </tr>

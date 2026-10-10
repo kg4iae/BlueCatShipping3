@@ -16,7 +16,6 @@ import { RefundConfirmModal } from './components/RefundConfirmModal';
 import { ScanFormModal } from './components/ScanFormModal';
 import { Reports } from './components/Reports';
 import { SettingsPage } from './components/SettingsPage';
-import { PackagingRulesConfig } from './components/PackagingRulesConfig';
 import { EasyPostErrorModal, EasyPostErrorInfo } from './components/EasyPostErrorModal';
 import { EnvLoadingOverlay, EnvSwitchState } from './components/EnvLoadingOverlay';
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
@@ -33,7 +32,7 @@ export default function App() {
       return null;
     }
   });
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'search' | 'reports' | 'settings' | 'packaging-rules'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'search' | 'reports' | 'settings'>('dashboard');
 
   useEffect(() => {
     const token = localStorage.getItem('shipping_auth_token');
@@ -196,10 +195,47 @@ export default function App() {
             .catch(() => {});
         }
       }
+
+      // Requirement: Update live carrier rates from EasyPost when loading the page
+      fetch('/api/orders/update-carrier-rates', { method: 'POST' })
+        .then((r) => r.json())
+        .then((ratesRes) => {
+          if (ratesRes.orders && Array.isArray(ratesRes.orders)) {
+            setOrders(ratesRes.orders);
+          }
+        })
+        .catch((err) => console.warn('Could not auto-update carrier rates on page load:', err));
     } catch (err) {
       console.error('Data load error:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRerunPackagingRules = async () => {
+    try {
+      const res = await fetch('/api/orders/reapply-packaging-rules', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to rerun packaging rules.');
+      if (data.orders) setOrders(data.orders);
+      showToast(
+        `Packaging rules evaluated across all open orders: updated ${data.updatedCount || 0} order(s) and synced boxes & live carrier rates to SQL database.`,
+        'success'
+      );
+    } catch (err: any) {
+      showToast(err.message || 'Error rerunning packaging rules.', 'error');
+    }
+  };
+
+  const handleUpdateCarrierRates = async () => {
+    try {
+      const res = await fetch('/api/orders/update-carrier-rates', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update carrier rates.');
+      if (data.orders) setOrders(data.orders);
+      showToast(`Updated live carrier rates for ${data.updatedCount || 0} open order(s).`, 'success');
+    } catch (err: any) {
+      showToast(err.message || 'Error updating carrier rates.', 'error');
     }
   };
 
@@ -766,6 +802,8 @@ export default function App() {
             onSyncMssql={handleSyncMssql}
             onOpenScanFormModal={() => setShowScanFormModal(true)}
             onToggleAppEnv={handleToggleAppEnv}
+            onRerunPackagingRules={handleRerunPackagingRules}
+            onRefreshRates={handleUpdateCarrierRates}
             loading={loading}
           />
         )}
@@ -785,14 +823,6 @@ export default function App() {
 
         {activeTab === 'reports' && <Reports />}
 
-        {activeTab === 'packaging-rules' && (
-          <PackagingRulesConfig
-            packages={packages}
-            showToast={showToast}
-            onRefreshOrders={refreshAllData}
-          />
-        )}
-
         {activeTab === 'settings' && settings && (
           <SettingsPage
             settings={settings}
@@ -801,6 +831,8 @@ export default function App() {
             onCreatePackage={handleCreatePackage}
             onDeletePackage={handleDeletePackage}
             onToggleAppEnv={handleToggleAppEnv}
+            showToast={showToast}
+            onRefreshOrders={refreshAllData}
           />
         )}
       </main>

@@ -21,8 +21,8 @@ import {
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface NavbarProps {
-  activeTab: 'dashboard' | 'search' | 'reports' | 'settings' | 'packaging-rules';
-  setActiveTab: (tab: 'dashboard' | 'search' | 'reports' | 'settings' | 'packaging-rules') => void;
+  activeTab: 'dashboard' | 'search' | 'reports' | 'settings';
+  setActiveTab: (tab: 'dashboard' | 'search' | 'reports' | 'settings') => void;
   openManualOrderModal: () => void;
   openScanFormModal?: () => void;
   pendingValidationCount: number;
@@ -260,19 +260,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <BarChart3 className="w-4 h-4" />
               <span>Analytics</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('packaging-rules')}
-              className={`flex items-center space-x-2 px-3.5 py-2 rounded-lg text-sm font-semibold transition-all cursor-pointer ${
-                activeTab === 'packaging-rules'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-800/80'
-              }`}
-              title="Configure bobbin box packaging rules in [dbo].[BobbinPackagingRules]"
-            >
-              <Boxes className="w-4 h-4" />
-              <span>Packaging Rules</span>
             </button>
 
             {currentUser?.role?.toLowerCase() === 'admin' && (

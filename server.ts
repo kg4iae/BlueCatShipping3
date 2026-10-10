@@ -1364,7 +1364,7 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
     req.input('shippingDate', sql.DateTime2(7), order.shippingDate ? new Date(order.shippingDate) : null);
     req.input('platform', sql.NVarChar(sql.MAX), order.marketplace || order.company || 'Web App');
     req.input('TotalWeight', sql.Float, order.weightOz || 16);
-    req.input('box', sql.VarChar(50), order.boxId || 'pkg_medium');
+    req.input('box', sql.VarChar(50), order.boxId || null);
     req.input('easypostShipmentId', sql.NVarChar(64), order.easypostShipmentId || null);
     req.input('marketplacenotified', sql.NVarChar(50), order.marketplacenotified || 'No');
 
@@ -3925,6 +3925,173 @@ app.get('/api/orders/:id/live-rates', async (req, res) => {
   }
 });
 
+// Helper: Fetch live rate from EasyPost for an order and persist to MSSQL
+async function fetchAndApplyLiveRateForOrder(order: ShippingOrder, pool?: sql.ConnectionPool | null): Promise<ShippingOrder> {
+  if (order.status === 'shipped' || order.status === 'cancelled') return order;
+  if (!order.street1 || !order.city || !order.zip) return order;
+
+  const apiKey = getActiveEasyPostKey(db.settings);
+  if (!apiKey) return order;
+
+  const box = (db.packages || []).find((p) => p.id === order.boxId || p.name.toLowerCase() === (order.boxName || '').toLowerCase()) || (db.packages || [])[0];
+  const authHeader = `Basic ${Buffer.from(apiKey + ':').toString('base64')}`;
+
+  const ret = typeof db.settings.returnAddress === 'string'
+    ? JSON.parse(db.settings.returnAddress)
+    : (db.settings.returnAddress || {});
+
+  const isIntl = isInternationalOrder(order);
+  const toCountry = normalizeCountryCode(order.country);
+  const toState = normalizeStateCode(order.state, toCountry);
+  const toZip = cleanZipCode(order.zip, toCountry);
+  const fromCountry = normalizeCountryCode(ret.country);
+  const fromState = normalizeStateCode(ret.state, fromCountry);
+  const fromZip = cleanZipCode(ret.zip, fromCountry);
+  const recipientPhone = cleanPhone(order.phone) || cleanPhone(ret.phone) || '8005550199';
+  const senderPhone = cleanPhone(ret.phone) || '3125550144';
+
+  const shipmentPayload: any = {
+    shipment: {
+      to_address: {
+        name: (order.recipientName || 'Valued Customer').trim(),
+        company: order.company ? order.company.trim() : undefined,
+        street1: (order.street1 || '123 Main St').trim(),
+        street2: order.street2 ? order.street2.trim() : undefined,
+        city: (order.city || 'Anytown').trim(),
+        state: toState || order.state,
+        zip: toZip,
+        country: toCountry,
+        phone: recipientPhone,
+      },
+      from_address: {
+        name: (ret.name || 'Shipping Dept').trim(),
+        company: ret.company ? ret.company.trim() : undefined,
+        street1: (ret.street1 || '100 Bobbin Way').trim(),
+        city: (ret.city || 'Chicago').trim(),
+        state: fromState || ret.state,
+        zip: fromZip,
+        country: fromCountry,
+        phone: senderPhone,
+      },
+      parcel: {
+        length: Math.max(1, Number(box?.length) || 10),
+        width: Math.max(1, Number(box?.width) || 8),
+        height: Math.max(1, Number(box?.height) || 4),
+        weight: Math.max(0.1, Number(order.weightOz) || 16),
+      },
+      options: {
+        label_size: '4x6',
+        label_format: 'PNG',
+      },
+    },
+  };
+
+  if (isIntl) {
+    const signerName = (ret.name || 'Shipping Manager').trim();
+    const rawItems = order.items && order.items.length > 0
+      ? order.items
+      : [{ sku: 'ITEM-1', name: 'Commercial Merchandise', quantity: 1, price: order.declaredValue || 20.0, weightOz: order.weightOz || 16 }];
+
+    shipmentPayload.shipment.customs_info = {
+      customs_certify: true,
+      customs_signer: signerName,
+      contents_type: 'merchandise',
+      restriction_type: 'none',
+      eel_pfc: 'NOEEI 30.37(a)',
+      customs_items: rawItems.map((item) => ({
+        description: (item.name || 'Commercial Merchandise').substring(0, 50).trim() || 'Merchandise',
+        quantity: Math.max(1, Math.round(Number(item.quantity) || 1)),
+        value: Math.max(1.0, Number(item.price) || 10.0),
+        weight: Math.max(0.1, Number(item.weightOz) || 8.0),
+        hs_tariff_number: getHsTariffNumber(item, db.settings),
+        origin_country: 'US',
+      })),
+    };
+  }
+
+  try {
+    const createRes = await fetch('https://api.easypost.com/v2/shipments', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: authHeader,
+      },
+      body: JSON.stringify(shipmentPayload),
+    });
+
+    const createData = await createRes.json().catch(() => ({}));
+    if (createRes.ok && Array.isArray(createData.rates) && createData.rates.length > 0) {
+      const targetCarrier = order.carrier || (isIntl ? (db.settings.defaultInternationalCarrier || 'UPS') : (db.settings.defaultDomesticCarrier || 'USPS'));
+      const targetService = order.serviceLevel || (isIntl ? (db.settings.defaultInternationalService || 'UPS Worldwide Expedited') : (db.settings.defaultDomesticService || 'Priority'));
+
+      const matchingCarrierRates = createData.rates.filter((r: any) => matchCarrier(r.carrier, targetCarrier));
+      let selectedRate: any = null;
+
+      if (matchingCarrierRates.length > 0) {
+        selectedRate = matchingCarrierRates.find((r: any) => matchService(r.service, targetService));
+        if (!selectedRate) {
+          const sorted = [...matchingCarrierRates].sort((a: any, b: any) => (parseFloat(a.rate) || 0) - (parseFloat(b.rate) || 0));
+          selectedRate = sorted[0];
+        }
+      } else {
+        selectedRate = createData.rates[0];
+      }
+
+      if (selectedRate) {
+        order.shippingCost = parseFloat(selectedRate.rate) || 0;
+        order.carrier = normalizeCarrierName(selectedRate.carrier);
+        order.serviceLevel = selectedRate.service;
+
+        if (pool) {
+          const tableName = getShippingTableName();
+          const req = pool.request();
+          const numericId = parseInt(order.id, 10);
+          if (!isNaN(numericId) && numericId > 0) {
+            req.input('id', sql.Int, numericId);
+            req.input('cost', sql.Decimal(18, 2), order.shippingCost);
+            req.input('carrier', sql.NVarChar(sql.MAX), order.carrier);
+            req.input('service', sql.NVarChar(sql.MAX), order.serviceLevel);
+            await req.query(`
+              UPDATE ${tableName}
+              SET [shippingCost] = @cost, [Carrier] = @carrier, [Service] = @service
+              WHERE [Id] = @id
+            `);
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    console.error(`[EasyPost] Error calculating live rate for Order #${order.orderNumber}:`, err?.message);
+  }
+
+  return order;
+}
+
+// Endpoint: Update live carrier rates from EasyPost for all active orders
+app.post('/api/orders/update-carrier-rates', async (req, res) => {
+  const pool = await getMssqlPool();
+  const openOrders = db.orders.filter(
+    (o) => o.status !== 'shipped' && o.status !== 'cancelled' && o.street1 && o.city && o.zip
+  );
+
+  let updatedCount = 0;
+  await Promise.all(
+    openOrders.map(async (order) => {
+      const prevCost = order.shippingCost;
+      await fetchAndApplyLiveRateForOrder(order, pool);
+      if (order.shippingCost !== prevCost) {
+        updatedCount++;
+      }
+    })
+  );
+
+  res.json({
+    success: true,
+    updatedCount,
+    orders: db.orders,
+  });
+});
+
 // Single Order EasyPost Label Purchase Endpoint
 app.post('/api/orders/:id/purchase-label', async (req, res) => {
   const { id } = req.params;
@@ -4470,30 +4637,30 @@ function generatePackingSlipPdfBuffer(orders: ShippingOrder[], settings: AppSett
   orders.forEach((order, index) => {
     if (index > 0) doc.addPage('letter', 'portrait');
 
-    // Header Left: Company Info
+    // Header Left: Company Info (Compact, single-page fit)
     doc.setTextColor(0, 0, 0);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(20);
-    doc.text(settings.companyName || 'BlueCat Bobbins Shipping', 36, 56);
+    doc.setFontSize(15);
+    doc.text(settings.companyName || 'BlueCat Bobbins Shipping', 36, 48);
 
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(11);
-    doc.text(ret.street1, 36, 74);
-    doc.text(`${ret.city}, ${ret.state} ${ret.zip}`, 36, 90);
-    doc.text(`Phone: ${ret.phone || '312-555-0144'}`, 36, 106);
+    doc.setFontSize(9);
+    doc.text(ret.street1, 36, 62);
+    doc.text(`${ret.city}, ${ret.state} ${ret.zip}`, 36, 74);
+    doc.text(`Phone: ${ret.phone || '312-555-0144'}`, 36, 86);
 
     // Header Right: PACKING SLIP Badge & Order Metadata
     doc.setFillColor(0, 0, 0);
-    doc.rect(436, 36, 140, 28, 'F');
+    doc.rect(446, 34, 130, 22, 'F');
     doc.setTextColor(255, 255, 255);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(13);
-    doc.text('PACKING SLIP', 506, 54, { align: 'center' });
+    doc.setFontSize(10.5);
+    doc.text('PACKING SLIP', 511, 49, { align: 'center' });
 
     doc.setTextColor(0, 0, 0);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(13);
-    let rightY = 80;
+    doc.setFontSize(10.5);
+    let rightY = 68;
 
     const platformName = (order.marketplace || order.company || '').trim();
     const platformLabel = platformName
@@ -4501,144 +4668,144 @@ function generatePackingSlipPdfBuffer(orders: ShippingOrder[], settings: AppSett
       : 'Order #';
     doc.text(`${platformLabel}: ${formatOrderId(order.orderNumber)}`, 576, rightY, { align: 'right' });
 
-    rightY += 15;
+    rightY += 13;
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(11);
+    doc.setFontSize(9);
     doc.text(`Date: ${new Date(order.orderDate).toLocaleDateString()}`, 576, rightY, { align: 'right' });
-    rightY += 15;
+    rightY += 13;
     doc.text(`Box Used: ${order.boxName || 'Standard Package'}`, 576, rightY, { align: 'right' });
 
     // Divider Line
     doc.setDrawColor(200, 200, 200);
     doc.setLineWidth(1);
-    doc.line(36, 128, 576, 128);
+    doc.line(36, 98, 576, 98);
 
-    // Recipient & Shipping Details Grid Box (Blue background)
+    // Recipient & Shipping Details Grid Box (Blue background, compact height)
     doc.setFillColor(219, 234, 254); // blue-100
     doc.setDrawColor(147, 197, 253); // blue-300
-    doc.rect(36, 138, 540, 118, 'FD');
+    doc.rect(36, 106, 540, 78, 'FD');
 
     // Left Column: SHIP TO
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(11);
+    doc.setFontSize(9);
     doc.setTextColor(15, 23, 42);
-    doc.text('SHIP TO:', 50, 156);
-    doc.setFontSize(14);
-    doc.text(order.recipientName, 50, 174);
+    doc.text('SHIP TO:', 48, 120);
+    doc.setFontSize(11);
+    doc.text(order.recipientName, 48, 134);
 
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(12);
-    let yLeft = 192;
-    doc.text(order.street1, 50, yLeft); yLeft += 16;
-    if (order.street2) { doc.text(order.street2, 50, yLeft); yLeft += 16; }
-    doc.text(`${order.city}, ${order.state} ${order.zip}`, 50, yLeft); yLeft += 16;
-    doc.text(`Phone: ${order.phone || 'N/A'}`, 50, yLeft);
+    doc.setFontSize(9);
+    let yLeft = 146;
+    doc.text(order.street1, 48, yLeft); yLeft += 11;
+    if (order.street2) { doc.text(order.street2, 48, yLeft); yLeft += 11; }
+    doc.text(`${order.city}, ${order.state} ${order.zip}`, 48, yLeft); yLeft += 11;
+    doc.text(`Phone: ${order.phone || 'N/A'}`, 48, yLeft);
 
     // Right Column: SHIPPING DETAILS
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(11);
-    doc.text('SHIPPING DETAILS:', 320, 156);
+    doc.setFontSize(9);
+    doc.text('SHIPPING DETAILS:', 320, 120);
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(12);
-    doc.text(`Carrier: ${order.carrier || 'USPS'} (${order.serviceLevel || 'Priority'})`, 320, 176);
-    doc.text('Tracking Number:', 320, 196);
+    doc.setFontSize(9);
+    doc.text(`Carrier: ${order.carrier || 'USPS'} (${order.serviceLevel || 'Priority'})`, 320, 134);
+    doc.text('Tracking Number:', 320, 148);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(13);
-    doc.text(order.trackingNumber || 'Not Purchased Yet (Postage Needed)', 320, 214);
+    doc.setFontSize(10);
+    doc.text(order.trackingNumber || 'Not Purchased Yet (Postage Needed)', 320, 162);
 
     // Line Items Table Header
-    const tableY = 270;
+    const tableY = 192;
     doc.setFillColor(191, 219, 254); // blue-200
     doc.setDrawColor(147, 197, 253); // blue-300
-    doc.rect(36, tableY, 540, 26, 'FD');
+    doc.rect(36, tableY, 540, 20, 'FD');
 
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(12);
+    doc.setFontSize(9);
     doc.setTextColor(15, 23, 42);
-    doc.text('QTY', 48, tableY + 18);
-    doc.text('ITEM NAME', 95, tableY + 18);
-    doc.text('TYPE', 325, tableY + 18);
-    doc.text('COLOR', 420, tableY + 18);
-    doc.text('WEIGHT', 510, tableY + 18);
+    doc.text('QTY', 46, tableY + 14);
+    doc.text('ITEM NAME', 88, tableY + 14);
+    doc.text('TYPE', 320, tableY + 14);
+    doc.text('COLOR', 415, tableY + 14);
+    doc.text('WEIGHT', 510, tableY + 14);
 
-    let itemY = tableY + 42;
-    const itemFontSize = 13;
-    const itemLineSpacing = itemFontSize * 1.35;
+    let itemY = tableY + 28;
+    const itemFontSize = 9;
+    const itemLineSpacing = itemFontSize * 1.3;
     doc.setFontSize(itemFontSize);
     doc.setTextColor(0, 0, 0);
 
     (order.items || []).forEach((item) => {
-      const qtyLines = doc.splitTextToSize(String(item.quantity || 1), 35);
-      const nameLines = doc.splitTextToSize(item.name || 'Order Item', 220);
-      const typeLines = doc.splitTextToSize(item.itemType || '—', 85);
-      const colorLines = doc.splitTextToSize(item.color || '—', 80);
+      const qtyLines = doc.splitTextToSize(String(item.quantity || 1), 32);
+      const nameLines = doc.splitTextToSize(item.name || 'Order Item', 225);
+      const typeLines = doc.splitTextToSize(item.itemType || '—', 88);
+      const colorLines = doc.splitTextToSize(item.color || '—', 88);
       const weightLines = doc.splitTextToSize(`${item.weightOz || 12} oz`, 55);
 
       const maxLines = Math.max(qtyLines.length, nameLines.length, typeLines.length, colorLines.length, weightLines.length);
 
       doc.setFont('helvetica', 'bold');
-      qtyLines.forEach((line, i) => doc.text(line, 48, itemY + i * itemLineSpacing));
+      qtyLines.forEach((line, i) => doc.text(line, 46, itemY + i * itemLineSpacing));
 
       doc.setFont('helvetica', 'normal');
-      nameLines.forEach((line, i) => doc.text(line, 95, itemY + i * itemLineSpacing));
-      typeLines.forEach((line, i) => doc.text(line, 325, itemY + i * itemLineSpacing));
-      colorLines.forEach((line, i) => doc.text(line, 420, itemY + i * itemLineSpacing));
+      nameLines.forEach((line, i) => doc.text(line, 88, itemY + i * itemLineSpacing));
+      typeLines.forEach((line, i) => doc.text(line, 320, itemY + i * itemLineSpacing));
+      colorLines.forEach((line, i) => doc.text(line, 415, itemY + i * itemLineSpacing));
       weightLines.forEach((line, i) => doc.text(line, 510, itemY + i * itemLineSpacing));
 
-      itemY += maxLines * itemLineSpacing + 8;
+      itemY += maxLines * itemLineSpacing + 4;
     });
 
     // 1. Upcoming Events Box (Loaded from [dbo].[Configuration] -> homeEventsList)
     const activeEvents = getActiveHomeEvents(settings);
     if (activeEvents.length > 0) {
-      itemY += 12;
+      itemY += 8;
       const eventsTitle = (settings.homeEventsTitle || 'Upcoming Events:').trim();
-      const eventTitleFontSize = 10;
-      const eventUrlFontSize = 9;
-      const eventTitleLineSpacing = 13;
-      const eventUrlLineSpacing = 12;
+      const eventTitleFontSize = 10.5;
+      const eventUrlFontSize = 10;
+      const eventTitleLineSpacing = 13.5;
+      const eventUrlLineSpacing = 12.5;
 
       // Calculate dynamic height for events box
-      let contentH = 22; // header padding
+      let contentH = 18; // header padding
       const preparedEvents: Array<{ titleLines: string[]; urlLines: string[] }> = [];
 
       activeEvents.forEach((evt) => {
         const titleText = `• ${evt.name}${evt.locationAndDate ? ` ${evt.locationAndDate}` : ''}`;
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(eventTitleFontSize);
-        const titleLines = doc.splitTextToSize(titleText, 500);
+        const titleLines = doc.splitTextToSize(titleText, 510);
 
         let urlLines: string[] = [];
         if (evt.url) {
           doc.setFont('helvetica', 'normal');
           doc.setFontSize(eventUrlFontSize);
-          urlLines = doc.splitTextToSize(evt.url.trim(), 485);
+          urlLines = doc.splitTextToSize(evt.url.trim(), 495);
         }
 
         preparedEvents.push({ titleLines, urlLines });
-        contentH += titleLines.length * eventTitleLineSpacing + (urlLines.length ? urlLines.length * eventUrlLineSpacing : 0) + 4;
+        contentH += titleLines.length * eventTitleLineSpacing + (urlLines.length ? urlLines.length * eventUrlLineSpacing : 0) + 3;
       });
 
-      const eventsBoxHeight = Math.max(50, contentH + 8);
+      const eventsBoxHeight = Math.max(38, contentH + 6);
 
       // Check for page overflow
-      if (itemY + eventsBoxHeight > 740) {
+      if (itemY + eventsBoxHeight > 755) {
         doc.addPage('letter', 'portrait');
-        itemY = 40;
+        itemY = 36;
       }
 
       // Draw Events Box
       doc.setFillColor(239, 246, 255); // blue-50
       doc.setDrawColor(147, 197, 253); // blue-300
-      doc.roundedRect(36, itemY, 540, eventsBoxHeight, 6, 6, 'FD');
+      doc.roundedRect(36, itemY, 540, eventsBoxHeight, 5, 5, 'FD');
 
       // Title
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(11);
       doc.setTextColor(30, 58, 138); // blue-900
-      doc.text(eventsTitle, 48, itemY + 18);
+      doc.text(eventsTitle, 46, itemY + 15);
 
-      let currentEventY = itemY + 32;
+      let currentEventY = itemY + 28;
 
       preparedEvents.forEach((pe) => {
         // Event Name + Date / Location
@@ -4646,7 +4813,7 @@ function generatePackingSlipPdfBuffer(orders: ShippingOrder[], settings: AppSett
         doc.setFontSize(eventTitleFontSize);
         doc.setTextColor(15, 23, 42); // slate-900
         pe.titleLines.forEach((line) => {
-          doc.text(line, 48, currentEventY);
+          doc.text(line, 46, currentEventY);
           currentEventY += eventTitleLineSpacing;
         });
 
@@ -4656,52 +4823,52 @@ function generatePackingSlipPdfBuffer(orders: ShippingOrder[], settings: AppSett
           doc.setFontSize(eventUrlFontSize);
           doc.setTextColor(29, 78, 216); // blue-700
           pe.urlLines.forEach((line) => {
-            doc.text(line, 58, currentEventY);
+            doc.text(line, 54, currentEventY);
             currentEventY += eventUrlLineSpacing;
           });
         }
-        currentEventY += 4;
+        currentEventY += 3;
       });
 
-      itemY += eventsBoxHeight + 8;
+      itemY += eventsBoxHeight + 6;
     }
 
-    // 2. Custom Notice Box (Dynamically sized so content never overflows box)
+    // 2. Custom Notice Box (Dynamically sized, +2pt increased font)
     itemY += 4;
     const rawNotice = settings.packingSlipContent || 'Thank you for your order! Please inspect items upon arrival and contact us if you have any questions.';
 
-    const noticeFontSize = 11;
+    const noticeFontSize = 10.5;
     doc.setFontSize(noticeFontSize);
 
-    const splitNotice = doc.splitTextToSize(rawNotice, 490);
-    const noticeLineSpacing = noticeFontSize * 1.35;
+    const splitNotice = doc.splitTextToSize(rawNotice, 510);
+    const noticeLineSpacing = noticeFontSize * 1.3;
     const textBlockHeight = splitNotice.length * noticeLineSpacing;
-    const titlePadding = 26;
-    const bottomPadding = 14;
-    const noticeBoxHeight = Math.max(54, titlePadding + textBlockHeight + bottomPadding);
+    const titlePadding = 20;
+    const bottomPadding = 9;
+    const noticeBoxHeight = Math.max(40, titlePadding + textBlockHeight + bottomPadding);
 
     // Check for page overflow
-    if (itemY + noticeBoxHeight > 750) {
+    if (itemY + noticeBoxHeight > 755) {
       doc.addPage('letter', 'portrait');
-      itemY = 40;
+      itemY = 36;
     }
 
     doc.setFillColor(219, 234, 254); // blue-100
     doc.setDrawColor(147, 197, 253); // blue-300
-    doc.roundedRect(36, itemY, 540, noticeBoxHeight, 6, 6, 'FD');
+    doc.roundedRect(36, itemY, 540, noticeBoxHeight, 5, 5, 'FD');
 
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(11);
     doc.setTextColor(15, 23, 42);
-    doc.text('Important Notice & Customer Service Policy', 48, itemY + 18);
+    doc.text('Important Notice & Customer Service Policy', 46, itemY + 15);
 
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(noticeFontSize);
     doc.setTextColor(15, 23, 42);
 
-    let noticeTextY = itemY + 34;
+    let noticeTextY = itemY + 28;
     splitNotice.forEach((line) => {
-      doc.text(line, 48, noticeTextY);
+      doc.text(line, 46, noticeTextY);
       noticeTextY += noticeLineSpacing;
     });
   });
@@ -5491,6 +5658,8 @@ app.post('/api/packaging-rules', async (req, res) => {
       };
       const refreshed = await fetchPackagingRulesFromMssql();
       if (refreshed) db.packagingRules = refreshed;
+      // Auto-rerun rules across open orders and update boxes in database
+      rerunPackagingRulesInternal(pool).catch((e) => console.error('[Packaging Rules] Auto-rerun error:', e));
     } catch (err: any) {
       return res.status(500).json({ error: 'Database error saving packaging rule: ' + err.message });
     }
@@ -5504,6 +5673,7 @@ app.post('/api/packaging-rules', async (req, res) => {
       notes: notes ? String(notes).trim() : '',
     };
     db.packagingRules.push(createdRule);
+    rerunPackagingRulesInternal().catch(() => {});
   }
 
   res.status(201).json(createdRule);
@@ -5528,6 +5698,8 @@ app.put('/api/packaging-rules/:id', async (req, res) => {
       });
       const refreshed = await fetchPackagingRulesFromMssql();
       if (refreshed) db.packagingRules = refreshed;
+      // Auto-rerun rules across open orders and update boxes in database
+      rerunPackagingRulesInternal(pool).catch((e) => console.error('[Packaging Rules] Auto-rerun error:', e));
       return res.json(updated);
     } catch (err: any) {
       return res.status(500).json({ error: 'Database error updating packaging rule: ' + err.message });
@@ -5536,6 +5708,7 @@ app.put('/api/packaging-rules/:id', async (req, res) => {
     const idx = db.packagingRules.findIndex((r) => r.id === numId);
     if (idx === -1) return res.status(404).json({ error: 'Rule not found' });
     db.packagingRules[idx] = { ...db.packagingRules[idx], ...req.body, id: numId };
+    rerunPackagingRulesInternal().catch(() => {});
     return res.json(db.packagingRules[idx]);
   }
 });
@@ -5553,12 +5726,15 @@ app.delete('/api/packaging-rules/:id', async (req, res) => {
       await reqMssql.query('DELETE FROM [dbo].[BobbinPackagingRules] WHERE [Id] = @id');
       const refreshed = await fetchPackagingRulesFromMssql();
       if (refreshed) db.packagingRules = refreshed;
+      // Auto-rerun rules across open orders and update boxes in database
+      rerunPackagingRulesInternal(pool).catch((e) => console.error('[Packaging Rules] Auto-rerun error:', e));
     } catch (err: any) {
       console.error('[MSSQL] Error deleting packaging rule:', err);
       return res.status(500).json({ error: 'Database error deleting rule: ' + err.message });
     }
   } else {
     db.packagingRules = db.packagingRules.filter((r) => r.id !== numId);
+    rerunPackagingRulesInternal().catch(() => {});
   }
 
   res.json({ success: true });
@@ -5576,10 +5752,9 @@ app.post('/api/packaging-rules/test', async (req, res) => {
   res.json(result);
 });
 
-// 6. Re-evaluate and re-apply packaging rules to all open dashboard orders
-app.post('/api/orders/reapply-packaging-rules', async (req, res) => {
-  const pool = await getMssqlPool();
-  if (pool && (!db.packagingRules || db.packagingRules.length === 0)) {
+async function rerunPackagingRulesInternal(pool?: sql.ConnectionPool | null): Promise<{ updatedCount: number; orders: ShippingOrder[] }> {
+  if (!pool) pool = await getMssqlPool();
+  if (pool) {
     const live = await fetchPackagingRulesFromMssql();
     if (live) db.packagingRules = live;
   }
@@ -5613,16 +5788,28 @@ app.post('/api/orders/reapply-packaging-rules', async (req, res) => {
       order.status = 'ready_to_ship';
     }
 
-    // Persist to MS SQL Server
+    // Persist box to MS SQL Server
     if (pool) {
       await saveOrderToMssqlPool(pool, order);
     }
+
+    // If box assigned and order address valid, update live carrier rate for this box
+    if (order.boxId && order.status !== 'address_error') {
+      await fetchAndApplyLiveRateForOrder(order, pool);
+    }
   }
 
+  return { updatedCount, orders: db.orders };
+}
+
+// 6. Re-evaluate and re-apply packaging rules to all open dashboard orders
+app.post('/api/orders/reapply-packaging-rules', async (req, res) => {
+  const pool = await getMssqlPool();
+  const result = await rerunPackagingRulesInternal(pool);
   res.json({
     success: true,
-    updatedCount,
-    orders: db.orders,
+    updatedCount: result.updatedCount,
+    orders: result.orders,
   });
 });
 

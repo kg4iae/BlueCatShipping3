@@ -32,7 +32,10 @@ import {
   KeyRound,
   Globe,
   Calendar,
+  Boxes,
 } from 'lucide-react';
+
+import { PackagingRulesConfig } from './PackagingRulesConfig';
 
 function getActiveHomeEvents(settings?: AppSetting): HomeEvent[] {
   const raw = settings?.homeEventsList;
@@ -65,6 +68,9 @@ interface SettingsPageProps {
   onCreatePackage: (pkgData: Partial<PackageType>) => Promise<void>;
   onDeletePackage: (id: string) => Promise<void>;
   onToggleAppEnv?: (targetEnv: 'dev' | 'prod') => Promise<void>;
+  showToast?: (message: string, type: 'success' | 'error' | 'info') => void;
+  onRefreshOrders?: () => void;
+  initialSection?: string;
 }
 
 export const SettingsPage: React.FC<SettingsPageProps> = ({
@@ -74,8 +80,11 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   onCreatePackage,
   onDeletePackage,
   onToggleAppEnv,
+  showToast = () => {},
+  onRefreshOrders,
+  initialSection,
 }) => {
-  const [activeSection, setActiveSection] = useState<'returnAddress' | 'carrierDefaults' | 'internationalCustoms' | 'qztray' | 'packingslip' | 'easypost' | 'packages' | 'mssql' | 'security'>('returnAddress');
+  const [activeSection, setActiveSection] = useState<'returnAddress' | 'carrierDefaults' | 'internationalCustoms' | 'qztray' | 'packingslip' | 'easypost' | 'packages' | 'packagingRules' | 'mssql' | 'security'>((initialSection as any) || 'returnAddress');
 
   // Business / FROM Address Form states
   const [companyName, setCompanyName] = useState(settings.companyName || 'BlueCat Bobbins Shipping');
@@ -705,6 +714,18 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
           >
             <Box className="w-4 h-4" />
             <span>Package Box Table</span>
+          </button>
+
+          <button
+            onClick={() => setActiveSection('packagingRules')}
+            className={`w-full flex items-center space-x-3 px-3.5 py-2.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+              activeSection === 'packagingRules'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+            }`}
+          >
+            <Boxes className="w-4 h-4" />
+            <span>Bobbin Packaging Rules</span>
           </button>
 
           <button
@@ -1716,6 +1737,17 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   </tbody>
                 </table>
               </div>
+            </div>
+          )}
+
+          {/* SECTION: BOBBIN PACKAGING RULES */}
+          {activeSection === 'packagingRules' && (
+            <div className="space-y-6">
+              <PackagingRulesConfig
+                packages={packages}
+                showToast={showToast}
+                onRefreshOrders={onRefreshOrders}
+              />
             </div>
           )}
 
