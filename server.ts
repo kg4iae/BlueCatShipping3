@@ -5226,19 +5226,61 @@ app.post('/api/scan-forms/create', async (req, res) => {
       return false;
     };
 
+    const isUspsOrder = (o: { carrier?: string; serviceLevel?: string }): boolean => {
+      if (o.carrier) {
+        const c = String(o.carrier).trim().toUpperCase();
+        if (c === 'UPS' || c.startsWith('UPS ') || (c.includes('UPS') && !c.includes('USPS'))) return false;
+        if (c === 'FEDEX' || c.includes('FEDEX')) return false;
+        if (c === 'DHL' || c.includes('DHL')) return false;
+        if (c === 'USPS' || c.startsWith('USPS') || c.includes('USPS') || c.includes('POSTAL')) return true;
+        return normalizeCarrierName(c) === 'USPS';
+      }
+      if (o.serviceLevel) {
+        const s = String(o.serviceLevel).trim().toUpperCase();
+        if (s.startsWith('UPS') || (s.includes('UPS') && !s.includes('USPS'))) return false;
+        if (s.includes('FEDEX') || s.includes('DHL')) return false;
+        if (
+          s.includes('USPS') ||
+          s.includes('PRIORITY') ||
+          s.includes('FIRST') ||
+          s.includes('GROUND ADVANTAGE') ||
+          s.includes('MEDIA MAIL') ||
+          s.includes('EXPRESS') ||
+          s.includes('PARCEL SELECT')
+        ) {
+          return true;
+        }
+      }
+      return true;
+    };
+
+    let allMatchingOrders: ShippingOrder[] = [];
     if (orderIds && Array.isArray(orderIds) && orderIds.length > 0) {
-      targetOrders = db.orders.filter(
+      allMatchingOrders = db.orders.filter(
         (o) => orderIds.includes(o.id) && o.status === 'shipped' && Boolean(o.easypostShipmentId) && isMatchingDate(o.shippingDate)
       );
     } else {
-      targetOrders = db.orders.filter(
+      allMatchingOrders = db.orders.filter(
         (o) => o.status === 'shipped' && Boolean(o.easypostShipmentId) && isMatchingDate(o.shippingDate)
       );
     }
 
+    // Filter out anything that is not USPS
+    targetOrders = allMatchingOrders.filter(isUspsOrder);
+    const nonUspsFilteredCount = allMatchingOrders.filter((o) => !isUspsOrder(o)).length;
+
+    if (nonUspsFilteredCount > 0) {
+      console.log(`[EasyPost SCAN Form] Excluded ${nonUspsFilteredCount} non-USPS package(s) from USPS Form 5630 SCAN Form.`);
+    }
+
     if (targetOrders.length === 0) {
+      if (nonUspsFilteredCount > 0) {
+        return res.status(400).json({
+          error: `No eligible USPS shipments found for the selected date (${nonUspsFilteredCount} non-USPS shipment(s) excluded). USPS Form 5630 SCAN Forms only support USPS packages.`,
+        });
+      }
       return res.status(400).json({
-        error: 'No shipped packages with EasyPost shipment IDs found for the selected date to include in the SCAN Form. Please purchase postage labels via EasyPost first!',
+        error: 'No shipped USPS packages with EasyPost shipment IDs found for the selected date to include in the SCAN Form. Please purchase USPS postage labels via EasyPost first!',
       });
     }
 

@@ -84,12 +84,45 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
     return false;
   };
 
-  // Filter shipped orders eligible for today / chosen manifest date (must have an EasyPost shipment ID)
-  const eligibleOrders = shippedOrders.filter((o) => {
+  // Filter helper: Form 5630 SCAN forms are strictly for USPS packages
+  const isUspsOrder = (o: { carrier?: string; serviceLevel?: string }) => {
+    if (o.carrier) {
+      const c = String(o.carrier).trim().toUpperCase();
+      if (c === 'UPS' || c.startsWith('UPS ') || (c.includes('UPS') && !c.includes('USPS'))) return false;
+      if (c === 'FEDEX' || c.includes('FEDEX')) return false;
+      if (c === 'DHL' || c.includes('DHL')) return false;
+      if (c === 'USPS' || c.startsWith('USPS') || c.includes('USPS') || c.includes('POSTAL')) return true;
+      return false;
+    }
+    if (o.serviceLevel) {
+      const s = String(o.serviceLevel).trim().toUpperCase();
+      if (s.startsWith('UPS') || (s.includes('UPS') && !s.includes('USPS'))) return false;
+      if (s.includes('FEDEX') || s.includes('DHL')) return false;
+      if (
+        s.includes('USPS') ||
+        s.includes('PRIORITY') ||
+        s.includes('FIRST') ||
+        s.includes('GROUND ADVANTAGE') ||
+        s.includes('MEDIA MAIL') ||
+        s.includes('EXPRESS') ||
+        s.includes('PARCEL SELECT')
+      ) {
+        return true;
+      }
+    }
+    return true;
+  };
+
+  // Filter shipped orders matching chosen manifest date (must have an EasyPost shipment ID)
+  const allDateOrders = shippedOrders.filter((o) => {
     if (o.status !== 'shipped') return false;
     if (!o.easypostShipmentId) return false;
     return isMatchingDate(o.shippingDate, manifestDate);
   });
+
+  // Filter out anything that is not USPS
+  const eligibleOrders = allDateOrders.filter(isUspsOrder);
+  const nonUspsOrders = allDateOrders.filter((o) => !isUspsOrder(o));
 
   const handleGenerateScanForm = async () => {
     setIsGenerating(true);
@@ -613,16 +646,35 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
                       <span>Today's Shipped Package Queue</span>
                     </h4>
                     <p className="text-xs text-slate-500 mt-0.5">
-                      Packages shipped on {manifestDate} ready for USPS Form 5630 SCAN Form generation
+                      USPS packages shipped on {manifestDate} ready for USPS Form 5630 SCAN Form generation
                     </p>
                   </div>
 
                   <div className="flex items-center space-x-2">
                     <span className="px-3 py-1 bg-indigo-50 border border-indigo-200 text-indigo-800 text-xs font-bold rounded-full">
-                      {eligibleOrders.length} Package(s) Ready
+                      {eligibleOrders.length} USPS Package(s) Ready
                     </span>
+                    {nonUspsOrders.length > 0 && (
+                      <span
+                        className="px-3 py-1 bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold rounded-full"
+                        title={`${nonUspsOrders.length} non-USPS package(s) filtered out (USPS Form 5630 only accepts USPS)`}
+                      >
+                        {nonUspsOrders.length} Non-USPS Filtered Out
+                      </span>
+                    )}
                   </div>
                 </div>
+
+                {/* Filter Notice when non-USPS packages exist */}
+                {nonUspsOrders.length > 0 && (
+                  <div className="bg-amber-50/80 border border-amber-200 rounded-lg p-3 text-xs text-amber-900 flex items-center space-x-2">
+                    <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>
+                      <strong>{nonUspsOrders.length} non-USPS package{nonUspsOrders.length > 1 ? 's' : ''} filtered out:</strong>{' '}
+                      USPS Form 5630 SCAN forms only support USPS mailpieces. Packages for {Array.from(new Set(nonUspsOrders.map((o) => o.carrier || 'Other Carrier'))).join(', ')} have been automatically excluded.
+                    </span>
+                  </div>
+                )}
 
                 {/* Eligible Orders Table */}
                 {eligibleOrders.length > 0 ? (
@@ -661,9 +713,15 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
                 ) : (
                   <div className="text-center py-8 bg-slate-50 rounded-xl border border-dashed border-slate-300 space-y-2">
                     <AlertCircle className="w-8 h-8 text-slate-400 mx-auto" />
-                    <p className="text-xs font-semibold text-slate-700">No shipped packages with EasyPost Shipment IDs found for {manifestDate}</p>
+                    <p className="text-xs font-semibold text-slate-700">
+                      {nonUspsOrders.length > 0
+                        ? `All ${nonUspsOrders.length} package(s) shipped on ${manifestDate} are non-USPS (${Array.from(new Set(nonUspsOrders.map((o) => o.carrier || 'Other Carrier'))).join(', ')})`
+                        : `No shipped USPS packages with EasyPost Shipment IDs found for ${manifestDate}`}
+                    </p>
                     <p className="text-[11px] text-slate-500 max-w-md mx-auto">
-                      Generate shipping labels via EasyPost on the Dashboard first. Once packages are shipped with EasyPost shipment IDs, they will automatically populate here to generate your end-of-day SCAN Form!
+                      {nonUspsOrders.length > 0
+                        ? 'USPS Form 5630 SCAN Forms strictly accept USPS mailpieces. Non-USPS packages cannot be added to a USPS manifest.'
+                        : 'Generate shipping labels via EasyPost on the Dashboard first. Once USPS packages are shipped with EasyPost shipment IDs, they will automatically populate here to generate your end-of-day SCAN Form!'}
                     </p>
                   </div>
                 )}
@@ -679,7 +737,7 @@ export const ScanFormModal: React.FC<ScanFormModalProps> = ({
                     <span>
                       {isGenerating
                         ? 'Connecting to EasyPost API...'
-                        : `Generate EasyPost SCAN Form (${eligibleOrders.length} Packages)`}
+                        : `Generate USPS SCAN Form (${eligibleOrders.length} Packages)`}
                     </span>
                   </button>
                 </div>
