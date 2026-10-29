@@ -14,7 +14,7 @@ import http from 'http';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import sql from 'mssql';
+import mysql from 'mysql2/promise';
 import { jsPDF } from 'jspdf';
 import { PDFDocument } from 'pdf-lib';
 import crypto from 'crypto';
@@ -224,7 +224,62 @@ async function addLabelImageToDoc(doc: jsPDF, labelBuffer: Buffer) {
   }
 }
 
-// Helper: Attempt MS SQL Server Database Connection Test
+function normalizeMysqlConfig(input?: {
+  server?: string;
+  port?: number | string;
+  database?: string;
+  user?: string;
+  password?: string;
+}) {
+  let rawHost = (input?.server || process.env.MYSQL_HOST || 'mysql8002.site4now.net').trim();
+  if (
+    !rawHost ||
+    /^sql\d+\.site4now\.net$/i.test(rawHost) ||
+    rawHost.toLowerCase().includes('sql5109') ||
+    rawHost.toLowerCase().includes('sql-east')
+  ) {
+    rawHost = (process.env.MYSQL_HOST || 'mysql8002.site4now.net').trim();
+  }
+
+  let serverPort = Number(input?.port || process.env.MYSQL_PORT) || 3306;
+  if (serverPort === 1433) serverPort = 3306;
+
+  if (rawHost.includes(':')) {
+    const parts = rawHost.split(':');
+    rawHost = parts[0];
+    serverPort = parseInt(parts[1], 10) || serverPort;
+  } else if (rawHost.includes(',')) {
+    const parts = rawHost.split(',');
+    rawHost = parts[0];
+    serverPort = parseInt(parts[1], 10) || serverPort;
+  }
+  if (serverPort === 1433) serverPort = 3306;
+
+  let rawDb = (input?.database || process.env.MYSQL_DATABASE || 'db_a7ef02_bluecatbobbins').trim();
+  if (!rawDb || rawDb === 'ShippingProductionDB') {
+    rawDb = (process.env.MYSQL_DATABASE || 'db_a7ef02_bluecatbobbins').trim();
+  }
+
+  let rawUser = (input?.user || process.env.MYSQL_USER || 'a7ef02_bluecatbobbins').trim();
+  if (!rawUser || rawUser === 'shipstation_app_user' || rawUser.toLowerCase().endsWith('_admin')) {
+    rawUser = (process.env.MYSQL_USER || 'a7ef02_bluecatbobbins').trim();
+  }
+
+  const rawPassword =
+    input?.password !== undefined && input?.password !== ''
+      ? input.password
+      : (process.env.MYSQL_PASSWORD ?? process.env.MSSQL_PASSWORD ?? process.env.SQL_PASSWORD ?? process.env.DB_PASSWORD ?? '');
+
+  return {
+    host: rawHost,
+    port: serverPort,
+    database: rawDb,
+    user: rawUser,
+    password: rawPassword,
+  };
+}
+
+// Helper: Attempt MySQL Database Connection Test
 async function testMssqlConnection(config: {
   server: string;
   port?: number;
@@ -233,83 +288,103 @@ async function testMssqlConnection(config: {
   password?: string;
   encrypt?: boolean;
 }): Promise<{ success: boolean; message: string; version?: string }> {
-  if (!config.server || !config.database || !config.user) {
+  const normalized = normalizeMysqlConfig(config);
+  const serverHost = normalized.host;
+  const serverPort = normalized.port;
+  const databaseInput = normalized.database;
+  const userInput = normalized.user;
+
+  if (!serverHost || !databaseInput || !userInput) {
     return {
       success: false,
-      message: 'MS SQL Server configuration incomplete. Please provide Host, Database Name, and User.',
+      message: 'MySQL configuration incomplete. Please provide Host, Database Name, and User.',
     };
   }
 
-  let serverHost = config.server.trim();
-  let serverPort = config.port || 1433;
-
-  if (serverHost.includes(':')) {
-    const parts = serverHost.split(':');
-    serverHost = parts[0];
-    serverPort = parseInt(parts[1], 10) || serverPort;
-  } else if (serverHost.includes(',')) {
-    const parts = serverHost.split(',');
-    serverHost = parts[0];
-    serverPort = parseInt(parts[1], 10) || serverPort;
-  }
-
-  let pool: sql.ConnectionPool | null = null;
+  let testPool: mysql.Pool | null = null;
   try {
-    const sqlConfig: sql.config = {
-      server: serverHost,
+    testPool = mysql.createPool({
+      host: serverHost,
       port: serverPort,
-      database: config.database,
-      user: config.user,
-      password: config.password || process.env.MSSQL_PASSWORD || '',
-      connectionTimeout: 30000,
-      requestTimeout: 45000,
-      options: {
-        encrypt: config.encrypt ?? false,
-        trustServerCertificate: true,
-        connectTimeout: 30000,
-        requestTimeout: 45000,
-        cancelTimeout: 10000,
-        enableArithAbort: true,
-        abortTransactionOnError: false,
-      },
-    };
+      database: databaseInput,
+      user: userInput,
+      password: normalized.password,
+      waitForConnections: true,
+      connectionLimit: 10,
+      enableKeepAlive: true,
+      charset: 'utf8mb4',
+      connectTimeout: 8000,
+    });
 
-    pool = new sql.ConnectionPool(sqlConfig);
-    await pool.connect();
-    const result = await pool.request().query('SELECT @@VERSION as version');
-    const versionStr = (result.recordset[0]?.version as string)?.split('\n')[0] || 'MS SQL Server Connected';
+    const [rows] = await testPool.query<mysql.RowDataPacket[]>('SELECT VERSION() AS version');
+    const versionStr = (rows[0]?.version as string) || 'MySQL Connected';
     return {
       success: true,
-      message: `Successfully connected to MS SQL Server (${serverHost}:${serverPort}/${config.database})`,
+      message: `Successfully connected to MySQL (${serverHost}:${serverPort}/${databaseInput})`,
       version: versionStr,
     };
   } catch (err: any) {
     const errorMsg = err?.message || err?.code || String(err);
     return {
       success: false,
-      message: `Failed to connect to MS SQL Server (${serverHost}:${serverPort}): ${errorMsg}`,
+      message: `Unable to reach MySQL (${serverHost}:${serverPort}): ${errorMsg}`,
     };
   } finally {
-    if (pool && pool.connected) {
+    if (testPool) {
       try {
-        await pool.close();
+        await testPool.end();
       } catch {}
     }
   }
 }
 
-// MS SQL Active Connection Pool & Query Helpers
-let activeMssqlPool: sql.ConnectionPool | null = null;
-let poolConnectingPromise: Promise<sql.ConnectionPool | null> | null = null;
+// MySQL Active Connection Pool & Query Helpers
+const defaultMysqlPool = mysql.createPool({
+  host: process.env.MYSQL_HOST || 'mysql8002.site4now.net',
+  port: Number(process.env.MYSQL_PORT) || 3306,
+  database: process.env.MYSQL_DATABASE || 'db_a7ef02_bluecatbobbins',
+  user: process.env.MYSQL_USER || 'a7ef02_bluecatbobbins',
+  password: process.env.MYSQL_PASSWORD || process.env.MSSQL_PASSWORD,
+  waitForConnections: true,
+  connectionLimit: 10,
+  enableKeepAlive: true,
+  charset: 'utf8mb4',
+});
+
+let activeMssqlPool: mysql.Pool | null = defaultMysqlPool;
+let poolConnectingPromise: Promise<mysql.Pool | null> | null = null;
 let mssqlTablesEnsured = false;
 let ensureTablesPromise: Promise<void> | null = null;
+let lastPoolConfigKey = `${process.env.MYSQL_HOST || 'mysql8002.site4now.net'}:${Number(process.env.MYSQL_PORT) || 3306}/${process.env.MYSQL_DATABASE || 'db_a7ef02_bluecatbobbins'}@${process.env.MYSQL_USER || 'a7ef02_bluecatbobbins'}:${process.env.MYSQL_PASSWORD || process.env.MSSQL_PASSWORD || ''}`;
 
-async function getMssqlPool(): Promise<sql.ConnectionPool | null> {
-  if (!db.settings.mssqlServer || !db.settings.mssqlDatabase || !db.settings.mssqlUser) {
+async function getMssqlPool(): Promise<mysql.Pool | null> {
+  const normalized = normalizeMysqlConfig({
+    server: db.settings.mssqlServer,
+    port: db.settings.mssqlPort,
+    database: db.settings.mssqlDatabase,
+    user: db.settings.mssqlUser,
+    password: db.settings.mssqlPassword,
+  });
+
+  const serverHost = normalized.host;
+  const serverPort = normalized.port;
+  const effectiveDb = normalized.database;
+  const effectiveUser = normalized.user;
+  const effectivePassword = normalized.password;
+
+  // Keep db.settings normalized so legacy MSSQL host/port/user never persist
+  db.settings.mssqlServer = serverHost;
+  db.settings.mssqlPort = serverPort;
+  db.settings.mssqlDatabase = effectiveDb;
+  db.settings.mssqlUser = effectiveUser;
+
+  if (!serverHost || !effectiveDb || !effectiveUser) {
     return null;
   }
 
-  if (activeMssqlPool && activeMssqlPool.connected && !activeMssqlPool.connecting) {
+  const currentConfigKey = `${serverHost}:${serverPort}/${effectiveDb}@${effectiveUser}:${effectivePassword || ''}`;
+
+  if (activeMssqlPool && db.settings.mssqlConnected && currentConfigKey === lastPoolConfigKey) {
     return activeMssqlPool;
   }
 
@@ -318,63 +393,34 @@ async function getMssqlPool(): Promise<sql.ConnectionPool | null> {
   }
 
   poolConnectingPromise = (async () => {
-    let serverHost = db.settings.mssqlServer.trim();
-    let serverPort = db.settings.mssqlPort || 1433;
-
-    if (serverHost.includes(':')) {
-      const parts = serverHost.split(':');
-      serverHost = parts[0];
-      serverPort = parseInt(parts[1], 10) || serverPort;
-    } else if (serverHost.includes(',')) {
-      const parts = serverHost.split(',');
-      serverHost = parts[0];
-      serverPort = parseInt(parts[1], 10) || serverPort;
-    }
-
-    const sqlConfig: sql.config = {
-      server: serverHost,
-      port: serverPort,
-      database: db.settings.mssqlDatabase,
-      user: db.settings.mssqlUser,
-      password: db.settings.mssqlPassword || process.env.MSSQL_PASSWORD || '',
-      connectionTimeout: 30000,
-      requestTimeout: 45000,
-      pool: {
-        max: 15,
-        min: 0,
-        idleTimeoutMillis: 60000,
-        acquireTimeoutMillis: 30000,
-      },
-      options: {
-        encrypt: db.settings.mssqlEncrypt ?? false,
-        trustServerCertificate: true,
-        connectTimeout: 30000,
-        requestTimeout: 45000,
-        cancelTimeout: 10000,
-        enableArithAbort: true,
-        abortTransactionOnError: false,
-      },
-    };
-
     try {
-      const pool = new sql.ConnectionPool(sqlConfig);
-      pool.on('error', (poolErr) => {
-        console.warn('[MSSQL Pool Notice]', poolErr?.message || poolErr);
-        if (!pool.connected) {
-          activeMssqlPool = null;
-          mssqlTablesEnsured = false;
-          db.settings.mssqlConnected = false;
+      if (!activeMssqlPool || currentConfigKey !== lastPoolConfigKey) {
+        if (activeMssqlPool && activeMssqlPool !== defaultMysqlPool) {
+          try {
+            await activeMssqlPool.end();
+          } catch {}
         }
-      });
-      await pool.connect();
-      activeMssqlPool = pool;
+        activeMssqlPool = mysql.createPool({
+          host: serverHost,
+          port: serverPort,
+          database: effectiveDb,
+          user: effectiveUser,
+          password: effectivePassword,
+          waitForConnections: true,
+          connectionLimit: 10,
+          enableKeepAlive: true,
+          charset: 'utf8mb4',
+        });
+        lastPoolConfigKey = currentConfigKey;
+      }
+
+      await activeMssqlPool.query('SELECT 1');
       db.settings.mssqlConnected = true;
       db.settings.mssqlError = null;
-      return pool;
+      return activeMssqlPool;
     } catch (err: any) {
       db.settings.mssqlConnected = false;
       db.settings.mssqlError = err?.message || String(err);
-      activeMssqlPool = null;
       mssqlTablesEnsured = false;
       return null;
     }
@@ -383,6 +429,49 @@ async function getMssqlPool(): Promise<sql.ConnectionPool | null> {
   });
 
   return poolConnectingPromise;
+}
+
+// Helper: Write a log entry to `ServiceLog` table in MySQL
+async function logServiceEvent(
+  pool: mysql.Pool | null,
+  serviceName: string,
+  logLevel: 'INFO' | 'WARN' | 'ERROR',
+  message: string
+): Promise<void> {
+  if (!pool) return;
+  try {
+    await pool.execute(
+      'INSERT INTO `ServiceLog` (`ServiceName`, `LogLevel`, `Message`, `CreatedAt`) VALUES (?, ?, ?, NOW())',
+      [serviceName, logLevel, message]
+    );
+  } catch {
+    // Non-fatal if ServiceLog table is not yet initialized
+  }
+}
+
+// Helper: Mark an order fulfilled in `Shipping` and `orderstatus` using MySQL syntax
+async function markOrderFulfilledInMysql(
+  pool: mysql.Pool,
+  order: { id: string; orderNumber: string; transactionId?: string }
+): Promise<void> {
+  const numericId = parseInt(order.id, 10);
+  if (!isNaN(numericId) && numericId > 0) {
+    await pool.execute('UPDATE Shipping SET Fulfilled = NOW() WHERE Id = ?', [numericId]);
+  } else {
+    await pool.execute('UPDATE Shipping SET Fulfilled = NOW() WHERE OrderNumber = ?', [order.orderNumber]);
+  }
+
+  const transactionId = (order as any).transactionId || order.orderNumber;
+  if (transactionId) {
+    try {
+      await pool.execute(
+        "UPDATE orderstatus SET Status = 'Shipped', UpdatedAt = NOW() WHERE TransactionID = ?",
+        [transactionId]
+      );
+    } catch (err: any) {
+      console.warn('[MySQL] Notice updating orderstatus:', err?.message || err);
+    }
+  }
 }
 
 function hashPassword(password: string): string {
@@ -396,10 +485,10 @@ function getActiveAppEnv(settings: AppSetting = db.settings): 'dev' | 'prod' {
   return 'prod';
 }
 
-// Helper: Get active MSSQL table for shipping orders ('[dbo].[Shipping]' in Prod vs '[dbo].[shippingdev]' in Dev)
+// Helper: Get active MySQL table for shipping orders ('`Shipping`' in Prod vs '`shippingdev`' in Dev)
 function getShippingTableName(settings: AppSetting = db.settings): string {
   const isProd = getActiveAppEnv(settings) === 'prod';
-  return isProd ? '[dbo].[Shipping]' : '[dbo].[shippingdev]';
+  return isProd ? '`Shipping`' : '`shippingdev`';
 }
 
 // Helper: Get active EasyPost API Key based on Dev/Prod mode (sourced from SQL database settings)
@@ -415,96 +504,65 @@ function getActiveEasyPostKey(settings: AppSetting = db.settings): string {
   }
 }
 
-// Helper: Clone [dbo].[Shipping] into [dbo].[shippingdev]
-async function cloneShippingToDevTable(pool: sql.ConnectionPool): Promise<{ success: boolean; message: string; rowCount?: number }> {
+// Helper: Ensure a column exists on a MySQL table
+async function ensureMysqlColumn(
+  pool: mysql.Pool,
+  tableName: string,
+  columnName: string,
+  columnDef: string
+): Promise<void> {
   try {
-    // 1. Ensure structure of shippingdev exists
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'shippingdev')
-      BEGIN
-          CREATE TABLE [dbo].[shippingdev](
-              [Id] [int] IDENTITY(1,1) NOT NULL,
-              [name] [nvarchar](max) NULL,
-              [address1] [nvarchar](max) NULL,
-              [address2] [nvarchar](max) NULL,
-              [city] [nvarchar](max) NULL,
-              [state] [nvarchar](max) NULL,
-              [postalCode] [nvarchar](max) NULL,
-              [country] [nvarchar](max) NULL,
-              [phone] [nvarchar](max) NULL,
-              [email] [nvarchar](max) NULL,
-              [createdAt] [datetime2](7) NULL,
-              [OrderDetails] [nvarchar](max) NULL,
-              [receiptID] [nvarchar](max) NULL,
-              [Carrier] [nvarchar](max) NULL,
-              [Service] [nvarchar](max) NULL,
-              [trackingNumber] [nvarchar](max) NULL,
-              [status] [nvarchar](max) NULL,
-              [shippingCost] [decimal](18, 2) NULL,
-              [shippingDate] [datetime2](7) NULL,
-              [platform] [nvarchar](max) NULL,
-              [TotalWeight] [float] NOT NULL DEFAULT 16,
-              [box] [varchar](50) NULL,
-              [easypostShipmentId] [nvarchar](64) NULL,
-              [LabelData] [varbinary](max) NULL,
-              [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No',
-              CONSTRAINT [PK_shippingdev_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
-          );
-      END;
+    const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+      `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = ?
+         AND LOWER(COLUMN_NAME) = LOWER(?)
+       LIMIT 1`,
+      [tableName, columnName]
+    );
+    if (rows.length === 0) {
+      await pool.query(`ALTER TABLE \`${tableName}\` ADD COLUMN \`${columnName}\` ${columnDef}`);
+    }
+  } catch {
+    // Ignore if column already exists or user lacks ALTER privilege
+  }
+}
+
+// Helper: Clone `Shipping` into `shippingdev`
+async function cloneShippingToDevTable(pool: mysql.Pool): Promise<{ success: boolean; message: string; rowCount?: number }> {
+  try {
+    await ensureMssqlTables(pool);
+
+    await pool.query('DELETE FROM `shippingdev`');
+    await pool.query(`
+      INSERT INTO \`shippingdev\` (
+        \`Id\`, \`TransactionId\`, \`Name\`, \`Street1\`, \`Street2\`, \`City\`, \`State\`, \`Zip\`, \`Country\`,
+        \`address1\`, \`address2\`, \`postalCode\`, \`phone\`, \`email\`,
+        \`OrderNumber\`, \`CreateDate\`, \`Override\`, \`Fulfilled\`,
+        \`createdAt\`, \`OrderDetails\`, \`receiptID\`, \`Carrier\`, \`Service\`,
+        \`trackingNumber\`, \`status\`, \`shippingCost\`, \`shippingDate\`, \`platform\`,
+        \`TotalWeight\`, \`box\`, \`easypostShipmentId\`, \`marketplacenotified\`, \`LabelData\`
+      )
+      SELECT
+        \`Id\`, \`TransactionId\`, \`Name\`, \`Street1\`, \`Street2\`, \`City\`, \`State\`, \`Zip\`, \`Country\`,
+        \`address1\`, \`address2\`, \`postalCode\`, \`phone\`, \`email\`,
+        \`OrderNumber\`, \`CreateDate\`, \`Override\`, \`Fulfilled\`,
+        \`createdAt\`, \`OrderDetails\`, \`receiptID\`, \`Carrier\`, \`Service\`,
+        \`trackingNumber\`, \`status\`, \`shippingCost\`, \`shippingDate\`, \`platform\`,
+        \`TotalWeight\`, \`box\`, \`easypostShipmentId\`, \`marketplacenotified\`, \`LabelData\`
+      FROM \`Shipping\`
     `);
 
-    // Ensure all columns exist in [dbo].[shippingdev]
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'marketplacenotified')
-      BEGIN
-          ALTER TABLE [dbo].[shippingdev] ADD [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No';
-      END;
-      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'Carrier')
-      BEGIN
-          ALTER TABLE [dbo].[shippingdev] ADD [Carrier] [nvarchar](max) NULL;
-      END;
-      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'Service')
-      BEGIN
-          ALTER TABLE [dbo].[shippingdev] ADD [Service] [nvarchar](max) NULL;
-      END;
-      IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'LabelData')
-      BEGIN
-          ALTER TABLE [dbo].[shippingdev] ADD [LabelData] [varbinary](max) NULL;
-      END;
-    `);
-
-    // 2. Clone data from [dbo].[Shipping] into [dbo].[shippingdev]
-    await pool.request().query(`
-      DELETE FROM [dbo].[shippingdev];
-      IF EXISTS (SELECT * FROM sys.tables WHERE name = 'Shipping')
-      BEGIN
-          SET IDENTITY_INSERT [dbo].[shippingdev] ON;
-          INSERT INTO [dbo].[shippingdev] (
-              [Id], [name], [address1], [address2], [city], [state], [postalCode], [country],
-              [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
-              [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
-              [TotalWeight], [box], [easypostShipmentId], [marketplacenotified], [LabelData]
-          )
-          SELECT
-              [Id], [name], [address1], [address2], [city], [state], [postalCode], [country],
-              [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
-              [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
-              [TotalWeight], [box], [easypostShipmentId], [marketplacenotified], [LabelData]
-          FROM [dbo].[Shipping];
-          SET IDENTITY_INSERT [dbo].[shippingdev] OFF;
-      END;
-    `);
-
-    const countRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[shippingdev]');
-    const rowCount = countRes.recordset[0]?.cnt || 0;
-    console.log(`[MSSQL] Cloned [dbo].[Shipping] -> [dbo].[shippingdev] (${rowCount} rows).`);
+    const [countRows] = await pool.query<mysql.RowDataPacket[]>('SELECT COUNT(*) AS cnt FROM `shippingdev`');
+    const rowCount = Number(countRows[0]?.cnt) || 0;
+    console.log(`[MySQL] Cloned \`Shipping\` -> \`shippingdev\` (${rowCount} rows).`);
     return {
       success: true,
-      message: `Successfully cloned ${rowCount} records from [dbo].[Shipping] into [dbo].[shippingdev].`,
+      message: `Successfully cloned ${rowCount} records from \`Shipping\` into \`shippingdev\`.`,
       rowCount,
     };
   } catch (err: any) {
-    console.error('[MSSQL] Error in cloneShippingToDevTable:', err);
+    console.error('[MySQL] Error in cloneShippingToDevTable:', err);
     return {
       success: false,
       message: `Failed to clone table: ${err?.message || String(err)}`,
@@ -512,9 +570,9 @@ async function cloneShippingToDevTable(pool: sql.ConnectionPool): Promise<{ succ
   }
 }
 
-// Ensure Database Tables Exist in MS SQL Server
-async function ensureMssqlTables(pool: sql.ConnectionPool): Promise<void> {
-  if (!pool || !pool.connected) return;
+// Ensure Database Tables Exist in MySQL Server
+async function ensureMssqlTables(pool: mysql.Pool): Promise<void> {
+  if (!pool) return;
   if (mssqlTablesEnsured) return;
 
   if (ensureTablesPromise) {
@@ -523,284 +581,305 @@ async function ensureMssqlTables(pool: sql.ConnectionPool): Promise<void> {
 
   ensureTablesPromise = (async () => {
     try {
-      // 1. Create all missing tables & add missing columns in a single, unified SQL batch
-      const schemaBatch = `
-        -- 1. Package table
-        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Package')
-        BEGIN
-            CREATE TABLE [dbo].[Package](
-                [Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY CLUSTERED,
-                [Name] [nvarchar](100) NOT NULL,
-                [Length] [decimal](10, 2) NOT NULL,
-                [Width] [decimal](10, 2) NOT NULL,
-                [Height] [decimal](10, 2) NOT NULL,
-                [Weight] [decimal](10, 2) NOT NULL
-            );
-        END;
+      // 1. Package table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS \`Package\` (
+          \`Id\` INT NOT NULL AUTO_INCREMENT,
+          \`Name\` VARCHAR(100) NOT NULL,
+          \`Length\` DECIMAL(10, 2) NOT NULL,
+          \`Width\` DECIMAL(10, 2) NOT NULL,
+          \`Height\` DECIMAL(10, 2) NOT NULL,
+          \`Weight\` DECIMAL(10, 2) NOT NULL,
+          PRIMARY KEY (\`Id\`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
 
-        -- 2. Shipping table (Prod)
-        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Shipping')
-        BEGIN
-            CREATE TABLE [dbo].[Shipping](
-                [Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY CLUSTERED,
-                [name] [nvarchar](max) NULL,
-                [address1] [nvarchar](max) NULL,
-                [address2] [nvarchar](max) NULL,
-                [city] [nvarchar](max) NULL,
-                [state] [nvarchar](max) NULL,
-                [postalCode] [nvarchar](max) NULL,
-                [country] [nvarchar](max) NULL,
-                [phone] [nvarchar](max) NULL,
-                [email] [nvarchar](max) NULL,
-                [createdAt] [datetime2](7) NULL,
-                [OrderDetails] [nvarchar](max) NULL,
-                [receiptID] [nvarchar](max) NULL,
-                [Carrier] [nvarchar](max) NULL,
-                [Service] [nvarchar](max) NULL,
-                [trackingNumber] [nvarchar](max) NULL,
-                [status] [nvarchar](max) NULL,
-                [shippingCost] [decimal](18, 2) NULL,
-                [shippingDate] [datetime2](7) NULL,
-                [platform] [nvarchar](max) NULL,
-                [TotalWeight] [float] NOT NULL DEFAULT 16,
-                [box] [varchar](50) NULL,
-                [easypostShipmentId] [nvarchar](64) NULL,
-                [LabelData] [varbinary](max) NULL,
-                [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No'
-            );
-        END;
+      // 2. Shipping table (Prod)
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS \`Shipping\` (
+          \`Id\` INT NOT NULL AUTO_INCREMENT,
+          \`TransactionId\` VARCHAR(100) NULL,
+          \`Name\` TEXT NULL,
+          \`Street1\` TEXT NULL,
+          \`Street2\` TEXT NULL,
+          \`City\` TEXT NULL,
+          \`State\` TEXT NULL,
+          \`Zip\` VARCHAR(50) NULL,
+          \`Country\` VARCHAR(100) NULL,
+          \`email\` VARCHAR(255) NULL,
+          \`OrderNumber\` VARCHAR(100) NULL,
+          \`CreateDate\` DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
+          \`Override\` VARCHAR(100) NULL,
+          \`Service\` VARCHAR(100) NULL,
+          \`Fulfilled\` DATETIME NULL,
+          \`address1\` TEXT NULL,
+          \`address2\` TEXT NULL,
+          \`postalCode\` VARCHAR(50) NULL,
+          \`phone\` VARCHAR(100) NULL,
+          \`createdAt\` DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
+          \`OrderDetails\` LONGTEXT NULL,
+          \`receiptID\` VARCHAR(100) NULL,
+          \`Carrier\` VARCHAR(100) NULL,
+          \`trackingNumber\` VARCHAR(100) NULL,
+          \`status\` VARCHAR(50) NULL DEFAULT 'New',
+          \`shippingCost\` DECIMAL(18, 2) NULL,
+          \`shippingDate\` DATETIME NULL,
+          \`platform\` VARCHAR(100) NULL,
+          \`TotalWeight\` DOUBLE NOT NULL DEFAULT 16,
+          \`box\` VARCHAR(50) NULL,
+          \`easypostShipmentId\` VARCHAR(64) NULL,
+          \`LabelData\` LONGBLOB NULL,
+          \`marketplacenotified\` VARCHAR(50) NOT NULL DEFAULT 'No',
+          PRIMARY KEY (\`Id\`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
 
-        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'marketplacenotified')
-            ALTER TABLE [dbo].[Shipping] ADD [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No';
-        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'Carrier')
-            ALTER TABLE [dbo].[Shipping] ADD [Carrier] [nvarchar](max) NULL;
-        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'Service')
-            ALTER TABLE [dbo].[Shipping] ADD [Service] [nvarchar](max) NULL;
-        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[Shipping]') AND name = 'LabelData')
-            ALTER TABLE [dbo].[Shipping] ADD [LabelData] [varbinary](max) NULL;
+      // 2b. shippingdev table (Dev)
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS \`shippingdev\` (
+          \`Id\` INT NOT NULL AUTO_INCREMENT,
+          \`TransactionId\` VARCHAR(100) NULL,
+          \`Name\` TEXT NULL,
+          \`Street1\` TEXT NULL,
+          \`Street2\` TEXT NULL,
+          \`City\` TEXT NULL,
+          \`State\` TEXT NULL,
+          \`Zip\` VARCHAR(50) NULL,
+          \`Country\` VARCHAR(100) NULL,
+          \`email\` VARCHAR(255) NULL,
+          \`OrderNumber\` VARCHAR(100) NULL,
+          \`CreateDate\` DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
+          \`Override\` VARCHAR(100) NULL,
+          \`Service\` VARCHAR(100) NULL,
+          \`Fulfilled\` DATETIME NULL,
+          \`address1\` TEXT NULL,
+          \`address2\` TEXT NULL,
+          \`postalCode\` VARCHAR(50) NULL,
+          \`phone\` VARCHAR(100) NULL,
+          \`createdAt\` DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
+          \`OrderDetails\` LONGTEXT NULL,
+          \`receiptID\` VARCHAR(100) NULL,
+          \`Carrier\` VARCHAR(100) NULL,
+          \`trackingNumber\` VARCHAR(100) NULL,
+          \`status\` VARCHAR(50) NULL DEFAULT 'New',
+          \`shippingCost\` DECIMAL(18, 2) NULL,
+          \`shippingDate\` DATETIME NULL,
+          \`platform\` VARCHAR(100) NULL,
+          \`TotalWeight\` DOUBLE NOT NULL DEFAULT 16,
+          \`box\` VARCHAR(50) NULL,
+          \`easypostShipmentId\` VARCHAR(64) NULL,
+          \`LabelData\` LONGBLOB NULL,
+          \`marketplacenotified\` VARCHAR(50) NOT NULL DEFAULT 'No',
+          PRIMARY KEY (\`Id\`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
 
-        -- 2b. shippingdev table (Dev)
-        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'shippingdev')
-        BEGIN
-            CREATE TABLE [dbo].[shippingdev](
-                [Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY CLUSTERED,
-                [name] [nvarchar](max) NULL,
-                [address1] [nvarchar](max) NULL,
-                [address2] [nvarchar](max) NULL,
-                [city] [nvarchar](max) NULL,
-                [state] [nvarchar](max) NULL,
-                [postalCode] [nvarchar](max) NULL,
-                [country] [nvarchar](max) NULL,
-                [phone] [nvarchar](max) NULL,
-                [email] [nvarchar](max) NULL,
-                [createdAt] [datetime2](7) NULL,
-                [OrderDetails] [nvarchar](max) NULL,
-                [receiptID] [nvarchar](max) NULL,
-                [Carrier] [nvarchar](max) NULL,
-                [Service] [nvarchar](max) NULL,
-                [trackingNumber] [nvarchar](max) NULL,
-                [status] [nvarchar](max) NULL,
-                [shippingCost] [decimal](18, 2) NULL,
-                [shippingDate] [datetime2](7) NULL,
-                [platform] [nvarchar](max) NULL,
-                [TotalWeight] [float] NOT NULL DEFAULT 16,
-                [box] [varchar](50) NULL,
-                [easypostShipmentId] [nvarchar](64) NULL,
-                [LabelData] [varbinary](max) NULL,
-                [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No'
-            );
-        END;
+      // Ensure both unified shared columns and fulfillment columns exist on Shipping and shippingdev
+      const shippingColsToEnsure: Array<[string, string]> = [
+        ['TransactionId', 'VARCHAR(100) NULL'],
+        ['Name', 'TEXT NULL'],
+        ['Street1', 'TEXT NULL'],
+        ['Street2', 'TEXT NULL'],
+        ['City', 'TEXT NULL'],
+        ['State', 'TEXT NULL'],
+        ['Zip', 'VARCHAR(50) NULL'],
+        ['Country', 'VARCHAR(100) NULL'],
+        ['email', 'VARCHAR(255) NULL'],
+        ['OrderNumber', 'VARCHAR(100) NULL'],
+        ['CreateDate', 'DATETIME NULL DEFAULT CURRENT_TIMESTAMP'],
+        ['Override', 'VARCHAR(100) NULL'],
+        ['Service', 'VARCHAR(100) NULL'],
+        ['Fulfilled', 'DATETIME NULL'],
+        ['address1', 'TEXT NULL'],
+        ['address2', 'TEXT NULL'],
+        ['postalCode', 'VARCHAR(50) NULL'],
+        ['phone', 'VARCHAR(100) NULL'],
+        ['createdAt', 'DATETIME NULL DEFAULT CURRENT_TIMESTAMP'],
+        ['OrderDetails', 'LONGTEXT NULL'],
+        ['receiptID', 'VARCHAR(100) NULL'],
+        ['Carrier', 'VARCHAR(100) NULL'],
+        ['trackingNumber', 'VARCHAR(100) NULL'],
+        ['status', "VARCHAR(50) NULL DEFAULT 'New'"],
+        ['shippingCost', 'DECIMAL(18, 2) NULL'],
+        ['shippingDate', 'DATETIME NULL'],
+        ['platform', 'VARCHAR(100) NULL'],
+        ['TotalWeight', 'DOUBLE NOT NULL DEFAULT 16'],
+        ['box', 'VARCHAR(50) NULL'],
+        ['easypostShipmentId', 'VARCHAR(64) NULL'],
+        ['LabelData', 'LONGBLOB NULL'],
+        ['marketplacenotified', "VARCHAR(50) NOT NULL DEFAULT 'No'"],
+      ];
 
-        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'marketplacenotified')
-            ALTER TABLE [dbo].[shippingdev] ADD [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No';
-        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'Carrier')
-            ALTER TABLE [dbo].[shippingdev] ADD [Carrier] [nvarchar](max) NULL;
-        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'Service')
-            ALTER TABLE [dbo].[shippingdev] ADD [Service] [nvarchar](max) NULL;
-        IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[shippingdev]') AND name = 'LabelData')
-            ALTER TABLE [dbo].[shippingdev] ADD [LabelData] [varbinary](max) NULL;
-
-        -- Ensure default constraint DF_Shipping_status ('New') on Shipping
-        IF NOT EXISTS (
-            SELECT 1 FROM sys.default_constraints 
-            WHERE parent_object_id = OBJECT_ID(N'[dbo].[Shipping]') 
-              AND parent_column_id = COLUMNPROPERTY(OBJECT_ID(N'[dbo].[Shipping]'), 'status', 'ColumnId')
-        )
-        BEGIN
-            ALTER TABLE [dbo].[Shipping] ADD CONSTRAINT DF_Shipping_status DEFAULT 'New' FOR [status];
-        END;
-
-        -- Ensure default constraint DF_shippingdev_status ('New') on shippingdev
-        IF NOT EXISTS (
-            SELECT 1 FROM sys.default_constraints 
-            WHERE parent_object_id = OBJECT_ID(N'[dbo].[shippingdev]') 
-              AND parent_column_id = COLUMNPROPERTY(OBJECT_ID(N'[dbo].[shippingdev]'), 'status', 'ColumnId')
-        )
-        BEGIN
-            ALTER TABLE [dbo].[shippingdev] ADD CONSTRAINT DF_shippingdev_status DEFAULT 'New' FOR [status];
-        END;
-
-        -- 3. Configuration table
-        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Configuration')
-        BEGIN
-            CREATE TABLE [dbo].[Configuration](
-                [ConfigKey] [nvarchar](100) NOT NULL PRIMARY KEY,
-                [ConfigValue] [nvarchar](max) NULL
-            );
-        END;
-
-        -- 4. Users table
-        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Users')
-        BEGIN
-            CREATE TABLE [dbo].[Users](
-                [Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY CLUSTERED,
-                [Username] [nvarchar](100) NOT NULL UNIQUE,
-                [PasswordHash] [nvarchar](255) NOT NULL,
-                [FullName] [nvarchar](100) NULL,
-                [Role] [nvarchar](50) NOT NULL DEFAULT 'Admin',
-                [CreatedAt] [datetime2](7) NOT NULL DEFAULT GETDATE(),
-                [LastLoginAt] [datetime2](7) NULL
-            );
-        END;
-
-        -- 5. BobbinPackagingRules table
-        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'BobbinPackagingRules')
-        BEGIN
-            CREATE TABLE [dbo].[BobbinPackagingRules] (
-                [Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY CLUSTERED,
-                [Pattern] [nvarchar](255) NOT NULL,
-                [Classification] [nvarchar](50) NOT NULL,
-                [MaxCubeQty] [int] NOT NULL DEFAULT 0,
-                [MaxRateBoxQty] [int] NOT NULL DEFAULT 0,
-                [Notes] [nvarchar](max) NULL,
-                [CreatedAt] [datetime2](7) NOT NULL DEFAULT sysutcdatetime(),
-                [UpdatedAt] [datetime2](7) NOT NULL DEFAULT sysutcdatetime()
-            );
-
-            INSERT INTO [dbo].[BobbinPackagingRules] ([Pattern], [Classification], [MaxCubeQty], [MaxRateBoxQty], [Notes])
-            VALUES 
-                ('Spinolution 16oz', 'Oversized', 0, 0, 'Will not fit in small box or rate box; only goes in Large Box.'),
-                ('Ashford Country Spinner', 'Oversized', 0, 0, 'Extra large bobbin; only goes in Large Box.'),
-                ('Spinolution 8oz', 'Bulky', 1, 4, 'Fits Cube if qty = 1. Fits Rate Box for 2-4. More goes in Large Box.'),
-                ('Louet S10', 'Bulky', 1, 4, 'Fits Cube if qty = 1. Fits Rate Box for 2-4. More goes in Large Box.'),
-                ('Spinolution 12oz', 'Standard', 4, 10, 'Fits Cube up to 4. Fits Rate Box for 5-10. 11+ goes in Large Box.'),
-                ('Spinolution 4oz', 'Standard', 4, 10, 'Fits Cube up to 4. Fits Rate Box for 5-10. 11+ goes in Large Box.'),
-                ('*Bobbin*', 'Standard', 4, 10, 'Default rule for general bobbins: 1-4 Cube, 5-10 Rate Box, 11+ Large Box.');
-        END;
-      `;
-
-      await pool.request().query(schemaBatch);
-
-      // Ensure triggers on Shipping and shippingdev to guarantee status defaults to 'New' upon creation if blank/NULL
-      try {
-        await pool.request().query(`
-          CREATE OR ALTER TRIGGER [dbo].[tr_shipping_ensure_status_new]
-          ON [dbo].[Shipping]
-          AFTER INSERT, UPDATE
-          AS
-          BEGIN
-              SET NOCOUNT ON;
-              IF TRIGGER_NESTLEVEL() > 1 RETURN;
-
-              UPDATE s
-              SET s.status = 'New'
-              FROM [dbo].[Shipping] s
-              INNER JOIN inserted i ON s.Id = i.Id
-              WHERE (s.status IS NULL OR LTRIM(RTRIM(CAST(s.status AS NVARCHAR(MAX)))) = '')
-                AND (s.trackingNumber IS NULL OR LTRIM(RTRIM(CAST(s.trackingNumber AS NVARCHAR(MAX)))) = '');
-          END;
-        `);
-
-        await pool.request().query(`
-          CREATE OR ALTER TRIGGER [dbo].[tr_shippingdev_ensure_status_new]
-          ON [dbo].[shippingdev]
-          AFTER INSERT, UPDATE
-          AS
-          BEGIN
-              SET NOCOUNT ON;
-              IF TRIGGER_NESTLEVEL() > 1 RETURN;
-
-              UPDATE s
-              SET s.status = 'New'
-              FROM [dbo].[shippingdev] s
-              INNER JOIN inserted i ON s.Id = i.Id
-              WHERE (s.status IS NULL OR LTRIM(RTRIM(CAST(s.status AS NVARCHAR(MAX)))) = '')
-                AND (s.trackingNumber IS NULL OR LTRIM(RTRIM(CAST(s.trackingNumber AS NVARCHAR(MAX)))) = '');
-          END;
-        `);
-
-        // Clean up any historical blank or null status records
-        await pool.request().query(`
-          UPDATE [dbo].[Shipping]
-          SET [status] = 'New'
-          WHERE ([status] IS NULL OR LTRIM(RTRIM(CAST([status] AS NVARCHAR(MAX)))) = '')
-            AND ([trackingNumber] IS NULL OR LTRIM(RTRIM(CAST([trackingNumber] AS NVARCHAR(MAX)))) = '');
-
-          UPDATE [dbo].[shippingdev]
-          SET [status] = 'New'
-          WHERE ([status] IS NULL OR LTRIM(RTRIM(CAST([status] AS NVARCHAR(MAX)))) = '')
-            AND ([trackingNumber] IS NULL OR LTRIM(RTRIM(CAST([trackingNumber] AS NVARCHAR(MAX)))) = '');
-        `);
-      } catch (triggerErr: any) {
-        console.warn('[MSSQL] Notice while ensuring status triggers:', triggerErr?.message || triggerErr);
+      for (const [col, def] of shippingColsToEnsure) {
+        await ensureMysqlColumn(pool, 'Shipping', col, def);
+        await ensureMysqlColumn(pool, 'shippingdev', col, def);
       }
 
-      // Check count in Package table; if empty and we have seed packages, populate MS SQL
-      const pkgCountRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Package]');
-      const pkgCount = pkgCountRes.recordset[0]?.cnt || 0;
+      // 3. Shared BlueCat Bobbins tables: orderlist, orderstatus, ServiceLog
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS \`orderlist\` (
+          \`Id\` INT NOT NULL AUTO_INCREMENT,
+          \`TransactionId\` VARCHAR(100) NULL,
+          \`OrderNumber\` VARCHAR(100) NULL,
+          \`SKU\` VARCHAR(100) NULL,
+          \`ItemName\` VARCHAR(255) NULL,
+          \`ItemType\` VARCHAR(100) NULL,
+          \`Color\` VARCHAR(100) NULL,
+          \`Quantity\` INT NOT NULL DEFAULT 1,
+          \`Price\` DECIMAL(18, 2) NULL DEFAULT 0,
+          \`WeightOz\` DOUBLE NULL DEFAULT 4,
+          \`CreatedAt\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (\`Id\`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS \`orderstatus\` (
+          \`Id\` INT NOT NULL AUTO_INCREMENT,
+          \`TransactionID\` VARCHAR(100) NULL,
+          \`OrderNumber\` VARCHAR(100) NULL,
+          \`Status\` VARCHAR(50) NOT NULL DEFAULT 'New',
+          \`TrackingNumber\` VARCHAR(100) NULL,
+          \`Carrier\` VARCHAR(100) NULL,
+          \`UpdatedAt\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (\`Id\`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS \`ServiceLog\` (
+          \`Id\` INT NOT NULL AUTO_INCREMENT,
+          \`ServiceName\` VARCHAR(100) NOT NULL DEFAULT 'ShippingFulfillment',
+          \`LogLevel\` VARCHAR(50) NOT NULL DEFAULT 'INFO',
+          \`Message\` LONGTEXT NULL,
+          \`CreatedAt\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (\`Id\`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+
+      // 4. Configuration table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS \`Configuration\` (
+          \`ConfigKey\` VARCHAR(100) NOT NULL,
+          \`ConfigValue\` LONGTEXT NULL,
+          PRIMARY KEY (\`ConfigKey\`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+
+      // 5. Users table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS \`Users\` (
+          \`Id\` INT NOT NULL AUTO_INCREMENT,
+          \`Username\` VARCHAR(100) NOT NULL UNIQUE,
+          \`PasswordHash\` VARCHAR(255) NOT NULL,
+          \`FullName\` VARCHAR(100) NULL,
+          \`Role\` VARCHAR(50) NOT NULL DEFAULT 'Admin',
+          \`CreatedAt\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          \`LastLoginAt\` DATETIME NULL,
+          PRIMARY KEY (\`Id\`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+
+      // 6. BobbinPackagingRules table
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS \`BobbinPackagingRules\` (
+          \`Id\` INT NOT NULL AUTO_INCREMENT,
+          \`Pattern\` VARCHAR(255) NOT NULL,
+          \`Classification\` VARCHAR(50) NOT NULL,
+          \`MaxCubeQty\` INT NOT NULL DEFAULT 0,
+          \`MaxRateBoxQty\` INT NOT NULL DEFAULT 0,
+          \`Notes\` LONGTEXT NULL,
+          \`CreatedAt\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          \`UpdatedAt\` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (\`Id\`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+
+      const [ruleCountRows] = await pool.query<mysql.RowDataPacket[]>(
+        'SELECT COUNT(*) AS cnt FROM `BobbinPackagingRules`'
+      );
+      if ((Number(ruleCountRows[0]?.cnt) || 0) === 0) {
+        await pool.query(`
+          INSERT INTO \`BobbinPackagingRules\` (\`Pattern\`, \`Classification\`, \`MaxCubeQty\`, \`MaxRateBoxQty\`, \`Notes\`, \`CreatedAt\`, \`UpdatedAt\`)
+          VALUES
+            ('Spinolution 16oz', 'Oversized', 0, 0, 'Will not fit in small box or rate box; only goes in Large Box.', NOW(), NOW()),
+            ('Ashford Country Spinner', 'Oversized', 0, 0, 'Extra large bobbin; only goes in Large Box.', NOW(), NOW()),
+            ('Spinolution 8oz', 'Bulky', 1, 4, 'Fits Cube if qty = 1. Fits Rate Box for 2-4. More goes in Large Box.', NOW(), NOW()),
+            ('Louet S10', 'Bulky', 1, 4, 'Fits Cube if qty = 1. Fits Rate Box for 2-4. More goes in Large Box.', NOW(), NOW()),
+            ('Spinolution 12oz', 'Standard', 4, 10, 'Fits Cube up to 4. Fits Rate Box for 5-10. 11+ goes in Large Box.', NOW(), NOW()),
+            ('Spinolution 4oz', 'Standard', 4, 10, 'Fits Cube up to 4. Fits Rate Box for 5-10. 11+ goes in Large Box.', NOW(), NOW()),
+            ('*Bobbin*', 'Standard', 4, 10, 'Default rule for general bobbins: 1-4 Cube, 5-10 Rate Box, 11+ Large Box.', NOW(), NOW())
+        `);
+      }
+
+      // Clean up any historical blank or null status records on unfulfilled orders
+      try {
+        await pool.query(`
+          UPDATE \`Shipping\`
+          SET \`status\` = 'New'
+          WHERE (\`status\` IS NULL OR TRIM(\`status\`) = '')
+            AND (\`trackingNumber\` IS NULL OR TRIM(\`trackingNumber\`) = '')
+            AND \`Fulfilled\` IS NULL
+        `);
+        await pool.query(`
+          UPDATE \`shippingdev\`
+          SET \`status\` = 'New'
+          WHERE (\`status\` IS NULL OR TRIM(\`status\`) = '')
+            AND (\`trackingNumber\` IS NULL OR TRIM(\`trackingNumber\`) = '')
+            AND \`Fulfilled\` IS NULL
+        `);
+      } catch {}
+
+      // Check count in Package table; if empty and we have seed packages, populate MySQL
+      const [pkgCountRows] = await pool.query<mysql.RowDataPacket[]>('SELECT COUNT(*) AS cnt FROM `Package`');
+      const pkgCount = Number(pkgCountRows[0]?.cnt) || 0;
       if (pkgCount === 0 && db.packages.length > 0) {
-        console.log('[MSSQL] Table [dbo].[Package] empty. Seeding initial packages into MS SQL database...');
+        console.log('[MySQL] Table `Package` empty. Seeding initial packages into MySQL database...');
         for (const pkg of db.packages) {
           await savePackageToMssqlPool(pool, pkg);
         }
       }
 
-      // Check count in active shipping table; if empty and we have seed orders, populate MS SQL
+      // Check count in active shipping table; if empty and we have seed orders, populate MySQL
       const activeTable = getShippingTableName();
-      const countRes = await pool.request().query(`SELECT COUNT(*) as cnt FROM ${activeTable}`);
-      const orderCount = countRes.recordset[0]?.cnt || 0;
+      const [orderCountRows] = await pool.query<mysql.RowDataPacket[]>(`SELECT COUNT(*) AS cnt FROM ${activeTable}`);
+      const orderCount = Number(orderCountRows[0]?.cnt) || 0;
       if (orderCount === 0 && db.orders.length > 0) {
-        console.log(`[MSSQL] Table ${activeTable} empty. Seeding initial orders into MS SQL database...`);
+        console.log(`[MySQL] Table ${activeTable} empty. Seeding initial orders into MySQL database...`);
         for (const order of db.orders) {
           await saveOrderToMssqlPool(pool, order);
         }
       }
 
-      // Check count in Configuration table; if empty and we have settings, populate MS SQL
-      const cfgCountRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Configuration]');
-      const cfgCount = cfgCountRes.recordset[0]?.cnt || 0;
+      // Check count in Configuration table; if empty and we have settings, populate MySQL
+      const [cfgCountRows] = await pool.query<mysql.RowDataPacket[]>('SELECT COUNT(*) AS cnt FROM `Configuration`');
+      const cfgCount = Number(cfgCountRows[0]?.cnt) || 0;
       if (cfgCount === 0 && db.settings) {
-        console.log('[MSSQL] Table [dbo].[Configuration] empty. Writing initial settings into MS SQL database...');
+        console.log('[MySQL] Table `Configuration` empty. Writing initial settings into MySQL database...');
         await saveSettingsToMssqlPool(pool, db.settings);
       } else {
-        // Load live settings from [dbo].[Configuration] table so EasyPost credentials and configs are active immediately
         const liveDbSettings = await fetchSettingsFromMssql();
         if (liveDbSettings) {
-          console.log('[MSSQL] Loaded application settings and EasyPost credentials from [dbo].[Configuration]');
+          console.log('[MySQL] Loaded application settings and EasyPost credentials from `Configuration`');
           db.settings = { ...db.settings, ...liveDbSettings };
         }
       }
 
       // Check count in Users table; if empty, seed default admin user
-      const userCountRes = await pool.request().query('SELECT COUNT(*) as cnt FROM [dbo].[Users]');
-      const userCount = userCountRes.recordset[0]?.cnt || 0;
+      const [userCountRows] = await pool.query<mysql.RowDataPacket[]>('SELECT COUNT(*) AS cnt FROM `Users`');
+      const userCount = Number(userCountRows[0]?.cnt) || 0;
       if (userCount === 0) {
-        console.log('[MSSQL] Table [dbo].[Users] empty. Seeding initial default user into MS SQL database...');
+        console.log('[MySQL] Table `Users` empty. Seeding initial default user into MySQL database...');
         const adminHash = hashPassword('shipstation123');
-        await pool.request()
-          .input('usr', sql.NVarChar, 'admin')
-          .input('hash', sql.NVarChar, adminHash)
-          .input('fn', sql.NVarChar, 'System Administrator')
-          .input('role', sql.NVarChar, 'Admin')
-          .query(`
-            INSERT INTO [dbo].[Users] ([Username], [PasswordHash], [FullName], [Role], [CreatedAt])
-            VALUES (@usr, @hash, @fn, @role, GETDATE());
-          `);
+        await pool.execute(
+          'INSERT INTO `Users` (`Username`, `PasswordHash`, `FullName`, `Role`, `CreatedAt`) VALUES (?, ?, ?, ?, NOW())',
+          ['admin', adminHash, 'System Administrator', 'Admin']
+        );
       }
 
       mssqlTablesEnsured = true;
     } catch (err) {
-      console.error('[MSSQL] Error verifying/creating MS SQL tables:', err);
+      console.error('[MySQL] Error verifying/creating MySQL tables:', err);
     }
   })().finally(() => {
     ensureTablesPromise = null;
@@ -832,7 +911,7 @@ function getReturnAddress(settings?: AppSetting): ReturnAddress {
   };
 }
 
-// Helper: Safely parse and retrieve active events from database settings (dbo.Configuration -> homeEventsList)
+// Helper: Safely parse and retrieve active events from database settings (`Configuration` -> homeEventsList)
 function getActiveHomeEvents(settings?: AppSetting): HomeEvent[] {
   const raw = settings?.homeEventsList ?? db?.settings?.homeEventsList;
   if (!raw) return [];
@@ -850,51 +929,53 @@ function getActiveHomeEvents(settings?: AppSetting): HomeEvent[] {
   return list.filter((e) => e && e.isActive !== false && (e.name || e.locationAndDate));
 }
 
-// Save or Update Configuration settings key-value entries in MS SQL Server [dbo].[Configuration]
-async function saveSettingsToMssqlPool(pool: sql.ConnectionPool, settings: AppSetting) {
-  if (!pool || !pool.connected) return;
+// Save or Update Configuration settings key-value entries in MySQL `Configuration`
+async function saveSettingsToMssqlPool(pool: mysql.Pool, settings: AppSetting) {
+  if (!pool) return;
   try {
     const keys = Object.keys(settings);
     if (keys.length === 0) return;
 
-    const req = pool.request();
-    let batchSql = '';
-    keys.forEach((key, index) => {
+    for (const key of keys) {
       const rawVal = (settings as any)[key];
       const valStr = typeof rawVal === 'object' ? JSON.stringify(rawVal) : String(rawVal ?? '');
-      req.input(`k_${index}`, sql.NVarChar(100), key);
-      req.input(`v_${index}`, sql.NVarChar(sql.MAX), valStr);
-      batchSql += `
-        MERGE [dbo].[Configuration] AS target
-        USING (SELECT @k_${index} AS ConfigKey, @v_${index} AS ConfigValue) AS source
-        ON (target.ConfigKey = source.ConfigKey)
-        WHEN MATCHED THEN
-            UPDATE SET ConfigValue = source.ConfigValue
-        WHEN NOT MATCHED THEN
-            INSERT (ConfigKey, ConfigValue) VALUES (source.ConfigKey, source.ConfigValue);
-      `;
-    });
-
-    await req.query(batchSql);
-    console.log('[MSSQL] Successfully saved settings key-values to [dbo].[Configuration] table.');
+      await pool.execute(
+        'INSERT INTO `Configuration` (`ConfigKey`, `ConfigValue`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `ConfigValue` = VALUES(`ConfigValue`)',
+        [key, valStr]
+      );
+    }
+    console.log('[MySQL] Successfully saved settings key-values to `Configuration` table.');
   } catch (err) {
-    console.error('[MSSQL] Error in saveSettingsToMssqlPool:', err);
+    console.error('[MySQL] Error in saveSettingsToMssqlPool:', err);
   }
 }
 
-// Fetch Configuration settings from MS SQL Server [dbo].[Configuration]
+// Fetch Configuration settings from MySQL `Configuration`
 async function fetchSettingsFromMssql(): Promise<Partial<AppSetting> | null> {
   const pool = await getMssqlPool();
   if (!pool) return null;
 
   try {
-    const result = await pool.request().query('SELECT [ConfigKey], [ConfigValue] FROM [dbo].[Configuration]');
-    if (!result.recordset || result.recordset.length === 0) return null;
+    const [rows] = await pool.query<mysql.RowDataPacket[]>('SELECT `ConfigKey`, `ConfigValue` FROM `Configuration`');
+    if (!rows || rows.length === 0) return null;
 
     const loadedSettings: any = {};
-    for (const row of result.recordset) {
+    for (const row of rows) {
       const key = row.ConfigKey;
       let val: any = row.ConfigValue;
+
+      // Skip overwriting active MySQL connection settings with legacy MSSQL values from Configuration table
+      if (
+        key === 'mssqlServer' ||
+        key === 'mssqlPort' ||
+        key === 'mssqlDatabase' ||
+        key === 'mssqlUser' ||
+        key === 'mssqlPassword' ||
+        key === 'mssqlConnected' ||
+        key === 'mssqlError'
+      ) {
+        continue;
+      }
 
       if (val === 'true') val = true;
       else if (val === 'false') val = false;
@@ -908,73 +989,62 @@ async function fetchSettingsFromMssql(): Promise<Partial<AppSetting> | null> {
     }
     return loadedSettings;
   } catch (err) {
-    console.error('[MSSQL] Error fetching settings from [dbo].[Configuration]:', err);
+    console.error('[MySQL] Error fetching settings from `Configuration`:', err);
     return null;
   }
 }
 
-// Save or Update a single package in MS SQL Server [dbo].[Package]
-async function savePackageToMssqlPool(pool: sql.ConnectionPool, pkg: PackageType) {
+// Save or Update a single package in MySQL `Package`
+async function savePackageToMssqlPool(pool: mysql.Pool, pkg: PackageType) {
   try {
-    const req = pool.request();
     const numericId = parseInt(pkg.id, 10);
     const validNumId = !isNaN(numericId) && numericId > 0;
+    const weight = pkg.weightEmptyOz || 0;
 
-    req.input('id', sql.Int, validNumId ? numericId : -1);
-    req.input('name', sql.NVarChar(100), pkg.name);
-    req.input('length', sql.Decimal(10, 2), pkg.length);
-    req.input('width', sql.Decimal(10, 2), pkg.width);
-    req.input('height', sql.Decimal(10, 2), pkg.height);
-    req.input('weight', sql.Decimal(10, 2), pkg.weightEmptyOz || 0);
+    if (validNumId) {
+      const [existingById] = await pool.execute<mysql.RowDataPacket[]>(
+        'SELECT 1 FROM `Package` WHERE `Id` = ? LIMIT 1',
+        [numericId]
+      );
+      if (existingById.length > 0) {
+        await pool.execute(
+          'UPDATE `Package` SET `Name` = ?, `Length` = ?, `Width` = ?, `Height` = ?, `Weight` = ? WHERE `Id` = ?',
+          [pkg.name, pkg.length, pkg.width, pkg.height, weight, numericId]
+        );
+        return;
+      }
+    }
 
-    await req.query(`
-      IF (@id > 0 AND EXISTS (SELECT 1 FROM [dbo].[Package] WHERE [Id] = @id))
-      BEGIN
-          UPDATE [dbo].[Package] SET
-              [Name] = @name,
-              [Length] = @length,
-              [Width] = @width,
-              [Height] = @height,
-              [Weight] = @weight
-          WHERE [Id] = @id;
-      END
-      ELSE IF (EXISTS (SELECT 1 FROM [dbo].[Package] WHERE [Name] = @name))
-      BEGIN
-          UPDATE [dbo].[Package] SET
-              [Length] = @length,
-              [Width] = @width,
-              [Height] = @height,
-              [Weight] = @weight
-          WHERE [Name] = @name;
-      END
-      ELSE
-      BEGIN
-          INSERT INTO [dbo].[Package] (
-              [Name], [Length], [Width], [Height], [Weight]
-          ) VALUES (
-              @name, @length, @width, @height, @weight
-          );
-      END
-    `);
+    const [existingByName] = await pool.execute<mysql.RowDataPacket[]>(
+      'SELECT 1 FROM `Package` WHERE `Name` = ? LIMIT 1',
+      [pkg.name]
+    );
+    if (existingByName.length > 0) {
+      await pool.execute(
+        'UPDATE `Package` SET `Length` = ?, `Width` = ?, `Height` = ?, `Weight` = ? WHERE `Name` = ?',
+        [pkg.length, pkg.width, pkg.height, weight, pkg.name]
+      );
+    } else {
+      await pool.execute(
+        'INSERT INTO `Package` (`Name`, `Length`, `Width`, `Height`, `Weight`) VALUES (?, ?, ?, ?, ?)',
+        [pkg.name, pkg.length, pkg.width, pkg.height, weight]
+      );
+    }
   } catch (err) {
-    console.error('[MSSQL] Error in savePackageToMssqlPool:', err);
+    console.error('[MySQL] Error in savePackageToMssqlPool:', err);
   }
 }
 
-// Fetch Packages directly from MS SQL Server [dbo].[Package] table
+// Fetch Packages directly from MySQL `Package` table
 async function fetchPackagesFromMssql(): Promise<PackageType[] | null> {
   const pool = await getMssqlPool();
   if (!pool) return null;
 
   try {
     await ensureMssqlTables(pool);
-    const result = await pool.request().query(`
-      SELECT *
-      FROM [dbo].[Package]
-      ORDER BY [Id] ASC
-    `);
+    const [rows] = await pool.query<mysql.RowDataPacket[]>('SELECT * FROM `Package` ORDER BY `Id` ASC');
 
-    const packages: PackageType[] = result.recordset.map((row: any) => ({
+    const packages: PackageType[] = rows.map((row: any) => ({
       id: String(row.Id),
       code: `PKG-${row.Id}`,
       name: String(row.Name),
@@ -992,7 +1062,7 @@ async function fetchPackagesFromMssql(): Promise<PackageType[] | null> {
     }
     return packages;
   } catch (err: any) {
-    console.error('[MSSQL] Error fetching packages from MS SQL [dbo].[Package]:', err);
+    console.error('[MySQL] Error fetching packages from MySQL `Package`:', err);
     return null;
   }
 }
@@ -1057,20 +1127,18 @@ const initialPackagingRules: BobbinPackagingRule[] = [
   },
 ];
 
-// Fetch BobbinPackagingRules from MS SQL Server [dbo].[BobbinPackagingRules]
+// Fetch BobbinPackagingRules from MySQL `BobbinPackagingRules`
 async function fetchPackagingRulesFromMssql(): Promise<BobbinPackagingRule[] | null> {
   const pool = await getMssqlPool();
   if (!pool) return null;
 
   try {
     await ensureMssqlTables(pool);
-    const result = await pool.request().query(`
-      SELECT [Id], [Pattern], [Classification], [MaxCubeQty], [MaxRateBoxQty], [Notes], [CreatedAt], [UpdatedAt]
-      FROM [dbo].[BobbinPackagingRules]
-      ORDER BY [Id] ASC
-    `);
+    const [rows] = await pool.query<mysql.RowDataPacket[]>(
+      'SELECT `Id`, `Pattern`, `Classification`, `MaxCubeQty`, `MaxRateBoxQty`, `Notes`, `CreatedAt`, `UpdatedAt` FROM `BobbinPackagingRules` ORDER BY `Id` ASC'
+    );
 
-    const rules: BobbinPackagingRule[] = result.recordset.map((row: any) => ({
+    const rules: BobbinPackagingRule[] = rows.map((row: any) => ({
       id: row.Id,
       pattern: String(row.Pattern || ''),
       classification: String(row.Classification || 'Standard'),
@@ -1086,67 +1154,63 @@ async function fetchPackagingRulesFromMssql(): Promise<BobbinPackagingRule[] | n
     }
     return rules;
   } catch (err: any) {
-    console.error('[MSSQL] Error fetching BobbinPackagingRules from MS SQL:', err);
+    console.error('[MySQL] Error fetching BobbinPackagingRules from MySQL:', err);
     return null;
   }
 }
 
-// Save or Update a single packaging rule in MS SQL Server [dbo].[BobbinPackagingRules]
-async function savePackagingRuleToMssqlPool(pool: sql.ConnectionPool, rule: Partial<BobbinPackagingRule>): Promise<BobbinPackagingRule | null> {
+// Save or Update a single packaging rule in MySQL `BobbinPackagingRules`
+async function savePackagingRuleToMssqlPool(pool: mysql.Pool, rule: Partial<BobbinPackagingRule>): Promise<BobbinPackagingRule | null> {
   try {
-    const req = pool.request();
     const numericId = rule.id ? parseInt(String(rule.id), 10) : -1;
     const validNumId = !isNaN(numericId) && numericId > 0;
-
-    req.input('id', sql.Int, validNumId ? numericId : -1);
-    req.input('pattern', sql.NVarChar(255), rule.pattern || '');
-    req.input('classification', sql.NVarChar(50), rule.classification || 'Standard');
-    req.input('maxCubeQty', sql.Int, Number(rule.maxCubeQty) || 0);
-    req.input('maxRateBoxQty', sql.Int, Number(rule.maxRateBoxQty) || 0);
-    req.input('notes', sql.NVarChar(sql.MAX), rule.notes || '');
+    const pattern = rule.pattern || '';
+    const classification = rule.classification || 'Standard';
+    const maxCubeQty = Number(rule.maxCubeQty) || 0;
+    const maxRateBoxQty = Number(rule.maxRateBoxQty) || 0;
+    const notes = rule.notes || '';
 
     if (validNumId) {
-      await req.query(`
-        UPDATE [dbo].[BobbinPackagingRules] SET
-          [Pattern] = @pattern,
-          [Classification] = @classification,
-          [MaxCubeQty] = @maxCubeQty,
-          [MaxRateBoxQty] = @maxRateBoxQty,
-          [Notes] = @notes,
-          [UpdatedAt] = sysutcdatetime()
-        WHERE [Id] = @id;
-      `);
+      await pool.execute(
+        `UPDATE \`BobbinPackagingRules\`
+         SET \`Pattern\` = ?,
+             \`Classification\` = ?,
+             \`MaxCubeQty\` = ?,
+             \`MaxRateBoxQty\` = ?,
+             \`Notes\` = ?,
+             \`UpdatedAt\` = NOW()
+         WHERE \`Id\` = ?`,
+        [pattern, classification, maxCubeQty, maxRateBoxQty, notes, numericId]
+      );
       return {
         id: numericId,
-        pattern: rule.pattern || '',
-        classification: rule.classification || 'Standard',
-        maxCubeQty: Number(rule.maxCubeQty) || 0,
-        maxRateBoxQty: Number(rule.maxRateBoxQty) || 0,
-        notes: rule.notes || '',
+        pattern,
+        classification,
+        maxCubeQty,
+        maxRateBoxQty,
+        notes,
       };
     } else {
-      const insertRes = await req.query(`
-        INSERT INTO [dbo].[BobbinPackagingRules] (
-          [Pattern], [Classification], [MaxCubeQty], [MaxRateBoxQty], [Notes]
-        ) OUTPUT INSERTED.Id, INSERTED.CreatedAt, INSERTED.UpdatedAt
-        VALUES (
-          @pattern, @classification, @maxCubeQty, @maxRateBoxQty, @notes
-        );
-      `);
-      const inserted = insertRes.recordset[0];
+      const [insertRes] = await pool.execute<mysql.ResultSetHeader>(
+        `INSERT INTO \`BobbinPackagingRules\` (
+           \`Pattern\`, \`Classification\`, \`MaxCubeQty\`, \`MaxRateBoxQty\`, \`Notes\`, \`CreatedAt\`, \`UpdatedAt\`
+         ) VALUES (?, ?, ?, ?, ?, NOW(), NOW())`,
+        [pattern, classification, maxCubeQty, maxRateBoxQty, notes]
+      );
+      const nowIso = new Date().toISOString();
       return {
-        id: inserted?.Id || Date.now(),
-        pattern: rule.pattern || '',
-        classification: rule.classification || 'Standard',
-        maxCubeQty: Number(rule.maxCubeQty) || 0,
-        maxRateBoxQty: Number(rule.maxRateBoxQty) || 0,
-        notes: rule.notes || '',
-        createdAt: inserted?.CreatedAt ? new Date(inserted.CreatedAt).toISOString() : undefined,
-        updatedAt: inserted?.UpdatedAt ? new Date(inserted.UpdatedAt).toISOString() : undefined,
+        id: insertRes.insertId || Date.now(),
+        pattern,
+        classification,
+        maxCubeQty,
+        maxRateBoxQty,
+        notes,
+        createdAt: nowIso,
+        updatedAt: nowIso,
       };
     }
   } catch (err: any) {
-    console.error('[MSSQL] Error in savePackagingRuleToMssqlPool:', err);
+    console.error('[MySQL] Error in savePackagingRuleToMssqlPool:', err);
     throw err;
   }
 }
@@ -1206,7 +1270,7 @@ function determineBoxForOrder(
       return {
         boxId: null,
         boxName: null,
-        error: `Box Size Undetermined: "${item.name}" does not match any bobbin packaging rule in [dbo].[BobbinPackagingRules].`,
+        error: `Box Size Undetermined: "${item.name}" does not match any bobbin packaging rule in \`BobbinPackagingRules\`.`,
       };
     }
   }
@@ -1284,8 +1348,6 @@ function determineBoxForOrder(
   }
 
   // Rule 4: Mixed bulky + standard bobbins
-  // "The Spinolution 8oz, and Louet S10 will fit a cube if there is only 1. Between 2-4 will fit in a RateBox. More will have to go in a Large Box."
-  // When mixed, cannot fit in Cube.
   const equivalentUnits = (bulkyQty * 2.5) + standardQty;
   if (equivalentUnits <= 10 && bulkyQty <= 4) {
     return {
@@ -1301,13 +1363,10 @@ function determineBoxForOrder(
   };
 }
 
-// Save or Update a single order in MS SQL Server ([dbo].[Shipping] or [dbo].[shippingdev])
-async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrder) {
+// Save or Update a single order in MySQL (`Shipping` or `shippingdev`) and sync `orderstatus`
+async function saveOrderToMssqlPool(pool: mysql.Pool, order: ShippingOrder) {
   try {
     const tableName = getShippingTableName();
-    const req = pool.request();
-    (req as any).timeout = 30000;
-
     const numericId = parseInt(order.id, 10);
     const validNumId = !isNaN(numericId) && numericId > 0;
 
@@ -1329,151 +1388,193 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
 
     const hasLabel = labelBuffer && labelBuffer.length > 0 ? 1 : 0;
 
-    req.input('id', sql.Int, validNumId ? numericId : -1);
-    req.input('name', sql.NVarChar(sql.MAX), order.recipientName);
-    req.input('address1', sql.NVarChar(sql.MAX), order.street1);
-    req.input('address2', sql.NVarChar(sql.MAX), order.street2 || '');
-    req.input('city', sql.NVarChar(sql.MAX), order.city);
-    req.input('state', sql.NVarChar(sql.MAX), order.state);
-    req.input('postalCode', sql.NVarChar(sql.MAX), order.zip);
-    req.input('country', sql.NVarChar(sql.MAX), order.country || 'US');
-    req.input('phone', sql.NVarChar(sql.MAX), order.phone || '');
-    req.input('email', sql.NVarChar(sql.MAX), order.email || '');
-    req.input('createdAt', sql.DateTime2(7), new Date(order.orderDate));
+    const nameVal = order.recipientName;
+    const address1Val = order.street1;
+    const address2Val = order.street2 || '';
+    const cityVal = order.city;
+    const stateVal = order.state;
+    const postalCodeVal = order.zip;
+    const countryVal = order.country || 'US';
+    const phoneVal = order.phone || '';
+    const emailVal = order.email || '';
+    const createdAtVal = new Date(order.orderDate);
     const orderDetailsString = (order.items && order.items.length > 0)
-      ? order.items.map(i => `${i.quantity}, ${i.name}, ${i.itemType || ''}, ${i.color || ''}`).join(' | ')
+      ? order.items.map((i) => `${i.quantity}, ${i.name}, ${i.itemType || ''}, ${i.color || ''}`).join(' | ')
       : null;
-    req.input('OrderDetails', sql.NVarChar(sql.MAX), orderDetailsString);
-    req.input('receiptID', sql.NVarChar(sql.MAX), order.orderNumber);
+    const receiptIdVal = order.orderNumber;
+    const transactionIdVal = (order as any).transactionId || order.orderNumber;
     const carrierVal = (order.carrier || 'USPS').trim();
     const serviceVal = (order.serviceLevel || 'Priority').trim();
-    req.input('Carrier', sql.NVarChar(sql.MAX), carrierVal);
-    req.input('Service', sql.NVarChar(sql.MAX), serviceVal);
-    req.input('trackingNumber', sql.NVarChar(sql.MAX), order.trackingNumber || null);
+    const trackingNumberVal = order.trackingNumber || null;
+
     const rawOrderDbStatus = (order.dbStatus || order.shippingStatus || '').toString().trim();
-    let mssqlStatus = 'New';
-    if (order.status === 'shipped' || (order.trackingNumber && String(order.trackingNumber).trim() !== '')) {
-      mssqlStatus = 'shipped';
+    let mysqlStatus = 'New';
+    const isFulfilled = order.status === 'shipped' || Boolean(order.trackingNumber && String(order.trackingNumber).trim() !== '');
+    if (isFulfilled) {
+      mysqlStatus = 'shipped';
     } else if (rawOrderDbStatus) {
-      mssqlStatus = rawOrderDbStatus;
+      mysqlStatus = rawOrderDbStatus;
     } else {
-      mssqlStatus = 'New';
+      mysqlStatus = 'New';
     }
-    req.input('status', sql.NVarChar(sql.MAX), mssqlStatus);
-    req.input('shippingCost', sql.Decimal(18, 2), order.shippingCost || null);
-    req.input('shippingDate', sql.DateTime2(7), order.shippingDate ? new Date(order.shippingDate) : null);
-    req.input('platform', sql.NVarChar(sql.MAX), order.marketplace || order.company || 'Web App');
-    req.input('TotalWeight', sql.Float, order.weightOz || 16);
-    req.input('box', sql.VarChar(50), order.boxId || null);
-    req.input('easypostShipmentId', sql.NVarChar(64), order.easypostShipmentId || null);
-    req.input('marketplacenotified', sql.NVarChar(50), order.marketplacenotified || 'No');
 
-    // Stage 1: Always persist metadata and tracking info first (fast, ~1KB query)
-    await req.query(`
-      IF (@id > 0 AND EXISTS (SELECT 1 FROM ${tableName} WHERE [Id] = @id))
-      BEGIN
-          UPDATE ${tableName} SET
-              [name] = @name,
-              [address1] = @address1,
-              [address2] = @address2,
-              [city] = @city,
-              [state] = @state,
-              [postalCode] = @postalCode,
-              [country] = @country,
-              [phone] = @phone,
-              [email] = @email,
-              [OrderDetails] = @OrderDetails,
-              [receiptID] = @receiptID,
-              [Carrier] = @Carrier,
-              [Service] = @Service,
-              [trackingNumber] = @trackingNumber,
-              [status] = @status,
-              [shippingCost] = @shippingCost,
-              [shippingDate] = @shippingDate,
-              [platform] = @platform,
-              [TotalWeight] = @TotalWeight,
-              [box] = @box,
-              [easypostShipmentId] = @easypostShipmentId,
-              [marketplacenotified] = @marketplacenotified
-          WHERE [Id] = @id;
-      END
-      ELSE IF (@receiptID IS NOT NULL AND EXISTS (SELECT 1 FROM ${tableName} WHERE [receiptID] = @receiptID))
-      BEGIN
-          UPDATE ${tableName} SET
-              [name] = @name,
-              [address1] = @address1,
-              [address2] = @address2,
-              [city] = @city,
-              [state] = @state,
-              [postalCode] = @postalCode,
-              [country] = @country,
-              [phone] = @phone,
-              [email] = @email,
-              [OrderDetails] = @OrderDetails,
-              [Carrier] = @Carrier,
-              [Service] = @Service,
-              [trackingNumber] = @trackingNumber,
-              [status] = @status,
-              [shippingCost] = @shippingCost,
-              [shippingDate] = @shippingDate,
-              [platform] = @platform,
-              [TotalWeight] = @TotalWeight,
-              [box] = @box,
-              [easypostShipmentId] = @easypostShipmentId,
-              [marketplacenotified] = @marketplacenotified
-          WHERE [receiptID] = @receiptID;
-      END
-      ELSE
-      BEGIN
-          INSERT INTO ${tableName} (
-              [name], [address1], [address2], [city], [state], [postalCode], [country],
-              [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
-              [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
-              [TotalWeight], [box], [easypostShipmentId], [marketplacenotified]
-          ) VALUES (
-              @name, @address1, @address2, @city, @state, @postalCode, @country,
-              @phone, @email, @createdAt, @OrderDetails, @receiptID, @Carrier, @Service,
-              @trackingNumber, @status, @shippingCost, @shippingDate, @platform,
-              @TotalWeight, @box, @easypostShipmentId, @marketplacenotified
-          );
-      END
-    `);
+    const shippingCostVal = order.shippingCost ?? null;
+    const shippingDateVal = order.shippingDate ? new Date(order.shippingDate) : null;
+    const fulfilledVal = isFulfilled ? (shippingDateVal || new Date()) : null;
+    const platformVal = order.marketplace || order.company || 'Web App';
+    const totalWeightVal = order.weightOz || 16;
+    const boxVal = order.boxId || null;
+    const easypostShipmentIdVal = order.easypostShipmentId || null;
+    const marketplaceNotifiedVal = order.marketplacenotified || 'No';
 
-    // Stage 2: Store LabelData binary if present (handles quota / timeout gracefully)
+    let matchedById = false;
+    if (validNumId) {
+      const [idRows] = await pool.execute<mysql.RowDataPacket[]>(
+        `SELECT 1 FROM ${tableName} WHERE \`Id\` = ? LIMIT 1`,
+        [numericId]
+      );
+      matchedById = idRows.length > 0;
+    }
+
+    if (matchedById) {
+      await pool.execute(
+        `UPDATE ${tableName} SET
+          \`Name\` = ?,
+          \`Street1\` = ?,
+          \`Street2\` = ?,
+          \`City\` = ?,
+          \`State\` = ?,
+          \`Zip\` = ?,
+          \`Country\` = ?,
+          \`OrderNumber\` = ?,
+          \`Override\` = ?,
+          \`Fulfilled\` = ?,
+          \`address1\` = ?,
+          \`address2\` = ?,
+          \`postalCode\` = ?,
+          \`phone\` = ?,
+          \`email\` = ?,
+          \`OrderDetails\` = ?,
+          \`receiptID\` = ?,
+          \`Carrier\` = ?,
+          \`Service\` = ?,
+          \`trackingNumber\` = ?,
+          \`status\` = ?,
+          \`shippingCost\` = ?,
+          \`shippingDate\` = ?,
+          \`platform\` = ?,
+          \`TotalWeight\` = ?,
+          \`box\` = ?,
+          \`easypostShipmentId\` = ?,
+          \`marketplacenotified\` = ?
+        WHERE \`Id\` = ?`,
+        [
+          nameVal, address1Val, address2Val, cityVal, stateVal, postalCodeVal, countryVal,
+          receiptIdVal, boxVal, fulfilledVal,
+          address1Val, address2Val, postalCodeVal, phoneVal, emailVal,
+          orderDetailsString, receiptIdVal, carrierVal, serviceVal, trackingNumberVal,
+          mysqlStatus, shippingCostVal, shippingDateVal, platformVal,
+          totalWeightVal, boxVal, easypostShipmentIdVal, marketplaceNotifiedVal,
+          numericId,
+        ]
+      );
+    } else {
+      const [receiptRows] = await pool.execute<mysql.RowDataPacket[]>(
+        `SELECT \`Id\` FROM ${tableName} WHERE \`receiptID\` = ? OR \`OrderNumber\` = ? LIMIT 1`,
+        [receiptIdVal, receiptIdVal]
+      );
+
+      if (receiptRows.length > 0) {
+        await pool.execute(
+          `UPDATE ${tableName} SET
+            \`Name\` = ?,
+            \`Street1\` = ?,
+            \`Street2\` = ?,
+            \`City\` = ?,
+            \`State\` = ?,
+            \`Zip\` = ?,
+            \`Country\` = ?,
+            \`OrderNumber\` = ?,
+            \`Override\` = ?,
+            \`Fulfilled\` = ?,
+            \`address1\` = ?,
+            \`address2\` = ?,
+            \`postalCode\` = ?,
+            \`phone\` = ?,
+            \`email\` = ?,
+            \`OrderDetails\` = ?,
+            \`Carrier\` = ?,
+            \`Service\` = ?,
+            \`trackingNumber\` = ?,
+            \`status\` = ?,
+            \`shippingCost\` = ?,
+            \`shippingDate\` = ?,
+            \`platform\` = ?,
+            \`TotalWeight\` = ?,
+            \`box\` = ?,
+            \`easypostShipmentId\` = ?,
+            \`marketplacenotified\` = ?
+          WHERE \`receiptID\` = ? OR \`OrderNumber\` = ?`,
+          [
+            nameVal, address1Val, address2Val, cityVal, stateVal, postalCodeVal, countryVal,
+            receiptIdVal, boxVal, fulfilledVal,
+            address1Val, address2Val, postalCodeVal, phoneVal, emailVal,
+            orderDetailsString, carrierVal, serviceVal, trackingNumberVal,
+            mysqlStatus, shippingCostVal, shippingDateVal, platformVal,
+            totalWeightVal, boxVal, easypostShipmentIdVal, marketplaceNotifiedVal,
+            receiptIdVal, receiptIdVal,
+          ]
+        );
+      } else {
+        await pool.execute(
+          `INSERT INTO ${tableName} (
+            \`TransactionId\`, \`Name\`, \`Street1\`, \`Street2\`, \`City\`, \`State\`, \`Zip\`, \`Country\`,
+            \`OrderNumber\`, \`CreateDate\`, \`Override\`, \`Fulfilled\`,
+            \`address1\`, \`address2\`, \`postalCode\`, \`phone\`, \`email\`,
+            \`createdAt\`, \`OrderDetails\`, \`receiptID\`, \`Carrier\`, \`Service\`,
+            \`trackingNumber\`, \`status\`, \`shippingCost\`, \`shippingDate\`, \`platform\`,
+            \`TotalWeight\`, \`box\`, \`easypostShipmentId\`, \`marketplacenotified\`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            transactionIdVal, nameVal, address1Val, address2Val, cityVal, stateVal, postalCodeVal, countryVal,
+            receiptIdVal, createdAtVal, boxVal, fulfilledVal,
+            address1Val, address2Val, postalCodeVal, phoneVal, emailVal,
+            createdAtVal, orderDetailsString, receiptIdVal, carrierVal, serviceVal,
+            trackingNumberVal, mysqlStatus, shippingCostVal, shippingDateVal, platformVal,
+            totalWeightVal, boxVal, easypostShipmentIdVal, marketplaceNotifiedVal,
+          ]
+        );
+      }
+    }
+
+    // When marking an order fulfilled, also execute the exact fulfillment updates against Shipping and orderstatus
+    if (isFulfilled) {
+      await markOrderFulfilledInMysql(pool, order);
+    }
+
+    // Stage 2: Store LabelData binary if present
     if (hasLabel && labelBuffer) {
       try {
-        const binReq = pool.request();
-        (binReq as any).timeout = 30000;
-        binReq.input('id', sql.Int, validNumId ? numericId : -1);
-        binReq.input('receiptID', sql.NVarChar(sql.MAX), order.orderNumber);
-        binReq.input('LabelData', sql.VarBinary(sql.MAX), labelBuffer);
-
-        await binReq.query(`
-          IF (@id > 0 AND EXISTS (SELECT 1 FROM ${tableName} WHERE [Id] = @id))
-          BEGIN
-              UPDATE ${tableName} SET [LabelData] = @LabelData WHERE [Id] = @id;
-          END
-          ELSE IF (@receiptID IS NOT NULL AND EXISTS (SELECT 1 FROM ${tableName} WHERE [receiptID] = @receiptID))
-          BEGIN
-              UPDATE ${tableName} SET [LabelData] = @LabelData WHERE [receiptID] = @receiptID;
-          END
-        `);
+        if (validNumId && matchedById) {
+          await pool.execute(`UPDATE ${tableName} SET \`LabelData\` = ? WHERE \`Id\` = ?`, [labelBuffer, numericId]);
+        } else if (receiptIdVal) {
+          await pool.execute(
+            `UPDATE ${tableName} SET \`LabelData\` = ? WHERE \`receiptID\` = ? OR \`OrderNumber\` = ?`,
+            [labelBuffer, receiptIdVal, receiptIdVal]
+          );
+        }
       } catch (binErr: any) {
-        console.warn(`[MSSQL] Notice storing LabelData binary for Order #${order.orderNumber} (order status is safely preserved):`, binErr?.message || binErr);
+        console.warn(`[MySQL] Notice storing LabelData binary for Order #${order.orderNumber} (order status is safely preserved):`, binErr?.message || binErr);
       }
     }
   } catch (err: any) {
-    console.warn(`[MSSQL] Non-fatal save notice for order #${order.orderNumber}:`, err?.message || err);
-    // If request failed with timeout, connection error, or cancel failure, reset active pool so next attempt connects fresh
+    console.warn(`[MySQL] Non-fatal save notice for order #${order.orderNumber}:`, err?.message || err);
     if (
-      err?.name === 'RequestError' ||
-      err?.code === 'ETIMEOUT' ||
+      err?.code === 'ETIMEDOUT' ||
       err?.code === 'ECONNCLOSED' ||
       err?.code === 'ECONNRESET' ||
-      String(err).includes('cancel request') ||
-      String(err).includes('timeout')
+      err?.code === 'PROTOCOL_CONNECTION_LOST'
     ) {
-      activeMssqlPool = null;
       db.settings.mssqlConnected = false;
     }
   }
@@ -1483,7 +1584,6 @@ async function saveOrderToMssqlPool(pool: sql.ConnectionPool, order: ShippingOrd
 // Format: Quantity, Item Name, Item Type, Color
 // Each row delimited with |
 // Blank Item Type appears as ",," (e.g., "1, Item Name,, Color")
-// Returns parsed items and flags parse issues
 function parseOrderDetailsString(rawDetails: string | null | undefined): { items: OrderItem[]; parseError?: string } {
   if (!rawDetails || typeof rawDetails !== 'string' || !rawDetails.trim()) {
     return {
@@ -1494,7 +1594,6 @@ function parseOrderDetailsString(rawDetails: string | null | undefined): { items
 
   const str = rawDetails.trim();
 
-  // Try JSON first if saved as JSON string
   if (str.startsWith('[') || str.startsWith('{')) {
     try {
       const parsed = JSON.parse(str);
@@ -1517,7 +1616,6 @@ function parseOrderDetailsString(rawDetails: string | null | undefined): { items
     }
   }
 
-  // Parse pipe delimited rows
   const rows = str.split('|').map((r) => r.trim()).filter(Boolean);
   if (rows.length === 0) {
     return {
@@ -1540,16 +1638,13 @@ function parseOrderDetailsString(rawDetails: string | null | undefined): { items
     let itemType = '';
     let color = '';
 
-    // Check if parts[0] starts with a quantity number (e.g., "2" or "2x")
     const firstNumMatch = parts[0].match(/^(\d+)/);
     if (firstNumMatch) {
-      // Format: Quantity, Item Name, Item Type, Color
       qty = parseInt(firstNumMatch[1], 10) || 1;
       itemName = parts[1] || `Item ${idx + 1}`;
       itemType = parts[2] || '';
       color = parts[3] || '';
     } else {
-      // Fallback for legacy format: Item Name, Item Type, Color, Quantity
       itemName = parts[0];
       if (parts.length >= 4) {
         itemType = parts[1];
@@ -1591,19 +1686,20 @@ function parseOrderDetailsString(rawDetails: string | null | undefined): { items
   return { items, parseError };
 }
 
-// Helper: Map raw database row from [dbo].[Shipping] / [dbo].[shippingdev] to ShippingOrder
-function mapDbRowToShippingOrder(row: any, tableName: string): ShippingOrder {
+// Helper: Map raw database row from `Shipping` / `shippingdev` to ShippingOrder
+function mapDbRowToShippingOrder(row: any, tableName: string, externalItems?: OrderItem[]): ShippingOrder {
   const validationErrors: string[] = [];
 
-  const rawCountry = (row.country ? String(row.country) : 'US').trim().toUpperCase();
+  const rawCountryVal = row.Country ?? row.country ?? 'US';
+  const rawCountry = String(rawCountryVal).trim().toUpperCase();
   const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
 
-  const street1 = row.address1 ? String(row.address1) : '';
-  const street2 = row.address2 ? String(row.address2) : '';
-  const city = row.city ? String(row.city) : '';
-  const state = row.state ? String(row.state) : '';
-  const zip = row.postalCode ? String(row.postalCode) : '';
-  const country = row.country ? String(row.country) : 'US';
+  const street1 = String(row.Street1 ?? row.street1 ?? row.address1 ?? '');
+  const street2 = String(row.Street2 ?? row.street2 ?? row.address2 ?? '');
+  const city = String(row.City ?? row.city ?? '');
+  const state = String(row.State ?? row.state ?? '');
+  const zip = String(row.Zip ?? row.zip ?? row.postalCode ?? '');
+  const country = String(row.Country ?? row.country ?? 'US');
 
   // Validate address syntax
   const addrVal = validateAddressWithEasyPost({ street1, street2, city, state, zip, country });
@@ -1617,23 +1713,33 @@ function mapDbRowToShippingOrder(row: any, tableName: string): ShippingOrder {
     validationErrors.push('Total Weight is set to 0 oz - Needs weight correction');
   }
 
-  // Parse OrderDetails
-  const { items, parseError } = parseOrderDetailsString(row.OrderDetails);
-  if (parseError) {
-    validationErrors.push(parseError);
+  // Parse OrderDetails or use items from `orderlist`
+  let items: OrderItem[] = [];
+  if (externalItems && externalItems.length > 0) {
+    items = externalItems;
+  } else if (row.OrderDetails) {
+    const parsed = parseOrderDetailsString(row.OrderDetails);
+    items = parsed.items;
+    if (parsed.parseError) {
+      validationErrors.push(parsed.parseError);
+    }
+  } else {
+    items = [{ id: 'item-1', sku: 'BOBBIN-STD', name: 'BlueCat Bobbin', quantity: 1, price: 0, weightOz: 4 }];
   }
 
   const rawTracking = row.trackingNumber ? String(row.trackingNumber).trim() : '';
   const hasTracking = Boolean(rawTracking.length > 0);
+  const fulfilledVal = row.Fulfilled ?? row.fulfilled;
+  const isFulfilled = Boolean(fulfilledVal);
   const rawStatus = (row.status || '').toString().trim();
   const rawStatusLower = rawStatus.toLowerCase();
 
   const validStatuses: OrderStatus[] = ['pending_validation', 'address_error', 'ready_to_ship', 'shipped', 'cancelled'];
   let statusVal: OrderStatus = 'pending_validation';
-  if (rawStatus && validStatuses.includes(rawStatus as OrderStatus)) {
-    statusVal = rawStatus as OrderStatus;
-  } else if (rawStatusLower === 'shipped' || hasTracking) {
+  if (isFulfilled || rawStatusLower === 'shipped' || hasTracking) {
     statusVal = 'shipped';
+  } else if (rawStatus && validStatuses.includes(rawStatus as OrderStatus)) {
+    statusVal = rawStatus as OrderStatus;
   } else if (rawStatusLower === 'complete' || rawStatusLower === 'completed' || rawStatusLower === 'new' || !rawStatusLower) {
     statusVal = 'ready_to_ship';
   }
@@ -1673,7 +1779,13 @@ function mapDbRowToShippingOrder(row: any, tableName: string): ShippingOrder {
       serviceLevelVal = rawShippingMethod;
     }
   } else if (rawService && String(rawService).trim()) {
-    serviceLevelVal = String(rawService).trim();
+    const svcStr = String(rawService).trim();
+    if (svcStr.toUpperCase().startsWith('UPS')) {
+      carrierVal = 'UPS';
+    } else if (svcStr.toUpperCase().startsWith('USPS')) {
+      carrierVal = 'USPS';
+    }
+    serviceLevelVal = svcStr;
   }
 
   const hasLabelBinary = Boolean(
@@ -1682,8 +1794,8 @@ function mapDbRowToShippingOrder(row: any, tableName: string): ShippingOrder {
     (row.LabelData && (Buffer.isBuffer(row.LabelData) ? row.LabelData.length > 0 : true))
   );
 
-  // Resolve Box Packaging from database row or BobbinPackagingRules
-  const rawBox = row.box ? String(row.box).trim() : '';
+  // Resolve Box Packaging from database row (`box` or `Override`) or BobbinPackagingRules
+  const rawBox = String(row.box ?? row.Override ?? row.override ?? '').trim();
   let resolvedBoxId = '';
   let resolvedBoxName = '';
 
@@ -1698,7 +1810,6 @@ function mapDbRowToShippingOrder(row: any, tableName: string): ShippingOrder {
     }
   }
 
-  // If no box is assigned or box was default pkg_medium, determine using BobbinPackagingRules
   if (!resolvedBoxId || resolvedBoxId === 'pkg_medium') {
     const determined = determineBoxForOrder(items, db.packagingRules || initialPackagingRules, db.packages || initialPackages);
     if (determined.boxId && !determined.error) {
@@ -1721,21 +1832,27 @@ function mapDbRowToShippingOrder(row: any, tableName: string): ShippingOrder {
     statusVal = 'address_error';
   }
 
-  return {
+  const orderNumberVal = row.OrderNumber ?? row.orderNumber ?? row.receiptID;
+  const recipientNameVal = row.Name ?? row.name;
+  const createDateVal = row.CreateDate ?? row.createDate ?? row.createdAt;
+  const shipDateVal = row.shippingDate ?? fulfilledVal;
+  const transactionIdVal = row.TransactionId ?? row.TransactionID ?? row.transactionId;
+
+  const mappedOrder: ShippingOrder & { transactionId?: string } = {
     id: String(row.Id),
-    orderNumber: row.receiptID ? String(row.receiptID) : `ORD-${row.Id}`,
-    recipientName: row.name ? String(row.name) : 'Valued Customer',
+    orderNumber: orderNumberVal ? String(orderNumberVal) : `ORD-${row.Id}`,
+    recipientName: recipientNameVal ? String(recipientNameVal) : 'Valued Customer',
     company: '',
     marketplace: row.platform ? String(row.platform) : '',
-    street1: row.address1 ? String(row.address1) : '',
-    street2: row.address2 ? String(row.address2) : '',
-    city: row.city ? String(row.city) : '',
-    state: row.state ? String(row.state) : '',
-    zip: row.postalCode ? String(row.postalCode) : '',
-    country: row.country ? String(row.country) : 'US',
+    street1,
+    street2,
+    city,
+    state,
+    zip,
+    country,
     phone: row.phone ? String(row.phone) : '',
     email: row.email ? String(row.email) : '',
-    orderDate: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString(),
+    orderDate: createDateVal ? new Date(createDateVal).toISOString() : new Date().toISOString(),
     status: statusVal,
     dbStatus: rawStatus || (hasTracking || statusVal === 'shipped' ? 'shipped' : 'New'),
     shippingStatus: rawStatus || (hasTracking || statusVal === 'shipped' ? 'shipped' : 'New'),
@@ -1754,7 +1871,7 @@ function mapDbRowToShippingOrder(row: any, tableName: string): ShippingOrder {
     carrier: carrierVal,
     serviceLevel: serviceLevelVal,
     shippingCost: row.shippingCost !== null && row.shippingCost !== undefined ? Number(row.shippingCost) : undefined,
-    shippingDate: row.shippingDate ? new Date(row.shippingDate).toISOString() : undefined,
+    shippingDate: shipDateVal ? new Date(shipDateVal).toISOString() : undefined,
     easypostShipmentId: row.easypostShipmentId ? String(row.easypostShipmentId) : undefined,
     marketplacenotified: row.marketplacenotified ? String(row.marketplacenotified) : 'No',
     labelUrl: `/api/orders/${String(row.Id)}/label.pdf`,
@@ -1765,10 +1882,15 @@ function mapDbRowToShippingOrder(row: any, tableName: string): ShippingOrder {
     env: getActiveAppEnv(),
     items,
   };
+
+  if (transactionIdVal) {
+    mappedOrder.transactionId = String(transactionIdVal);
+  }
+
+  return mappedOrder;
 }
 
-// Fetch Orders directly from MS SQL Server ([dbo].[Shipping] or [dbo].[shippingdev])
-// Fast query: Fetches all active queue orders + only the first 20 historical shipped records + total shipped count
+// Fetch Orders directly from MySQL (`Shipping` or `shippingdev`, plus `orderlist` and `orderstatus`)
 async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
   const pool = await getMssqlPool();
   if (!pool) return null;
@@ -1776,45 +1898,111 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
   try {
     await ensureMssqlTables(pool);
     const tableName = getShippingTableName();
+    const isProd = getActiveAppEnv() === 'prod';
 
-    // Query 1: Active orders (where trackingNumber IS NULL or empty string, and status is not shipped)
-    // Query 2: First 20 historical shipped records (avoids pulling hundreds of rows on app load)
-    // Query 3: Total count of historical shipped records
-    const multiQuery = `
-      SELECT 
-        [Id], [name], [address1], [address2], [city], [state], [postalCode], [country],
-        [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
-        [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
-        [TotalWeight], [box], [easypostShipmentId], [marketplacenotified],
-        CASE WHEN [LabelData] IS NOT NULL AND DATALENGTH([LabelData]) > 0 THEN 1 ELSE 0 END AS [hasLabel]
+    // 1. Run the unfulfilled shipments query on Shipping
+    let unfulfilledBaseRows: mysql.RowDataPacket[] = [];
+    if (isProd) {
+      try {
+        const [rows] = await pool.query<mysql.RowDataPacket[]>(
+          'SELECT Id, TransactionId, Name, Street1, Street2, City, State, Zip, Country, email, OrderNumber, CreateDate, Override, Service, Fulfilled FROM Shipping WHERE Fulfilled IS NULL ORDER BY CreateDate ASC'
+        );
+        unfulfilledBaseRows = rows;
+      } catch {}
+    }
+
+    // 2. Fetch full active rows with additional fulfillment metadata columns
+    const [activeFullRows] = await pool.query<mysql.RowDataPacket[]>(`
+      SELECT
+        \`Id\`, \`TransactionId\`, \`Name\`, \`Street1\`, \`Street2\`, \`City\`, \`State\`, \`Zip\`, \`Country\`,
+        \`OrderNumber\`, \`CreateDate\`, \`Override\`, \`Fulfilled\`,
+        \`address1\`, \`address2\`, \`postalCode\`, \`phone\`, \`email\`,
+        \`createdAt\`, \`OrderDetails\`, \`receiptID\`, \`Carrier\`, \`Service\`,
+        \`trackingNumber\`, \`status\`, \`shippingCost\`, \`shippingDate\`, \`platform\`,
+        \`TotalWeight\`, \`box\`, \`easypostShipmentId\`, \`marketplacenotified\`,
+        CASE WHEN \`LabelData\` IS NOT NULL AND OCTET_LENGTH(\`LabelData\`) > 0 THEN 1 ELSE 0 END AS \`hasLabel\`
       FROM ${tableName}
-      WHERE ([status] != 'shipped' OR [status] IS NULL) 
-        AND ([trackingNumber] IS NULL OR LTRIM(RTRIM([trackingNumber])) = '')
-      ORDER BY [Id] DESC;
+      WHERE \`Fulfilled\` IS NULL
+        AND (\`status\` != 'shipped' OR \`status\` IS NULL)
+        AND (\`trackingNumber\` IS NULL OR TRIM(\`trackingNumber\`) = '')
+      ORDER BY IFNULL(\`CreateDate\`, \`createdAt\`) ASC, \`Id\` DESC
+    `);
 
-      SELECT 
-        [Id], [name], [address1], [address2], [city], [state], [postalCode], [country],
-        [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
-        [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
-        [TotalWeight], [box], [easypostShipmentId], [marketplacenotified],
-        CASE WHEN [LabelData] IS NOT NULL AND DATALENGTH([LabelData]) > 0 THEN 1 ELSE 0 END AS [hasLabel]
+    // Merge unfulfilledBaseRows and activeFullRows by Id
+    const activeById = new Map<number, any>();
+    for (const r of unfulfilledBaseRows) {
+      activeById.set(Number(r.Id), { ...r });
+    }
+    for (const r of activeFullRows) {
+      const existing = activeById.get(Number(r.Id)) || {};
+      activeById.set(Number(r.Id), { ...existing, ...r });
+    }
+    const activeRows = Array.from(activeById.values());
+
+    // 3. Load line items from `orderlist` table if available
+    const orderItemsMap = new Map<string, OrderItem[]>();
+    try {
+      const [itemRows] = await pool.query<mysql.RowDataPacket[]>('SELECT * FROM `orderlist`');
+      for (const ir of itemRows) {
+        const key = String(ir.TransactionId ?? ir.TransactionID ?? ir.OrderNumber ?? ir.receiptID ?? '').trim();
+        if (!key) continue;
+        const list = orderItemsMap.get(key) || [];
+        const qty = Number(ir.Quantity ?? ir.quantity ?? ir.qty) || 1;
+        const itemName = String(ir.ItemName ?? ir.Name ?? ir.name ?? ir.ProductName ?? 'Bobbin');
+        const itemType = ir.ItemType ?? ir.Type ?? ir.itemType;
+        const color = ir.Color ?? ir.color;
+        list.push({
+          id: `ol-${ir.Id || list.length + 1}`,
+          sku: String(ir.SKU ?? ir.sku ?? itemName.slice(0, 8).toUpperCase()),
+          name: itemName,
+          itemType: itemType ? String(itemType) : undefined,
+          color: color ? String(color) : undefined,
+          quantity: qty,
+          price: Number(ir.Price ?? ir.price) || 0,
+          weightOz: Number(ir.WeightOz ?? ir.Weight) || 4 * qty,
+        });
+        orderItemsMap.set(key, list);
+      }
+    } catch {}
+
+    // 4. First 20 historical shipped records
+    const [shippedRows] = await pool.query<mysql.RowDataPacket[]>(`
+      SELECT
+        \`Id\`, \`TransactionId\`, \`Name\`, \`Street1\`, \`Street2\`, \`City\`, \`State\`, \`Zip\`, \`Country\`,
+        \`OrderNumber\`, \`CreateDate\`, \`Override\`, \`Fulfilled\`,
+        \`address1\`, \`address2\`, \`postalCode\`, \`phone\`, \`email\`,
+        \`createdAt\`, \`OrderDetails\`, \`receiptID\`, \`Carrier\`, \`Service\`,
+        \`trackingNumber\`, \`status\`, \`shippingCost\`, \`shippingDate\`, \`platform\`,
+        \`TotalWeight\`, \`box\`, \`easypostShipmentId\`, \`marketplacenotified\`,
+        CASE WHEN \`LabelData\` IS NOT NULL AND OCTET_LENGTH(\`LabelData\`) > 0 THEN 1 ELSE 0 END AS \`hasLabel\`
       FROM ${tableName}
-      WHERE ([status] = 'shipped' OR ([trackingNumber] IS NOT NULL AND LTRIM(RTRIM([trackingNumber])) != ''))
-      ORDER BY ISNULL([shippingDate], [createdAt]) DESC, [Id] DESC
-      OFFSET 0 ROWS FETCH NEXT 20 ROWS ONLY;
+      WHERE (\`Fulfilled\` IS NOT NULL OR \`status\` = 'shipped' OR (\`trackingNumber\` IS NOT NULL AND TRIM(\`trackingNumber\`) != ''))
+      ORDER BY IFNULL(\`Fulfilled\`, IFNULL(\`shippingDate\`, IFNULL(\`CreateDate\`, \`createdAt\`))) DESC, \`Id\` DESC
+      LIMIT 20 OFFSET 0
+    `);
 
+    // 5. Total count of historical shipped records
+    const [countRows] = await pool.query<mysql.RowDataPacket[]>(`
       SELECT COUNT(*) AS totalShippedCount
       FROM ${tableName}
-      WHERE ([status] = 'shipped' OR ([trackingNumber] IS NOT NULL AND LTRIM(RTRIM([trackingNumber])) != ''));
-    `;
+      WHERE (\`Fulfilled\` IS NOT NULL OR \`status\` = 'shipped' OR (\`trackingNumber\` IS NOT NULL AND TRIM(\`trackingNumber\`) != ''))
+    `);
+    const totalShippedCount = Number(countRows[0]?.totalShippedCount) ?? shippedRows.length;
 
-    const result = await pool.request().query(multiQuery);
-    const activeRows = result.recordsets[0] || [];
-    const shippedRows = result.recordsets[1] || [];
-    const totalShippedCount = result.recordsets[2]?.[0]?.totalShippedCount ?? shippedRows.length;
+    const resolveExternalItems = (row: any): OrderItem[] | undefined => {
+      const txId = String(row.TransactionId ?? row.TransactionID ?? '').trim();
+      const ordNum = String(row.OrderNumber ?? row.receiptID ?? '').trim();
+      if (txId && orderItemsMap.has(txId)) return orderItemsMap.get(txId);
+      if (ordNum && orderItemsMap.has(ordNum)) return orderItemsMap.get(ordNum);
+      return undefined;
+    };
 
-    const activeOrders: ShippingOrder[] = activeRows.map((row: any) => mapDbRowToShippingOrder(row, tableName));
-    const shippedOrders: ShippingOrder[] = shippedRows.map((row: any) => mapDbRowToShippingOrder(row, tableName));
+    const activeOrders: ShippingOrder[] = activeRows.map((row: any) =>
+      mapDbRowToShippingOrder(row, tableName, resolveExternalItems(row))
+    );
+    const shippedOrders: ShippingOrder[] = shippedRows.map((row: any) =>
+      mapDbRowToShippingOrder(row, tableName, resolveExternalItems(row))
+    );
     const combinedOrders = [...activeOrders, ...shippedOrders];
 
     db.orders = combinedOrders;
@@ -1826,12 +2014,12 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
     }
     return combinedOrders;
   } catch (err: any) {
-    console.error('[MSSQL] Error fetching orders from MS SQL:', err);
+    console.error('[MySQL] Error fetching orders from MySQL:', err);
     return null;
   }
 }
 
-// Fetch Paginated Shipped Historical Orders from MS SQL Server
+// Fetch Paginated Shipped Historical Orders from MySQL Server
 async function fetchShippedOrdersFromMssql(options: {
   page?: number;
   limit?: number;
@@ -1848,48 +2036,49 @@ async function fetchShippedOrdersFromMssql(options: {
     const limit = Math.max(1, Math.min(100, options.limit || 20));
     const offset = (page - 1) * limit;
 
-    const req = pool.request();
-    req.input('offset', sql.Int, offset);
-    req.input('limit', sql.Int, limit);
-
-    const whereClauses = ["([status] = 'shipped' OR ([trackingNumber] IS NOT NULL AND LTRIM(RTRIM([trackingNumber])) != ''))"];
+    const whereClauses = [
+      "(`Fulfilled` IS NOT NULL OR `status` = 'shipped' OR (`trackingNumber` IS NOT NULL AND TRIM(`trackingNumber`) != ''))",
+    ];
+    const params: any[] = [];
 
     if (options.carrier && options.carrier !== 'all') {
-      whereClauses.push("([Carrier] = @carrier OR [Carrier] LIKE @carrierLike)");
-      req.input('carrier', sql.NVarChar(50), options.carrier);
-      req.input('carrierLike', sql.NVarChar(50), `%${options.carrier}%`);
+      whereClauses.push('(`Carrier` = ? OR `Carrier` LIKE ?)');
+      params.push(options.carrier, `%${options.carrier}%`);
     }
 
     if (options.search && options.search.trim()) {
       const q = `%${options.search.trim()}%`;
       whereClauses.push(
-        "([receiptID] LIKE @search OR [name] LIKE @search OR [trackingNumber] LIKE @search OR [city] LIKE @search OR [box] LIKE @search OR [OrderDetails] LIKE @search)"
+        '(`receiptID` LIKE ? OR `OrderNumber` LIKE ? OR `Name` LIKE ? OR `trackingNumber` LIKE ? OR `City` LIKE ? OR `box` LIKE ? OR `OrderDetails` LIKE ?)'
       );
-      req.input('search', sql.NVarChar(sql.MAX), q);
+      params.push(q, q, q, q, q, q, q);
     }
 
     const whereSql = whereClauses.join(' AND ');
 
-    // 1. Total count query matching filters
-    const countRes = await req.query(`SELECT COUNT(*) AS totalCount FROM ${tableName} WHERE ${whereSql}`);
-    const totalCount = countRes.recordset[0]?.totalCount || 0;
+    const [countRows] = await pool.execute<mysql.RowDataPacket[]>(
+      `SELECT COUNT(*) AS totalCount FROM ${tableName} WHERE ${whereSql}`,
+      params
+    );
+    const totalCount = Number(countRows[0]?.totalCount) || 0;
 
-    // 2. Paginated rows query (skips bulky LabelData varbinary column for high performance)
-    const rowsRes = await req.query(`
-      SELECT 
-        [Id], [name], [address1], [address2], [city], [state], [postalCode], [country],
-        [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
-        [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
-        [TotalWeight], [box], [easypostShipmentId], [marketplacenotified],
-        CASE WHEN [LabelData] IS NOT NULL AND DATALENGTH([LabelData]) > 0 THEN 1 ELSE 0 END AS [hasLabel]
+    const [rows] = await pool.query<mysql.RowDataPacket[]>(
+      `SELECT
+        \`Id\`, \`TransactionId\`, \`Name\`, \`Street1\`, \`Street2\`, \`City\`, \`State\`, \`Zip\`, \`Country\`,
+        \`OrderNumber\`, \`CreateDate\`, \`Override\`, \`Fulfilled\`,
+        \`address1\`, \`address2\`, \`postalCode\`, \`phone\`, \`email\`,
+        \`createdAt\`, \`OrderDetails\`, \`receiptID\`, \`Carrier\`, \`Service\`,
+        \`trackingNumber\`, \`status\`, \`shippingCost\`, \`shippingDate\`, \`platform\`,
+        \`TotalWeight\`, \`box\`, \`easypostShipmentId\`, \`marketplacenotified\`,
+        CASE WHEN \`LabelData\` IS NOT NULL AND OCTET_LENGTH(\`LabelData\`) > 0 THEN 1 ELSE 0 END AS \`hasLabel\`
       FROM ${tableName}
       WHERE ${whereSql}
-      ORDER BY ISNULL([shippingDate], [createdAt]) DESC, [Id] DESC
-      OFFSET @offset ROWS
-      FETCH NEXT @limit ROWS ONLY
-    `);
+      ORDER BY IFNULL(\`Fulfilled\`, IFNULL(\`shippingDate\`, IFNULL(\`CreateDate\`, \`createdAt\`))) DESC, \`Id\` DESC
+      LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    );
 
-    const orders = rowsRes.recordset.map((row: any) => mapDbRowToShippingOrder(row, tableName));
+    const orders = rows.map((row: any) => mapDbRowToShippingOrder(row, tableName));
 
     return {
       orders,
@@ -1899,7 +2088,7 @@ async function fetchShippedOrdersFromMssql(options: {
       totalPages: Math.max(1, Math.ceil(totalCount / limit)),
     };
   } catch (err: any) {
-    console.error('[MSSQL] Error fetching paginated shipped orders:', err);
+    console.error('[MySQL] Error fetching paginated shipped orders:', err);
     return null;
   }
 }
@@ -1993,12 +2182,19 @@ const initialPackages: PackageType[] = [
   },
 ];
 
-// Initial Settings DB Seed with environment variable preference
-const envMssqlServer = process.env.MSSQL_SERVER || process.env.SQL_SERVER || process.env.DB_SERVER;
-const envMssqlPort = process.env.MSSQL_PORT || process.env.SQL_PORT || process.env.DB_PORT;
-const envMssqlDatabase = process.env.MSSQL_DATABASE || process.env.SQL_DATABASE || process.env.DB_DATABASE || process.env.MSSQL_DB || process.env.DB_NAME;
-const envMssqlUser = process.env.MSSQL_USER || process.env.SQL_USER || process.env.DB_USER || process.env.MSSQL_USERNAME;
-const envMssqlPassword = process.env.MSSQL_PASSWORD || process.env.SQL_PASSWORD || process.env.DB_PASSWORD;
+// Initial Settings DB Seed with MySQL environment variable preference
+const initialNormalizedMysql = normalizeMysqlConfig({
+  server: process.env.MYSQL_HOST,
+  port: process.env.MYSQL_PORT,
+  database: process.env.MYSQL_DATABASE,
+  user: process.env.MYSQL_USER,
+  password: process.env.MYSQL_PASSWORD || process.env.MSSQL_PASSWORD || process.env.SQL_PASSWORD || process.env.DB_PASSWORD,
+});
+const envMssqlServer = initialNormalizedMysql.host;
+const envMssqlPort = initialNormalizedMysql.port;
+const envMssqlDatabase = initialNormalizedMysql.database;
+const envMssqlUser = initialNormalizedMysql.user;
+const envMssqlPassword = initialNormalizedMysql.password;
 const envMssqlEncrypt = process.env.MSSQL_ENCRYPT !== undefined ? process.env.MSSQL_ENCRYPT === 'true' : undefined;
 
 const envEasyPostApiKey = process.env.EASYPOST_API_KEY;
@@ -2016,10 +2212,10 @@ const initialSettings: AppSetting = {
   easyPostProdApiKey: envEasyPostProdApiKey || '',
   easyPostMode: envEasyPostMode || (envAppEnv === 'dev' ? 'test' : 'production'),
   appEnv: envAppEnv || 'prod',
-  mssqlServer: envMssqlServer || 'sql-east.internal.company.net',
-  mssqlPort: envMssqlPort ? parseInt(envMssqlPort, 10) : 1433,
-  mssqlDatabase: envMssqlDatabase || 'ShippingProductionDB',
-  mssqlUser: envMssqlUser || 'shipstation_app_user',
+  mssqlServer: envMssqlServer || 'mysql8002.site4now.net',
+  mssqlPort: Number(envMssqlPort) || 3306,
+  mssqlDatabase: envMssqlDatabase || 'db_a7ef02_bluecatbobbins',
+  mssqlUser: envMssqlUser || 'a7ef02_bluecatbobbins',
   mssqlPassword: envMssqlPassword || '',
   mssqlEncrypt: envMssqlEncrypt ?? false,
   mssqlConnected: false,
@@ -2057,7 +2253,7 @@ const mergedSettings: AppSetting = {
 };
 
 if (envMssqlServer) mergedSettings.mssqlServer = envMssqlServer;
-if (envMssqlPort) mergedSettings.mssqlPort = parseInt(envMssqlPort, 10);
+if (envMssqlPort) mergedSettings.mssqlPort = Number(envMssqlPort) || 3306;
 if (envMssqlDatabase) mergedSettings.mssqlDatabase = envMssqlDatabase;
 if (envMssqlUser) mergedSettings.mssqlUser = envMssqlUser;
 if (envMssqlPassword) mergedSettings.mssqlPassword = envMssqlPassword;
@@ -2627,11 +2823,12 @@ async function findUser(username: string): Promise<User | null> {
   const pool = await getMssqlPool();
   if (pool) {
     try {
-      const res = await pool.request()
-        .input('usr', sql.NVarChar, normUsername)
-        .query('SELECT [Id], [Username], [PasswordHash], [FullName], [Role], [CreatedAt], [LastLoginAt] FROM [dbo].[Users] WHERE LOWER([Username]) = @usr');
-      if (res.recordset.length > 0) {
-        const row = res.recordset[0];
+      const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+        'SELECT `Id`, `Username`, `PasswordHash`, `FullName`, `Role`, `CreatedAt`, `LastLoginAt` FROM `Users` WHERE LOWER(`Username`) = ?',
+        [normUsername]
+      );
+      if (rows.length > 0) {
+        const row = rows[0];
         return {
           id: row.Id,
           username: row.Username,
@@ -2643,7 +2840,7 @@ async function findUser(username: string): Promise<User | null> {
         };
       }
     } catch (err) {
-      console.error('[MSSQL] Error fetching user:', err);
+      console.error('[MySQL] Error fetching user:', err);
     }
   }
 
@@ -2662,8 +2859,10 @@ async function getAllUsers(): Promise<User[]> {
   const pool = await getMssqlPool();
   if (pool) {
     try {
-      const res = await pool.request().query('SELECT [Id], [Username], [FullName], [Role], [CreatedAt], [LastLoginAt] FROM [dbo].[Users] ORDER BY [Username] ASC');
-      const usersList: User[] = res.recordset.map((row) => ({
+      const [rows] = await pool.query<mysql.RowDataPacket[]>(
+        'SELECT `Id`, `Username`, `FullName`, `Role`, `CreatedAt`, `LastLoginAt` FROM `Users` ORDER BY `Username` ASC'
+      );
+      const usersList: User[] = rows.map((row) => ({
         id: row.Id,
         username: row.Username,
         fullName: row.FullName || row.Username,
@@ -2679,7 +2878,7 @@ async function getAllUsers(): Promise<User[]> {
       }));
       return usersList;
     } catch (err) {
-      console.error('[MSSQL] Error fetching all users:', err);
+      console.error('[MySQL] Error fetching all users:', err);
     }
   }
 
@@ -2699,24 +2898,18 @@ async function createUser(userData: { username: string; password: string; fullNa
   const pool = await getMssqlPool();
   if (pool) {
     try {
-      const res = await pool.request()
-        .input('usr', sql.NVarChar, normUsername)
-        .input('hash', sql.NVarChar, pwdHash)
-        .input('fn', sql.NVarChar, fullName)
-        .input('role', sql.NVarChar, role)
-        .query(`
-          INSERT INTO [dbo].[Users] ([Username], [PasswordHash], [FullName], [Role], [CreatedAt])
-          OUTPUT INSERTED.[Id]
-          VALUES (@usr, @hash, @fn, @role, GETDATE());
-        `);
-      const newId = res.recordset[0]?.Id;
+      const [res] = await pool.execute<mysql.ResultSetHeader>(
+        'INSERT INTO `Users` (`Username`, `PasswordHash`, `FullName`, `Role`, `CreatedAt`) VALUES (?, ?, ?, ?, NOW())',
+        [normUsername, pwdHash, fullName, role]
+      );
+      const newId = res.insertId;
       const newUser: User = { id: newId, username: normUsername, passwordHash: pwdHash, fullName, role, createdAt: nowIso };
       const idx = db.users.findIndex((u) => u.username.toLowerCase() === normUsername.toLowerCase());
       if (idx >= 0) db.users[idx] = newUser;
       else db.users.push(newUser);
       return newUser;
     } catch (err) {
-      console.error('[MSSQL] Error creating user:', err);
+      console.error('[MySQL] Error creating user:', err);
       throw err;
     }
   }
@@ -2733,12 +2926,12 @@ async function updateUserPassword(username: string, newPassword: string): Promis
   const pool = await getMssqlPool();
   if (pool) {
     try {
-      await pool.request()
-        .input('usr', sql.NVarChar, normUsername)
-        .input('hash', sql.NVarChar, pwdHash)
-        .query('UPDATE [dbo].[Users] SET [PasswordHash] = @hash WHERE LOWER([Username]) = LOWER(@usr)');
+      await pool.execute(
+        'UPDATE `Users` SET `PasswordHash` = ? WHERE LOWER(`Username`) = LOWER(?)',
+        [pwdHash, normUsername]
+      );
     } catch (err) {
-      console.error('[MSSQL] Error updating user password:', err);
+      console.error('[MySQL] Error updating user password:', err);
     }
   }
 
@@ -2756,12 +2949,12 @@ async function updateUserRole(username: string, newRole: string): Promise<boolea
   const pool = await getMssqlPool();
   if (pool) {
     try {
-      await pool.request()
-        .input('usr', sql.NVarChar, normUsername)
-        .input('role', sql.NVarChar, role)
-        .query('UPDATE [dbo].[Users] SET [Role] = @role WHERE LOWER([Username]) = LOWER(@usr)');
+      await pool.execute(
+        'UPDATE `Users` SET `Role` = ? WHERE LOWER(`Username`) = LOWER(?)',
+        [role, normUsername]
+      );
     } catch (err) {
-      console.error('[MSSQL] Error updating user role:', err);
+      console.error('[MySQL] Error updating user role:', err);
     }
   }
 
@@ -2778,11 +2971,12 @@ async function deleteUser(username: string): Promise<boolean> {
   const pool = await getMssqlPool();
   if (pool) {
     try {
-      await pool.request()
-        .input('usr', sql.NVarChar, normUsername)
-        .query('DELETE FROM [dbo].[Users] WHERE LOWER([Username]) = LOWER(@usr)');
+      await pool.execute(
+        'DELETE FROM `Users` WHERE LOWER(`Username`) = LOWER(?)',
+        [normUsername]
+      );
     } catch (err) {
-      console.error('[MSSQL] Error deleting user:', err);
+      console.error('[MySQL] Error deleting user:', err);
     }
   }
 
@@ -2795,11 +2989,12 @@ async function recordUserLogin(username: string) {
   const pool = await getMssqlPool();
   if (pool) {
     try {
-      await pool.request()
-        .input('usr', sql.NVarChar, normUsername)
-        .query('UPDATE [dbo].[Users] SET [LastLoginAt] = GETDATE() WHERE LOWER([Username]) = LOWER(@usr)');
+      await pool.execute(
+        'UPDATE `Users` SET `LastLoginAt` = NOW() WHERE LOWER(`Username`) = LOWER(?)',
+        [normUsername]
+      );
     } catch (err) {
-      console.error('[MSSQL] Error updating last login:', err);
+      console.error('[MySQL] Error updating last login:', err);
     }
   }
 
@@ -3220,24 +3415,77 @@ app.delete('/api/orders/:id', async (req, res) => {
     try {
       const tableName = getShippingTableName();
       const numericId = parseInt(id, 10);
-      const reqSql = pool.request();
-      reqSql.input('id', sql.Int, !isNaN(numericId) ? numericId : -1);
-      reqSql.input('orderNumber', sql.NVarChar(sql.MAX), id);
-      if (orderToDelete) {
-        reqSql.input('receiptID', sql.NVarChar(sql.MAX), orderToDelete.orderNumber);
-      } else {
-        reqSql.input('receiptID', sql.NVarChar(sql.MAX), id);
-      }
-      await reqSql.query(`
-        DELETE FROM ${tableName}
-        WHERE [Id] = @id OR [receiptID] = @orderNumber OR [receiptID] = @receiptID
-      `);
+      await pool.execute(
+        `DELETE FROM ${tableName} WHERE \`Id\` = ? OR \`receiptID\` = ? OR \`OrderNumber\` = ?`,
+        [!isNaN(numericId) ? numericId : -1, id, orderToDelete ? orderToDelete.orderNumber : id]
+      );
     } catch (err: any) {
-      console.warn('[MSSQL] Notice deleting order from database:', err?.message || err);
+      console.warn('[MySQL] Notice deleting order from database:', err?.message || err);
     }
   }
 
   res.json({ success: true, message: `Order #${id} deleted successfully.` });
+});
+
+// Unfulfilled Shipments Direct Query Endpoint
+app.get('/api/shipments/unfulfilled', async (req, res) => {
+  const pool = await getMssqlPool();
+  if (pool) {
+    try {
+      const [rows] = await pool.query<mysql.RowDataPacket[]>(
+        'SELECT Id, TransactionId, Name, Street1, Street2, City, State, Zip, Country, email, OrderNumber, CreateDate, Override, Service, Fulfilled FROM Shipping WHERE Fulfilled IS NULL ORDER BY CreateDate ASC'
+      );
+      return res.json(rows);
+    } catch (err: any) {
+      console.error('[MySQL] Error fetching unfulfilled shipments:', err);
+      return res.status(500).json({ error: err.message || 'Database query error' });
+    }
+  }
+  res.json(db.orders.filter((o) => o.status !== 'shipped'));
+});
+
+// Mark Order Fulfilled Endpoint
+app.post('/api/orders/:id/fulfill', async (req, res) => {
+  const { id } = req.params;
+  const { transactionId, orderNumber } = req.body;
+  const order = db.orders.find((o) => o.id === id || o.orderNumber === id);
+  const pool = await getMssqlPool();
+
+  if (pool) {
+    try {
+      await markOrderFulfilledInMysql(pool, {
+        id: order?.id || id,
+        orderNumber: orderNumber || order?.orderNumber || id,
+        transactionId: transactionId || (order as any)?.transactionId,
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to mark order fulfilled in MySQL' });
+    }
+  }
+
+  if (order) {
+    order.status = 'shipped';
+    order.dbStatus = 'shipped';
+    order.shippingStatus = 'shipped';
+    order.shippingDate = new Date().toISOString();
+  }
+
+  res.json({ success: true, order });
+});
+
+// ServiceLog Query Endpoint (MySQL LIMIT syntax)
+app.get('/api/service-logs', async (req, res) => {
+  const limit = Math.max(1, Math.min(500, parseInt(req.query.limit as string, 10) || 100));
+  const pool = await getMssqlPool();
+  if (!pool) return res.json([]);
+  try {
+    const [rows] = await pool.query<mysql.RowDataPacket[]>(
+      `SELECT \`Id\`, \`ServiceName\`, \`LogLevel\`, \`Message\`, \`CreatedAt\` FROM \`ServiceLog\` ORDER BY \`CreatedAt\` DESC LIMIT ${Number(limit)}`
+    );
+    res.json(rows);
+  } catch (err: any) {
+    res.json([]);
+  }
 });
 
 // Validate Addresses Batch Endpoint
@@ -3925,8 +4173,8 @@ app.get('/api/orders/:id/live-rates', async (req, res) => {
   }
 });
 
-// Helper: Fetch live rate from EasyPost for an order and persist to MSSQL
-async function fetchAndApplyLiveRateForOrder(order: ShippingOrder, pool?: sql.ConnectionPool | null): Promise<ShippingOrder> {
+// Helper: Fetch live rate from EasyPost for an order and persist to MySQL
+async function fetchAndApplyLiveRateForOrder(order: ShippingOrder, pool?: mysql.Pool | null): Promise<ShippingOrder> {
   if (order.status === 'shipped' || order.status === 'cancelled') return order;
   if (!order.street1 || !order.city || !order.zip) return order;
 
@@ -4044,18 +4292,12 @@ async function fetchAndApplyLiveRateForOrder(order: ShippingOrder, pool?: sql.Co
 
         if (pool) {
           const tableName = getShippingTableName();
-          const req = pool.request();
           const numericId = parseInt(order.id, 10);
           if (!isNaN(numericId) && numericId > 0) {
-            req.input('id', sql.Int, numericId);
-            req.input('cost', sql.Decimal(18, 2), order.shippingCost);
-            req.input('carrier', sql.NVarChar(sql.MAX), order.carrier);
-            req.input('service', sql.NVarChar(sql.MAX), order.serviceLevel);
-            await req.query(`
-              UPDATE ${tableName}
-              SET [shippingCost] = @cost, [Carrier] = @carrier, [Service] = @service
-              WHERE [Id] = @id
-            `);
+            await pool.execute(
+              `UPDATE ${tableName} SET \`shippingCost\` = ?, \`Carrier\` = ?, \`Service\` = ? WHERE \`Id\` = ?`,
+              [order.shippingCost, order.carrier, order.serviceLevel, numericId]
+            );
           }
         }
       }
@@ -4172,12 +4414,12 @@ app.post('/api/orders/:id/refund-label', async (req, res) => {
   let order = db.orders.find((o) => o.id === id || o.orderNumber === id);
   if (!order && pool) {
     const numericId = parseInt(id, 10);
-    const dbRes = await pool.request()
-      .input('id', sql.Int, !isNaN(numericId) ? numericId : -1)
-      .input('receiptID', sql.NVarChar(sql.MAX), id)
-      .query(`SELECT * FROM ${tableName} WHERE [Id] = @id OR [receiptID] = @receiptID`);
-    if (dbRes.recordset && dbRes.recordset.length > 0) {
-      order = mapDbRowToShippingOrder(dbRes.recordset[0], tableName);
+    const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+      `SELECT * FROM ${tableName} WHERE \`Id\` = ? OR \`receiptID\` = ? OR \`OrderNumber\` = ?`,
+      [!isNaN(numericId) ? numericId : -1, id, id]
+    );
+    if (rows && rows.length > 0) {
+      order = mapDbRowToShippingOrder(rows[0], tableName);
     }
   }
 
@@ -4227,27 +4469,24 @@ app.post('/api/orders/:id/refund-label', async (req, res) => {
   if (pool) {
     try {
       const numericId = parseInt(order.id, 10);
-      const reqSql = pool.request();
-      (reqSql as any).timeout = 30000;
-      reqSql.input('id', sql.Int, !isNaN(numericId) ? numericId : -1);
-      reqSql.input('receiptID', sql.NVarChar(sql.MAX), order.orderNumber);
-
-      await reqSql.query(`
-        UPDATE ${tableName} SET
-          [status] = 'Complete',
-          [trackingNumber] = '',
-          [shippingCost] = 0,
-          [shippingDate] = '1900-01-01',
-          [Carrier] = NULL,
-          [Service] = NULL,
-          [easypostShipmentId] = NULL,
-          [LabelData] = NULL,
-          [marketplacenotified] = 'No'
-        WHERE [Id] = @id OR [receiptID] = @receiptID;
-      `);
-      console.log(`[MSSQL] Successfully cleared shipping info and reset Order #${order.orderNumber} to Complete.`);
+      await pool.execute(
+        `UPDATE ${tableName} SET
+          \`status\` = 'Complete',
+          \`Fulfilled\` = NULL,
+          \`trackingNumber\` = '',
+          \`shippingCost\` = 0,
+          \`shippingDate\` = '1900-01-01',
+          \`Carrier\` = NULL,
+          \`Service\` = NULL,
+          \`easypostShipmentId\` = NULL,
+          \`LabelData\` = NULL,
+          \`marketplacenotified\` = 'No'
+        WHERE \`Id\` = ? OR \`receiptID\` = ? OR \`OrderNumber\` = ?`,
+        [!isNaN(numericId) ? numericId : -1, order.orderNumber, order.orderNumber]
+      );
+      console.log(`[MySQL] Successfully cleared shipping info and reset Order #${order.orderNumber} to Complete.`);
     } catch (dbErr: any) {
-      console.error('[MSSQL] Error resetting order status to Complete in database:', dbErr);
+      console.error('[MySQL] Error resetting order status to Complete in database:', dbErr);
       return res.status(500).json({ error: `Database error removing shipping info: ${dbErr.message || dbErr}` });
     }
   }
@@ -4586,27 +4825,26 @@ app.get('/api/orders/:id/label.pdf', async (req, res) => {
     return res.status(404).send('Order not found');
   }
 
-  // Retrieve label binary from MS SQL if not already in memory
+  // Retrieve label binary from MySQL if not already in memory
   if (!order.labelBinary) {
     try {
       const pool = await getMssqlPool();
       if (pool) {
         const tableName = getShippingTableName(db.settings);
-        const lRes = await pool.request()
-          .input('oid', sql.VarChar, String(order.id))
-          .input('intid', sql.Int, parseInt(order.id, 10) || 0)
-          .input('oreceipt', sql.VarChar, String(order.orderNumber))
-          .query(`SELECT [Id], [LabelData], [Carrier], [Service], [trackingNumber] FROM ${tableName} WHERE [Id] = @intid OR [Id] = @oid OR [receiptID] = @oreceipt`);
-        console.log(`[Label PDF Debug] Querying table ${tableName} for Order #${order.id} / ${order.orderNumber}. Found:`, lRes.recordset.length, 'LabelData size:', lRes.recordset[0]?.LabelData ? Buffer.from(lRes.recordset[0].LabelData).length : 'null');
-        if (lRes.recordset.length > 0 && lRes.recordset[0].LabelData) {
-          order.labelBinary = Buffer.from(lRes.recordset[0].LabelData);
-          if (lRes.recordset[0].trackingNumber && !order.trackingNumber) {
-            order.trackingNumber = lRes.recordset[0].trackingNumber;
+        const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+          `SELECT \`Id\`, \`LabelData\`, \`Carrier\`, \`Service\`, \`trackingNumber\` FROM ${tableName} WHERE \`Id\` = ? OR CAST(\`Id\` AS CHAR) = ? OR \`receiptID\` = ? OR \`OrderNumber\` = ?`,
+          [parseInt(order.id, 10) || 0, String(order.id), String(order.orderNumber), String(order.orderNumber)]
+        );
+        console.log(`[Label PDF Debug] Querying table ${tableName} for Order #${order.id} / ${order.orderNumber}. Found:`, rows.length, 'LabelData size:', rows[0]?.LabelData ? Buffer.from(rows[0].LabelData).length : 'null');
+        if (rows.length > 0 && rows[0].LabelData) {
+          order.labelBinary = Buffer.from(rows[0].LabelData);
+          if (rows[0].trackingNumber && !order.trackingNumber) {
+            order.trackingNumber = rows[0].trackingNumber;
           }
         }
       }
     } catch (e) {
-      console.warn('[Label PDF] Error fetching LabelData from MS SQL:', e);
+      console.warn('[Label PDF] Error fetching LabelData from MySQL:', e);
     }
   }
 
@@ -4906,34 +5144,25 @@ app.get('/api/orders/batch-packing-slips.pdf', async (req, res) => {
     targetOrders = db.orders;
   }
 
-  // If no matching orders found in memory, query MS SQL Server database
+  // If no matching orders found in memory, query MySQL database
   if (targetOrders.length === 0 && orderIdsParam) {
     const ids = orderIdsParam.split(',').map((s) => s.trim()).filter(Boolean);
     const pool = await getMssqlPool();
     if (pool && ids.length > 0) {
       try {
         const tableName = getShippingTableName(db.settings);
-        const reqSql = pool.request();
-        const idPlaceholders = ids.map((idVal, idx) => {
-          reqSql.input(`psId${idx}`, sql.VarChar, idVal);
-          return `@psId${idx}`;
-        }).join(', ');
+        const placeholders = ids.map(() => '?').join(', ');
 
-        const sqlRes = await reqSql.query(`
-          SELECT 
-            [Id], [name], [address1], [address2], [city], [state], [postalCode], [country],
-            [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
-            [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
-            [TotalWeight], [box], [easypostShipmentId], [marketplacenotified]
-          FROM ${tableName}
-          WHERE CAST([Id] AS NVARCHAR(MAX)) IN (${idPlaceholders}) OR [receiptID] IN (${idPlaceholders})
-        `);
+        const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+          `SELECT * FROM ${tableName} WHERE CAST(\`Id\` AS CHAR) IN (${placeholders}) OR \`receiptID\` IN (${placeholders}) OR \`OrderNumber\` IN (${placeholders})`,
+          [...ids, ...ids, ...ids]
+        );
 
-        if (sqlRes.recordset && sqlRes.recordset.length > 0) {
-          targetOrders = sqlRes.recordset.map((row) => mapDbRowToShippingOrder(row, tableName));
+        if (rows && rows.length > 0) {
+          targetOrders = rows.map((row) => mapDbRowToShippingOrder(row, tableName));
         }
       } catch (err) {
-        console.warn('[Batch Packing Slips PDF] MS SQL lookup notice:', err);
+        console.warn('[Batch Packing Slips PDF] MySQL lookup notice:', err);
       }
     }
   }
@@ -4968,34 +5197,25 @@ app.get('/api/orders/batch-labels.pdf', async (req, res) => {
     targetOrders = db.orders.filter((o) => o.status === 'shipped' || o.trackingNumber);
   }
 
-  // If no matching orders found in memory, query MS SQL Server database
+  // If no matching orders found in memory, query MySQL database
   if (targetOrders.length === 0 && orderIdsParam) {
     const ids = orderIdsParam.split(',').map((s) => s.trim()).filter(Boolean);
     const pool = await getMssqlPool();
     if (pool && ids.length > 0) {
       try {
         const tableName = getShippingTableName(db.settings);
-        const reqSql = pool.request();
-        const idPlaceholders = ids.map((idVal, idx) => {
-          reqSql.input(`pId${idx}`, sql.VarChar, idVal);
-          return `@pId${idx}`;
-        }).join(', ');
+        const placeholders = ids.map(() => '?').join(', ');
 
-        const sqlRes = await reqSql.query(`
-          SELECT 
-            [Id], [name], [address1], [address2], [city], [state], [postalCode], [country],
-            [phone], [email], [createdAt], [OrderDetails], [receiptID], [Carrier], [Service],
-            [trackingNumber], [status], [shippingCost], [shippingDate], [platform],
-            [TotalWeight], [box], [easypostShipmentId], [marketplacenotified], [LabelData]
-          FROM ${tableName}
-          WHERE CAST([Id] AS NVARCHAR(MAX)) IN (${idPlaceholders}) OR [receiptID] IN (${idPlaceholders})
-        `);
+        const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+          `SELECT * FROM ${tableName} WHERE CAST(\`Id\` AS CHAR) IN (${placeholders}) OR \`receiptID\` IN (${placeholders}) OR \`OrderNumber\` IN (${placeholders})`,
+          [...ids, ...ids, ...ids]
+        );
 
-        if (sqlRes.recordset && sqlRes.recordset.length > 0) {
-          targetOrders = sqlRes.recordset.map((row) => mapDbRowToShippingOrder(row, tableName));
+        if (rows && rows.length > 0) {
+          targetOrders = rows.map((row) => mapDbRowToShippingOrder(row, tableName));
         }
       } catch (err) {
-        console.warn('[Batch Labels PDF] MS SQL lookup for orderIds notice:', err);
+        console.warn('[Batch Labels PDF] MySQL lookup for orderIds notice:', err);
       }
     }
   }
@@ -5018,20 +5238,20 @@ app.get('/api/orders/batch-labels.pdf', async (req, res) => {
     for (let index = 0; index < targetOrders.length; index++) {
       const order = targetOrders[index];
 
-      // If labelBinary is missing from in-memory order, attempt to retrieve LabelData from MS SQL
+      // If labelBinary is missing from in-memory order, attempt to retrieve LabelData from MySQL
       if (!order.labelBinary && !order.labelPngBase64) {
         try {
           const pool = await getMssqlPool();
           if (pool) {
             const tableName = getShippingTableName(db.settings);
-            const lRes = await pool.request()
-              .input('oid', sql.VarChar, order.id)
-              .input('oreceipt', sql.VarChar, order.orderNumber)
-              .query(`SELECT [LabelData], [Carrier], [Service], [trackingNumber] FROM ${tableName} WHERE [Id] = @oid OR [receiptID] = @oreceipt`);
-            if (lRes.recordset.length > 0 && lRes.recordset[0].LabelData) {
-              order.labelBinary = Buffer.from(lRes.recordset[0].LabelData);
-              if (lRes.recordset[0].trackingNumber && !order.trackingNumber) {
-                order.trackingNumber = lRes.recordset[0].trackingNumber;
+            const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+              `SELECT \`LabelData\`, \`Carrier\`, \`Service\`, \`trackingNumber\` FROM ${tableName} WHERE CAST(\`Id\` AS CHAR) = ? OR \`receiptID\` = ? OR \`OrderNumber\` = ?`,
+              [String(order.id), String(order.orderNumber), String(order.orderNumber)]
+            );
+            if (rows.length > 0 && rows[0].LabelData) {
+              order.labelBinary = Buffer.from(rows[0].LabelData);
+              if (rows[0].trackingNumber && !order.trackingNumber) {
+                order.trackingNumber = rows[0].trackingNumber;
               }
             }
           }
@@ -5639,16 +5859,13 @@ app.delete('/api/packages/:id', async (req, res) => {
   if (pool) {
     try {
       const numId = parseInt(id, 10);
-      const reqMssql = pool.request();
       if (!isNaN(numId) && numId > 0) {
-        reqMssql.input('id', sql.Int, numId);
-        await reqMssql.query('DELETE FROM [dbo].[Package] WHERE [Id] = @id');
+        await pool.execute('DELETE FROM `Package` WHERE `Id` = ?', [numId]);
       } else if (pkgToDelete?.name) {
-        reqMssql.input('name', sql.NVarChar(100), pkgToDelete.name);
-        await reqMssql.query('DELETE FROM [dbo].[Package] WHERE [Name] = @name');
+        await pool.execute('DELETE FROM `Package` WHERE `Name` = ?', [pkgToDelete.name]);
       }
     } catch (err) {
-      console.error('[MSSQL] Error deleting package from MS SQL:', err);
+      console.error('[MySQL] Error deleting package from MySQL:', err);
     }
   }
 
@@ -5763,15 +5980,13 @@ app.delete('/api/packaging-rules/:id', async (req, res) => {
   const pool = await getMssqlPool();
   if (pool) {
     try {
-      const reqMssql = pool.request();
-      reqMssql.input('id', sql.Int, numId);
-      await reqMssql.query('DELETE FROM [dbo].[BobbinPackagingRules] WHERE [Id] = @id');
+      await pool.execute('DELETE FROM `BobbinPackagingRules` WHERE `Id` = ?', [numId]);
       const refreshed = await fetchPackagingRulesFromMssql();
       if (refreshed) db.packagingRules = refreshed;
       // Auto-rerun rules across open orders and update boxes in database
       rerunPackagingRulesInternal(pool).catch((e) => console.error('[Packaging Rules] Auto-rerun error:', e));
     } catch (err: any) {
-      console.error('[MSSQL] Error deleting packaging rule:', err);
+      console.error('[MySQL] Error deleting packaging rule:', err);
       return res.status(500).json({ error: 'Database error deleting rule: ' + err.message });
     }
   } else {
@@ -5794,7 +6009,7 @@ app.post('/api/packaging-rules/test', async (req, res) => {
   res.json(result);
 });
 
-async function rerunPackagingRulesInternal(pool?: sql.ConnectionPool | null): Promise<{ updatedCount: number; orders: ShippingOrder[] }> {
+async function rerunPackagingRulesInternal(pool?: mysql.Pool | null): Promise<{ updatedCount: number; orders: ShippingOrder[] }> {
   if (!pool) pool = await getMssqlPool();
   if (pool) {
     const live = await fetchPackagingRulesFromMssql();
@@ -5830,7 +6045,7 @@ async function rerunPackagingRulesInternal(pool?: sql.ConnectionPool | null): Pr
       order.status = 'ready_to_ship';
     }
 
-    // Persist box to MS SQL Server
+    // Persist box to MySQL database
     if (pool) {
       await saveOrderToMssqlPool(pool, order);
     }
@@ -5857,7 +6072,7 @@ app.post('/api/orders/reapply-packaging-rules', async (req, res) => {
 
 // Settings API (including Packing Slip Content custom editor)
 app.get('/api/database/status', async (req, res) => {
-  const isConnected = !!(activeMssqlPool && activeMssqlPool.connected && !activeMssqlPool.connecting);
+  const isConnected = !!(activeMssqlPool && db.settings.mssqlConnected);
   res.json({
     connected: isConnected,
     server: db.settings.mssqlServer || '',
@@ -5868,7 +6083,7 @@ app.get('/api/database/status', async (req, res) => {
 });
 
 app.get('/api/settings', async (req, res) => {
-  // Try fetching live settings from MS SQL Configuration table if connected
+  // Try fetching live settings from MySQL Configuration table if connected
   if (db.settings.mssqlServer && db.settings.mssqlDatabase && db.settings.mssqlUser) {
     const liveSettings = await fetchSettingsFromMssql();
     if (liveSettings) {
@@ -5884,13 +6099,28 @@ app.get('/api/settings', async (req, res) => {
 app.put('/api/settings', async (req, res) => {
   db.settings = { ...db.settings, ...req.body };
 
-  // Write to MS SQL database [dbo].[Configuration] table
+  const normalized = normalizeMysqlConfig({
+    server: db.settings.mssqlServer,
+    port: db.settings.mssqlPort,
+    database: db.settings.mssqlDatabase,
+    user: db.settings.mssqlUser,
+    password: db.settings.mssqlPassword,
+  });
+  db.settings.mssqlServer = normalized.host;
+  db.settings.mssqlPort = normalized.port;
+  db.settings.mssqlDatabase = normalized.database;
+  db.settings.mssqlUser = normalized.user;
+  if (normalized.password) {
+    db.settings.mssqlPassword = normalized.password;
+  }
+
+  // Write to MySQL database `Configuration` table
   const pool = await getMssqlPool();
   if (pool) {
     await saveSettingsToMssqlPool(pool, db.settings);
   }
 
-  // If MS SQL connection parameters are updated, test connection
+  // If MySQL connection parameters are updated, test connection
   if (
     req.body.mssqlServer !== undefined ||
     req.body.mssqlDatabase !== undefined ||
@@ -5913,7 +6143,7 @@ app.put('/api/settings', async (req, res) => {
   res.json({ success: true, settings: safeSettings });
 });
 
-// Environment Switcher Endpoint (Dev [dbo].[shippingdev] vs Prod [dbo].[Shipping])
+// Environment Switcher Endpoint (Dev `shippingdev` vs Prod `Shipping`)
 app.post('/api/settings/environment', async (req, res) => {
   const targetEnv: 'dev' | 'prod' = req.body.env === 'prod' ? 'prod' : 'dev';
   db.settings.appEnv = targetEnv;
@@ -5946,13 +6176,13 @@ app.post('/api/settings/environment', async (req, res) => {
   });
 });
 
-// Explicit Clone Table Endpoint ([dbo].[Shipping] -> [dbo].[shippingdev])
+// Explicit Clone Table Endpoint (`Shipping` -> `shippingdev`)
 app.post('/api/mssql/clone-dev-table', async (req, res) => {
   const pool = await getMssqlPool();
   if (!pool) {
     return res.status(400).json({
       success: false,
-      message: db.settings.mssqlError || 'Could not establish connection to MS SQL Server.',
+      message: db.settings.mssqlError || 'Could not establish connection to MySQL Server.',
     });
   }
 
@@ -5966,7 +6196,7 @@ app.post('/api/mssql/clone-dev-table', async (req, res) => {
     }
     res.json({
       success: true,
-      message: 'Successfully cloned table [dbo].[Shipping] to [dbo].[shippingdev] with all structure and data.',
+      message: 'Successfully cloned table `Shipping` to `shippingdev` with all structure and data.',
       orders: db.orders,
     });
   } catch (err: any) {
@@ -5977,34 +6207,46 @@ app.post('/api/mssql/clone-dev-table', async (req, res) => {
   }
 });
 
-// Explicit MS SQL Connection Test Route
+// Explicit MySQL Connection Test Route
 app.post('/api/mssql/test', async (req, res) => {
   const { server, port, database, user, password, encrypt } = req.body;
-  const config = {
+  const normalized = normalizeMysqlConfig({
     server: server ?? db.settings.mssqlServer,
-    port: port ? Number(port) : db.settings.mssqlPort || 1433,
+    port: port ? Number(port) : db.settings.mssqlPort || 3306,
     database: database ?? db.settings.mssqlDatabase,
     user: user ?? db.settings.mssqlUser,
-    password: password !== undefined ? password : db.settings.mssqlPassword,
+    password: password !== undefined && password !== '' ? password : db.settings.mssqlPassword,
+  });
+
+  const config = {
+    server: normalized.host,
+    port: normalized.port,
+    database: normalized.database,
+    user: normalized.user,
+    password: normalized.password,
     encrypt: encrypt !== undefined ? encrypt : db.settings.mssqlEncrypt,
   };
 
   const result = await testMssqlConnection(config);
 
   // Update in-memory settings status
+  db.settings.mssqlServer = normalized.host;
+  db.settings.mssqlPort = normalized.port;
+  db.settings.mssqlDatabase = normalized.database;
+  db.settings.mssqlUser = normalized.user;
   db.settings.mssqlConnected = result.success;
   db.settings.mssqlError = result.success ? null : result.message;
 
   res.json(result);
 });
 
-// Explicit Sync MS SQL Orders (Pull latest from DB or Push current queue to DB)
+// Explicit Sync MySQL Orders (Pull latest from DB or Push current queue to DB)
 app.post('/api/mssql/sync', async (req, res) => {
   const pool = await getMssqlPool();
   if (!pool) {
     return res.status(400).json({
       success: false,
-      message: db.settings.mssqlError || 'Could not establish connection to MS SQL Server.',
+      message: db.settings.mssqlError || 'Could not establish connection to MySQL Server.',
     });
   }
 
@@ -6020,7 +6262,7 @@ app.post('/api/mssql/sync', async (req, res) => {
     }
     return res.json({
       success: true,
-      message: `Successfully pushed ${synced} orders to MS SQL Server database.`,
+      message: `Successfully pushed ${synced} orders to MySQL database.`,
       orders: db.orders,
     });
   } else {
@@ -6028,13 +6270,13 @@ app.post('/api/mssql/sync', async (req, res) => {
     if (liveOrders) {
       return res.json({
         success: true,
-        message: `Successfully pulled ${liveOrders.length} live orders from MS SQL Server database.`,
+        message: `Successfully pulled ${liveOrders.length} live orders from MySQL database.`,
         orders: liveOrders,
       });
     } else {
       return res.status(500).json({
         success: false,
-        message: 'Failed to retrieve orders from MS SQL Server database.',
+        message: 'Failed to retrieve orders from MySQL database.',
       });
     }
   }
@@ -6099,73 +6341,81 @@ app.get('/api/reports/monthly', (req, res) => {
   });
 });
 
-// MSSQL Database Schema & Test API
+// MySQL Database Schema & Test API
 app.get('/api/mssql/schema', (req, res) => {
   const ddlScript = `-- =========================================================
--- Microsoft SQL Server (MSSQL) Schema Definition
+-- MySQL 8.0 Schema Definition
 -- Database: ${db.settings.mssqlDatabase}
--- Target Tables: [dbo].[Shipping], [dbo].[Package], settings
+-- Target Tables: \`Shipping\`, \`orderlist\`, \`orderstatus\`, \`ServiceLog\`, \`Package\`, \`Configuration\`
 -- =========================================================
 
--- 1. Create Package Table (Exact Match for Your Database)
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Package')
-BEGIN
-    CREATE TABLE [dbo].[Package](
-        [Id] [int] IDENTITY(1,1) NOT NULL,
-        [Name] [nvarchar](100) NOT NULL,
-        [Length] [decimal](10, 2) NOT NULL,
-        [Width] [decimal](10, 2) NOT NULL,
-        [Height] [decimal](10, 2) NOT NULL,
-        [Weight] [decimal](10, 2) NOT NULL,
-        CONSTRAINT [PK_Package_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
-    );
-END;
+-- 1. Create Package Table
+CREATE TABLE IF NOT EXISTS \`Package\` (
+    \`Id\` INT AUTO_INCREMENT PRIMARY KEY,
+    \`Name\` VARCHAR(100) NOT NULL,
+    \`Length\` DECIMAL(10, 2) NOT NULL,
+    \`Width\` DECIMAL(10, 2) NOT NULL,
+    \`Height\` DECIMAL(10, 2) NOT NULL,
+    \`Weight\` DECIMAL(10, 2) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 2. Create Shipping Orders Table (Exact Match for Your Database)
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'Shipping')
-BEGIN
-    CREATE TABLE [dbo].[Shipping](
-        [Id] [int] IDENTITY(1,1) NOT NULL,
-        [name] [nvarchar](max) NULL,
-        [address1] [nvarchar](max) NULL,
-        [address2] [nvarchar](max) NULL,
-        [city] [nvarchar](max) NULL,
-        [state] [nvarchar](max) NULL,
-        [postalCode] [nvarchar](max) NULL,
-        [country] [nvarchar](max) NULL,
-        [phone] [nvarchar](max) NULL,
-        [email] [nvarchar](max) NULL,
-        [createdAt] [datetime2](7) NULL,
-        [OrderDetails] [nvarchar](max) NULL,
-        [receiptID] [nvarchar](max) NULL,
-        [Carrier] [nvarchar](max) NULL,
-        [Service] [nvarchar](max) NULL,
-        [trackingNumber] [nvarchar](max) NULL,
-        [status] [nvarchar](max) NULL,
-        [shippingCost] [decimal](18, 2) NULL,
-        [shippingDate] [datetime2](7) NULL,
-        [platform] [nvarchar](max) NULL,
-        [TotalWeight] [float] NOT NULL DEFAULT 16,
-        [box] [varchar](50) NULL,
-        [easypostShipmentId] [nvarchar](64) NULL,
-        [marketplacenotified] [nvarchar](50) NOT NULL DEFAULT 'No',
-        CONSTRAINT [PK_Shipping_Id] PRIMARY KEY CLUSTERED ([Id] ASC)
-    );
-END;
+-- 2. Create Shipping Orders Table
+CREATE TABLE IF NOT EXISTS \`Shipping\` (
+    \`Id\` INT AUTO_INCREMENT PRIMARY KEY,
+    \`TransactionId\` VARCHAR(100) NULL,
+    \`Name\` TEXT NULL,
+    \`Street1\` TEXT NULL,
+    \`Street2\` TEXT NULL,
+    \`City\` VARCHAR(150) NULL,
+    \`State\` VARCHAR(100) NULL,
+    \`Zip\` VARCHAR(50) NULL,
+    \`Country\` VARCHAR(100) NULL,
+    \`email\` VARCHAR(255) NULL,
+    \`OrderNumber\` VARCHAR(100) NULL,
+    \`CreateDate\` DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
+    \`Override\` VARCHAR(50) NULL,
+    \`Service\` VARCHAR(100) NULL,
+    \`Fulfilled\` DATETIME NULL,
+    \`name\` TEXT NULL,
+    \`address1\` TEXT NULL,
+    \`address2\` TEXT NULL,
+    \`city\` TEXT NULL,
+    \`state\` TEXT NULL,
+    \`postalCode\` TEXT NULL,
+    \`country\` TEXT NULL,
+    \`phone\` TEXT NULL,
+    \`createdAt\` DATETIME NULL,
+    \`OrderDetails\` LONGTEXT NULL,
+    \`receiptID\` VARCHAR(255) NULL,
+    \`Carrier\` VARCHAR(100) NULL,
+    \`trackingNumber\` VARCHAR(255) NULL,
+    \`status\` VARCHAR(100) NULL,
+    \`shippingCost\` DECIMAL(18, 2) NULL,
+    \`shippingDate\` DATETIME NULL,
+    \`platform\` VARCHAR(100) NULL,
+    \`TotalWeight\` DOUBLE NOT NULL DEFAULT 16,
+    \`box\` VARCHAR(50) NULL,
+    \`easypostShipmentId\` VARCHAR(64) NULL,
+    \`marketplacenotified\` VARCHAR(50) NOT NULL DEFAULT 'No',
+    \`LabelData\` LONGBLOB NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 3. Create Settings Table
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'settings')
-BEGIN
-    CREATE TABLE settings (
-        setting_key VARCHAR(100) PRIMARY KEY,
-        setting_value NVARCHAR(MAX),
-        updated_at DATETIME2 DEFAULT GETDATE()
-    );
-END;
+-- 3. Create orderstatus Table
+CREATE TABLE IF NOT EXISTS \`orderstatus\` (
+    \`Id\` INT AUTO_INCREMENT PRIMARY KEY,
+    \`TransactionID\` VARCHAR(100) NOT NULL,
+    \`Status\` VARCHAR(50) NOT NULL DEFAULT 'Pending',
+    \`UpdatedAt\` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Sample Insert into Settings for Packing Slip Custom Notice
-INSERT INTO settings (setting_key, setting_value)
-VALUES ('packing_slip_content', '${db.settings.packingSlipContent.replace(/'/g, "''")}');
+-- 4. Create ServiceLog Table
+CREATE TABLE IF NOT EXISTS \`ServiceLog\` (
+    \`Id\` INT AUTO_INCREMENT PRIMARY KEY,
+    \`ServiceName\` VARCHAR(100) NULL,
+    \`LogLevel\` VARCHAR(50) NULL,
+    \`Message\` LONGTEXT NULL,
+    \`CreatedAt\` DATETIME DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 `;
 
   res.json({
@@ -6174,45 +6424,55 @@ VALUES ('packing_slip_content', '${db.settings.packingSlipContent.replace(/'/g, 
     database: db.settings.mssqlDatabase,
     ddlScript,
     tables: [
-      { name: 'Shipping', count: db.orders.length, description: 'Contains order addresses, box assignments, status, and tracking numbers' },
+      { name: 'Shipping', count: db.orders.length, description: 'Contains order addresses, box assignments, status, Fulfilled timestamp, and tracking numbers' },
       { name: 'Package', count: db.packages.length, description: 'User package definitions containing box name, dimensions, and weight' },
-      { name: 'settings', count: 1, description: 'App configurations including custom packing slip notice content' },
+      { name: 'Configuration', count: 1, description: 'App configurations including custom packing slip notice content' },
     ],
   });
 });
 
 // Vite Middleware for Dev / Static fallback for Prod
 async function startServer() {
-  // Test MS SQL Server connectivity on startup
+  // Test MySQL Server connectivity on startup
   if (db.settings.mssqlServer) {
-    testMssqlConnection({
+    const normalized = normalizeMysqlConfig({
       server: db.settings.mssqlServer,
       port: db.settings.mssqlPort,
       database: db.settings.mssqlDatabase,
       user: db.settings.mssqlUser,
       password: db.settings.mssqlPassword,
+    });
+    db.settings.mssqlServer = normalized.host;
+    db.settings.mssqlPort = normalized.port;
+    db.settings.mssqlDatabase = normalized.database;
+    db.settings.mssqlUser = normalized.user;
+
+    testMssqlConnection({
+      server: normalized.host,
+      port: normalized.port,
+      database: normalized.database,
+      user: normalized.user,
+      password: normalized.password,
       encrypt: db.settings.mssqlEncrypt,
     })
       .then((testRes) => {
         db.settings.mssqlConnected = testRes.success;
         db.settings.mssqlError = testRes.success ? null : testRes.message;
-        console.log(`[MSSQL] Connection status: ${testRes.success ? 'CONNECTED' : 'DISCONNECTED'}`);
+        console.log(`[MySQL] Connection status (${normalized.host}:${normalized.port}): ${testRes.success ? 'CONNECTED' : 'STANDBY'}`);
         if (testRes.success) {
           getMssqlPool().then(async (pool) => {
             if (pool) {
               await ensureMssqlTables(pool);
               const orders = await fetchOrdersFromMssql();
               if (orders) {
-                console.log(`[MSSQL] Pre-loaded ${orders.length} orders from MS SQL database.`);
+                console.log(`[MySQL] Pre-loaded ${orders.length} orders from MySQL database.`);
               }
               const pkgs = await fetchPackagesFromMssql();
               if (pkgs) {
-                console.log(`[MSSQL] Pre-loaded ${pkgs.length} packages from MS SQL database.`);
+                console.log(`[MySQL] Pre-loaded ${pkgs.length} packages from MySQL database.`);
               }
             }
-          }).catch((e) => console.error('[MSSQL] Error loading data on start:', e));
-        } else {
-          console.log(`[MSSQL] Details: ${testRes.message}`);
+          }).catch((e) => console.error('[MySQL] Notice loading data on start:', e));
         }
       })
       .catch((err) => {

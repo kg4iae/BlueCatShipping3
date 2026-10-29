@@ -137,13 +137,33 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
       setAppEnv(settings.appEnv);
     }
   }, [settings.appEnv]);
-  const [mssqlServer, setMssqlServer] = useState(settings.mssqlServer || '');
-  const [mssqlPort, setMssqlPort] = useState<string>(String(settings.mssqlPort || 1433));
-  const [mssqlDatabase, setMssqlDatabase] = useState(settings.mssqlDatabase || '');
-  const [mssqlUser, setMssqlUser] = useState(settings.mssqlUser || '');
+  const normalizeHost = (s?: string) =>
+    !s || /^sql\d+\.site4now\.net$/i.test(s.trim()) || s.toLowerCase().includes('sql5109')
+      ? 'mysql8002.site4now.net'
+      : s.trim();
+  const normalizePortStr = (p?: number | string) => {
+    const n = Number(p);
+    return !n || n === 1433 ? '3306' : String(n);
+  };
+  const normalizeUserStr = (u?: string) =>
+    !u || u.trim().toLowerCase().endsWith('_admin') || u.trim() === 'shipstation_app_user'
+      ? 'a7ef02_bluecatbobbins'
+      : u.trim();
+
+  const [mssqlServer, setMssqlServer] = useState(normalizeHost(settings.mssqlServer));
+  const [mssqlPort, setMssqlPort] = useState<string>(normalizePortStr(settings.mssqlPort));
+  const [mssqlDatabase, setMssqlDatabase] = useState(settings.mssqlDatabase || 'db_a7ef02_bluecatbobbins');
+  const [mssqlUser, setMssqlUser] = useState(normalizeUserStr(settings.mssqlUser));
   const [mssqlPassword, setMssqlPassword] = useState(settings.mssqlPassword || '');
   const [mssqlEncrypt, setMssqlEncrypt] = useState<boolean>(settings.mssqlEncrypt || false);
   const [appPassword, setAppPassword] = useState('');
+
+  useEffect(() => {
+    setMssqlServer(normalizeHost(settings.mssqlServer));
+    setMssqlPort(normalizePortStr(settings.mssqlPort));
+    setMssqlDatabase(settings.mssqlDatabase || 'db_a7ef02_bluecatbobbins');
+    setMssqlUser(normalizeUserStr(settings.mssqlUser));
+  }, [settings.mssqlServer, settings.mssqlPort, settings.mssqlDatabase, settings.mssqlUser]);
 
   // Table Cloning state
   const [cloningTable, setCloningTable] = useState<boolean>(false);
@@ -530,7 +550,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           server: mssqlServer,
-          port: parseInt(mssqlPort, 10) || 1433,
+          port: parseInt(mssqlPort, 10) || 3306,
           database: mssqlDatabase,
           user: mssqlUser,
           password: mssqlPassword,
@@ -542,7 +562,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
       // Refresh parent settings
       await onUpdateSettings({
         mssqlServer,
-        mssqlPort: parseInt(mssqlPort, 10) || 1433,
+        mssqlPort: parseInt(mssqlPort, 10) || 3306,
         mssqlDatabase,
         mssqlUser,
         mssqlPassword,
@@ -563,7 +583,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     setSaving(true);
     await onUpdateSettings({
       mssqlServer,
-      mssqlPort: parseInt(mssqlPort, 10) || 1433,
+      mssqlPort: parseInt(mssqlPort, 10) || 3306,
       mssqlDatabase,
       mssqlUser,
       mssqlPassword,
@@ -2067,24 +2087,24 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
-                      MS SQL Server Host / IP
+                      MySQL Server Host / IP
                     </label>
                     <input
                       type="text"
                       value={mssqlServer}
                       onChange={(e) => setMssqlServer(e.target.value)}
-                      placeholder="e.g. sql.example.com or 192.168.1.50"
+                      placeholder="e.g. mysql8002.site4now.net"
                       className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1">Port (Default: 1433)</label>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">Port (Default: 3306)</label>
                     <input
                       type="number"
                       value={mssqlPort}
                       onChange={(e) => setMssqlPort(e.target.value)}
-                      placeholder="1433"
+                      placeholder="3306"
                       className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
                     />
                   </div>
@@ -2095,7 +2115,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                       type="text"
                       value={mssqlDatabase}
                       onChange={(e) => setMssqlDatabase(e.target.value)}
-                      placeholder="e.g. ShippingProductionDB"
+                      placeholder="e.g. db_a7ef02_bluecatbobbins"
                       className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:bg-white focus:outline-none"
                     />
                   </div>
