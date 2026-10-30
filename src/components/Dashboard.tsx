@@ -157,7 +157,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     if (statusFilter !== 'all') {
       if (statusFilter === 'ready_to_ship') {
         const orderStatus = (order.dbStatus || order.shippingStatus || order.status || '').toString().trim().toLowerCase();
-        if (orderStatus !== 'complete' && orderStatus !== 'completed') return false;
+        if (orderStatus !== 'complete' && orderStatus !== 'completed' && orderStatus !== 'assembly') return false;
       } else if (order.status !== statusFilter) {
         return false;
       }
@@ -242,7 +242,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const readyCount = orders.filter((o) => {
     if (o.status === 'shipped') return false;
     const orderStatus = (o.dbStatus || o.shippingStatus || o.status || '').toString().trim().toLowerCase();
-    return orderStatus === 'complete' || orderStatus === 'completed';
+    return orderStatus === 'complete' || orderStatus === 'completed' || orderStatus === 'assembly';
   }).length;
 
   return (

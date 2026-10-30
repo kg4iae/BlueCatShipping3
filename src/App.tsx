@@ -731,7 +731,7 @@ export default function App() {
   const readyCount = orders.filter((o) => {
     if (o.status === 'shipped') return false;
     const orderStatus = (o.dbStatus || o.shippingStatus || o.status || '').toString().trim().toLowerCase();
-    return orderStatus === 'complete' || orderStatus === 'completed';
+    return orderStatus === 'complete' || orderStatus === 'completed' || orderStatus === 'assembly';
   }).length;
   const shippedOrders = orders.filter((o) => o.status === 'shipped');
 

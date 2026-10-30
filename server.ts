@@ -3338,7 +3338,7 @@ app.get('/api/orders', async (req, res) => {
   } else if (status === 'ready_to_ship') {
     result = result.filter((o) => {
       const dbStatusLower = (o.dbStatus || o.shippingStatus || o.status || '').toString().trim().toLowerCase();
-      return dbStatusLower === 'complete';
+      return dbStatusLower === 'complete' || dbStatusLower === 'completed' || dbStatusLower === 'assembly';
     });
   } else if (status) {
     result = result.filter((o) => o.status === status);
