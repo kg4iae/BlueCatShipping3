@@ -784,7 +784,7 @@ export default function App() {
 
 
       {/* Primary Workspace View Switcher */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      <main className="flex-1 max-w-[1600px] w-full mx-auto px-2 sm:px-4 py-4">
         {activeTab === 'dashboard' && (
           <Dashboard
             orders={orders}

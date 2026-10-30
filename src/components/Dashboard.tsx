@@ -246,10 +246,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
   }).length;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Overview Stat Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm flex items-center justify-between">
           <div>
             <p className="text-xs text-slate-500 uppercase font-bold tracking-wider mb-1">Orders in Queue</p>
             <h3 className="text-2xl font-bold text-slate-900">{orders.filter((o) => o.status !== 'shipped').length} Active</h3>
@@ -260,7 +260,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between">
+        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm flex items-center justify-between">
           <div>
             <p className="text-xs text-slate-500 uppercase font-bold tracking-wider mb-1">Pending Address Check</p>
             <h3 className="text-2xl font-bold text-amber-600">{pendingCount}</h3>
@@ -271,7 +271,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between">
+        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm flex items-center justify-between">
           <div>
             <p className="text-xs text-slate-500 uppercase font-bold tracking-wider mb-1">Validation Errors</p>
             <h3 className="text-2xl font-bold text-rose-600">{errorCount} Issues</h3>
@@ -282,7 +282,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm flex items-center justify-between">
+        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm flex items-center justify-between">
           <div>
             <p className="text-xs text-slate-500 uppercase font-bold tracking-wider mb-1">Validated &amp; Ready</p>
             <h3 className="text-2xl font-bold text-emerald-600">{readyCount} Verified</h3>
@@ -295,7 +295,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
       </div>
 
       {/* Main Table Action Toolbar & Workspace */}
-      <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-sm space-y-4">
+      <div className="bg-white border border-slate-200 rounded-xl p-3 sm:p-4 shadow-sm space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-4">
           {/* Status Filter Tabs */}
           <div className="flex items-center space-x-1 bg-slate-100 p-1 rounded-lg border border-slate-200 overflow-x-auto">
@@ -434,7 +434,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           <table className="w-full text-left border-collapse">
             <thead className="bg-slate-50 text-slate-500 uppercase text-[10px] font-bold tracking-widest border-b border-slate-200">
               <tr>
-                <th className="py-3 px-3 w-10 text-center">
+                <th className="py-2.5 px-2 w-8 text-center">
                   <button
                     onClick={toggleSelectAll}
                     className="text-slate-500 hover:text-slate-800 cursor-pointer"
@@ -447,12 +447,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     )}
                   </button>
                 </th>
-                <th className="py-3 px-3">Order ID</th>
-                <th className="py-3 px-3">Recipient</th>
-                <th className="py-3 px-3">Order Details</th>
-                <th className="py-3 px-3">Package Box</th>
-                <th className="py-3 px-3">
-                  <div className="flex items-center space-x-1.5">
+                <th className="py-2.5 px-2 whitespace-nowrap">Order ID</th>
+                <th className="py-2.5 px-2 whitespace-nowrap">Recipient</th>
+                <th className="py-2.5 px-2 w-[42%] min-w-[320px]">Order Details</th>
+                <th className="py-2.5 px-2 whitespace-nowrap">Package Box</th>
+                <th className="py-2.5 px-2 w-px whitespace-nowrap">
+                  <div className="flex items-center space-x-1">
                     <span>Carrier Rates</span>
                     {onRefreshRates && (
                       <button
@@ -466,8 +466,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     )}
                   </div>
                 </th>
-                <th className="py-3 px-3">Status</th>
-                <th className="py-3 px-3 text-right">Action</th>
+                <th className="py-2.5 px-2 whitespace-nowrap">Status</th>
+                <th className="py-2.5 px-2 text-right whitespace-nowrap">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-xs text-slate-800">
@@ -497,7 +497,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       }`}
                     >
                       {/* Selection Checkbox */}
-                      <td className="py-3 px-3 text-center">
+                      <td className="py-2.5 px-2 text-center">
                         <button
                           onClick={() => toggleSelectOrder(order.id)}
                           className={`cursor-pointer ${
@@ -509,7 +509,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       </td>
 
                       {/* Order Ref & Date */}
-                      <td className="py-3 px-3 font-mono text-xs text-indigo-600 font-semibold">
+                      <td className="py-2.5 px-2 font-mono text-xs text-indigo-600 font-semibold whitespace-nowrap">
                         <div className="flex items-center space-x-1.5">
                           <button
                             onClick={() => onOpenOrderDetailModal && onOpenOrderDetailModal(order)}
@@ -546,7 +546,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             return (
                               <span
                                 className={`text-[9px] font-mono px-1.5 py-0.2 rounded border font-semibold ${badgeStyle}`}
-                                title={`dbo.shipping.status: ${rawStatus}`}
+                                title={`Shipping.status: ${rawStatus}`}
                               >
                                 {rawStatus}
                               </span>
@@ -556,9 +556,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       </td>
 
                       {/* Recipient */}
-                      <td className="py-3 px-3 font-medium text-slate-900">
+                      <td className="py-2.5 px-2 font-medium text-slate-900 whitespace-nowrap">
                         {/* Line 1: Name */}
-                        <div className="text-xs font-bold text-slate-900 truncate max-w-[220px]" title={order.recipientName}>
+                        <div className="text-xs font-bold text-slate-900 truncate max-w-[180px]" title={order.recipientName}>
                           <span>{order.recipientName}</span>
                         </div>
 
@@ -577,10 +577,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       </td>
 
                       {/* Order Details */}
-                      <td className="py-3 px-3 text-slate-700 max-w-xs text-xs">
+                      <td className="py-2.5 px-2 text-slate-700 w-[42%] min-w-[320px] text-xs">
                         {order.items && order.items.length > 0 ? (
                           <div className="space-y-1 text-xs">
-                            {order.items.slice(0, 2).map((item, idx) => (
+                            {order.items.slice(0, 3).map((item, idx) => (
                               <div key={idx} className="text-xs flex items-center flex-wrap gap-x-1.5 gap-y-0.5">
                                 <span className="font-bold text-slate-900 bg-slate-100 px-1.5 py-0.5 rounded text-xs">{item.quantity}x</span>
                                 <span className="text-slate-800 font-semibold text-xs">{item.name}</span>
@@ -596,9 +596,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                 )}
                               </div>
                             ))}
-                            {order.items.length > 2 && (
+                            {order.items.length > 3 && (
                               <div className="text-xs text-indigo-600 font-semibold">
-                                +{order.items.length - 2} more item{order.items.length - 2 > 1 ? 's' : ''}
+                                +{order.items.length - 3} more item{order.items.length - 3 > 1 ? 's' : ''}
                               </div>
                             )}
                           </div>
@@ -635,7 +635,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       </td>
 
                       {/* Box Dropdown */}
-                      <td className="py-3 px-3">
+                      <td className="py-2.5 px-2 whitespace-nowrap">
                         {(() => {
                           const boxError = order.validationErrors?.find((e) => e.toLowerCase().includes('box'));
                           const isUndetermined = !order.boxId || order.boxId === 'undetermined' || Boolean(boxError);
@@ -651,7 +651,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                               <select
                                 value={order.boxId || ''}
                                 onChange={(e) => onUpdateOrderBox(order.id, e.target.value)}
-                                className={`text-xs rounded px-2 py-1 outline-none w-36 cursor-pointer transition-all ${
+                                className={`text-xs rounded px-1.5 py-1 outline-none w-32 cursor-pointer transition-all ${
                                   isUndetermined
                                     ? 'bg-rose-50 border-2 border-rose-400 text-rose-900 font-semibold focus:ring-2 focus:ring-rose-500'
                                     : 'bg-slate-100 border border-slate-300 text-slate-800 focus:ring-2 focus:ring-indigo-500'
@@ -668,7 +668,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                 ))}
                               </select>
                               {boxError && (
-                                <div className="text-[10px] text-rose-600 leading-tight max-w-[150px] truncate" title={boxError}>
+                                <div className="text-[10px] text-rose-600 leading-tight max-w-[140px] truncate" title={boxError}>
                                   {boxError}
                                 </div>
                               )}
@@ -678,60 +678,38 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       </td>
 
                       {/* Carrier Rates / Shipping Cost */}
-                      <td className="py-3 px-3">
+                      <td className="py-2.5 px-2 w-px whitespace-nowrap">
                         {(() => {
                           const cost = getOrderCarrierRate(order);
                           const carrierDisplay = order.carrier || (countryInfo ? (settings?.defaultInternationalCarrier || 'UPS') : (settings?.defaultDomesticCarrier || 'USPS'));
                           const serviceDisplay = order.serviceLevel || (countryInfo ? (settings?.defaultInternationalService || 'UPS Worldwide Expedited') : (settings?.defaultDomesticService || 'Priority'));
 
                           return countryInfo ? (
-                            <div className="flex items-center space-x-1.5">
-                              <button
-                                onClick={() => onOpenCompareRatesModal && onOpenCompareRatesModal(order)}
-                                className="inline-flex items-center space-x-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 px-2 py-1 rounded-lg text-xs font-bold cursor-pointer transition-colors shadow-2xs"
-                                title="Click to compare and change carrier rates for this international order"
-                              >
-                                <DollarSign className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                                <span>{carrierDisplay} {serviceDisplay}</span>
-                                <span className="bg-amber-200 text-amber-950 px-1.5 py-0.5 rounded font-black text-xs">${cost.toFixed(2)}</span>
-                              </button>
-                              {onOpenCompareRatesModal && (
-                                <button
-                                  onClick={() => onOpenCompareRatesModal(order)}
-                                  className="text-xs text-amber-700 hover:text-amber-900 font-semibold underline cursor-pointer"
-                                  title="Change carrier rate"
-                                >
-                                  Change
-                                </button>
-                              )}
-                            </div>
+                            <button
+                              onClick={() => onOpenCompareRatesModal && onOpenCompareRatesModal(order)}
+                              className="inline-flex items-center space-x-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 px-2 py-1 rounded-lg text-[11px] font-bold cursor-pointer transition-colors shadow-2xs"
+                              title="Click to compare and change carrier rates for this international order"
+                            >
+                              <DollarSign className="w-3 h-3 text-amber-600 shrink-0" />
+                              <span className="truncate max-w-[130px]">{carrierDisplay} {serviceDisplay}</span>
+                              <span className="bg-amber-200 text-amber-950 px-1.5 py-0.5 rounded font-black text-[11px]">${cost.toFixed(2)}</span>
+                            </button>
                           ) : (
-                            <div className="flex items-center space-x-1.5">
-                              <button
-                                onClick={() => onOpenCompareRatesModal && onOpenCompareRatesModal(order)}
-                                className="inline-flex items-center space-x-1.5 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 px-2 py-1 rounded-lg text-xs font-bold cursor-pointer transition-colors shadow-2xs text-left"
-                                title="Click to change carrier, service, or price"
-                              >
-                                <Truck className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                                <span>{carrierDisplay} {serviceDisplay}</span>
-                                <span className="bg-blue-100 text-blue-950 px-1.5 py-0.5 rounded font-black text-xs">${cost.toFixed(2)}</span>
-                              </button>
-                              {onOpenCompareRatesModal && (
-                                <button
-                                  onClick={() => onOpenCompareRatesModal(order)}
-                                  className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold underline cursor-pointer ml-0.5"
-                                  title="Change carrier rate"
-                                >
-                                  Change
-                                </button>
-                              )}
-                            </div>
+                            <button
+                              onClick={() => onOpenCompareRatesModal && onOpenCompareRatesModal(order)}
+                              className="inline-flex items-center space-x-1 bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200 px-2 py-1 rounded-lg text-[11px] font-bold cursor-pointer transition-colors shadow-2xs text-left"
+                              title="Click to compare and change carrier, service, or price"
+                            >
+                              <Truck className="w-3 h-3 text-blue-600 shrink-0" />
+                              <span className="truncate max-w-[130px]">{carrierDisplay} {serviceDisplay}</span>
+                              <span className="bg-blue-100 text-blue-950 px-1.5 py-0.5 rounded font-black text-[11px]">${cost.toFixed(2)}</span>
+                            </button>
                           );
                         })()}
                       </td>
 
                       {/* Status */}
-                      <td className="py-3 px-3">
+                      <td className="py-2.5 px-2 whitespace-nowrap">
                         {order.status === 'ready_to_ship' && (
                           <span className="inline-flex items-center gap-1 text-emerald-700 font-bold text-[10px] uppercase tracking-wide bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
                             <CheckCircle2 className="w-3 h-3 text-emerald-600" />
@@ -761,7 +739,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       </td>
 
                       {/* Action */}
-                      <td className="py-3 px-3 text-right">
+                      <td className="py-2.5 px-2 text-right whitespace-nowrap">
                         {order.status === 'address_error' ? (
                           order.validationErrors?.some((e) => e.toLowerCase().includes('box')) ? (
                             <button
