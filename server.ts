@@ -458,7 +458,10 @@ async function markOrderFulfilledInMysql(
   if (!isNaN(numericId) && numericId > 0) {
     await pool.execute('UPDATE Shipping SET Fulfilled = NOW() WHERE Id = ?', [numericId]);
   } else {
-    await pool.execute('UPDATE Shipping SET Fulfilled = NOW() WHERE OrderNumber = ?', [order.orderNumber]);
+    await pool.execute('UPDATE Shipping SET Fulfilled = NOW() WHERE OrderNumber = ? OR receiptID = ?', [
+      order.orderNumber,
+      order.orderNumber,
+    ]);
   }
 
   const transactionId = (order as any).transactionId || order.orderNumber;
@@ -468,6 +471,12 @@ async function markOrderFulfilledInMysql(
         "UPDATE orderstatus SET Status = 'Shipped', UpdatedAt = NOW() WHERE TransactionID = ?",
         [transactionId]
       );
+      if (order.orderNumber) {
+        await pool.execute(
+          "UPDATE orderstatus SET Status = 'Shipped', UpdatedAt = NOW() WHERE ReceiptID = ?",
+          [order.orderNumber]
+        );
+      }
     } catch (err: any) {
       console.warn('[MySQL] Notice updating orderstatus:', err?.message || err);
     }
@@ -609,7 +618,7 @@ async function ensureMssqlTables(pool: mysql.Pool): Promise<void> {
           \`email\` VARCHAR(255) NULL,
           \`OrderNumber\` VARCHAR(100) NULL,
           \`CreateDate\` DATETIME NULL DEFAULT CURRENT_TIMESTAMP,
-          \`Override\` VARCHAR(100) NULL,
+          \`Override\` TINYINT(1) NULL DEFAULT 0,
           \`Service\` VARCHAR(100) NULL,
           \`Fulfilled\` DATETIME NULL,
           \`address1\` TEXT NULL,
@@ -687,7 +696,7 @@ async function ensureMssqlTables(pool: mysql.Pool): Promise<void> {
         ['email', 'VARCHAR(255) NULL'],
         ['OrderNumber', 'VARCHAR(100) NULL'],
         ['CreateDate', 'DATETIME NULL DEFAULT CURRENT_TIMESTAMP'],
-        ['Override', 'VARCHAR(100) NULL'],
+        ['Override', 'TINYINT(1) NULL DEFAULT 0'],
         ['Service', 'VARCHAR(100) NULL'],
         ['Fulfilled', 'DATETIME NULL'],
         ['address1', 'TEXT NULL'],
@@ -713,6 +722,64 @@ async function ensureMssqlTables(pool: mysql.Pool): Promise<void> {
       for (const [col, def] of shippingColsToEnsure) {
         await ensureMysqlColumn(pool, 'Shipping', col, def);
         await ensureMysqlColumn(pool, 'shippingdev', col, def);
+      }
+
+      // Ensure OrderNumber on Shipping can hold full receiptIDs (up to 100 chars instead of 20)
+      try {
+        await pool.query('ALTER TABLE `Shipping` MODIFY COLUMN `OrderNumber` VARCHAR(100) NULL');
+      } catch {}
+
+      // Backfill Fulfilled, Street1, Street2, Zip, OrderNumber, and CreateDate on Shipping & shippingdev
+      for (const tbl of ['`Shipping`', '`shippingdev`']) {
+        try {
+          // 1. Mark historical shipped rows as Fulfilled so Fulfilled IS NULL only returns active orders
+          await pool.query(`
+            UPDATE ${tbl}
+            SET \`Fulfilled\` = CASE
+              WHEN \`shippingDate\` IS NOT NULL AND YEAR(\`shippingDate\`) > 1970 THEN \`shippingDate\`
+              WHEN \`createdAt\` IS NOT NULL AND YEAR(\`createdAt\`) > 1970 THEN \`createdAt\`
+              ELSE NOW()
+            END
+            WHERE \`Fulfilled\` IS NULL
+              AND (
+                LOWER(TRIM(IFNULL(\`status\`, ''))) = 'shipped'
+                OR (\`trackingNumber\` IS NOT NULL AND TRIM(\`trackingNumber\`) != '')
+              )
+          `);
+
+          // 2. Sync Street1, Street2, Zip, OrderNumber, CreateDate from address1, address2, postalCode, receiptID, createdAt
+          await pool.query(`
+            UPDATE ${tbl}
+            SET \`Street1\` = \`address1\`
+            WHERE (\`Street1\` IS NULL OR TRIM(\`Street1\`) = '')
+              AND \`address1\` IS NOT NULL AND TRIM(\`address1\`) != ''
+          `);
+          await pool.query(`
+            UPDATE ${tbl}
+            SET \`Street2\` = \`address2\`
+            WHERE (\`Street2\` IS NULL OR TRIM(\`Street2\`) = '')
+              AND \`address2\` IS NOT NULL AND TRIM(\`address2\`) != ''
+          `);
+          await pool.query(`
+            UPDATE ${tbl}
+            SET \`Zip\` = \`postalCode\`
+            WHERE (\`Zip\` IS NULL OR TRIM(\`Zip\`) = '')
+              AND \`postalCode\` IS NOT NULL AND TRIM(\`postalCode\`) != ''
+          `);
+          await pool.query(`
+            UPDATE ${tbl}
+            SET \`OrderNumber\` = \`receiptID\`
+            WHERE (\`OrderNumber\` IS NULL OR TRIM(\`OrderNumber\`) = '')
+              AND \`receiptID\` IS NOT NULL AND TRIM(\`receiptID\`) != ''
+          `);
+          await pool.query(`
+            UPDATE ${tbl}
+            SET \`CreateDate\` = \`createdAt\`
+            WHERE \`createdAt\` IS NOT NULL AND YEAR(\`createdAt\`) > 1970
+          `);
+        } catch (syncErr: any) {
+          console.warn(`[MySQL] Column sync notice on ${tbl}:`, syncErr?.message || syncErr);
+        }
       }
 
       // 3. Shared BlueCat Bobbins tables: orderlist, orderstatus, ServiceLog
@@ -838,7 +905,43 @@ async function ensureMssqlTables(pool: mysql.Pool): Promise<void> {
         for (const pkg of db.packages) {
           await savePackageToMssqlPool(pool, pkg);
         }
+      } else {
+        // Load live packages from MySQL so box determination uses real Package IDs
+        const [pkgRows] = await pool.query<mysql.RowDataPacket[]>('SELECT * FROM `Package` ORDER BY `Id` ASC');
+        if (pkgRows && pkgRows.length > 0) {
+          db.packages = pkgRows.map((row: any) => ({
+            id: String(row.Id),
+            code: `PKG-${row.Id}`,
+            name: String(row.Name),
+            length: Number(row.Length) || 0,
+            width: Number(row.Width) || 0,
+            height: Number(row.Height) || 0,
+            weightEmptyOz: Number(row.Weight) || 0,
+            maxWeightLbs: 70,
+            easyPostType: 'Parcel',
+            isActive: true,
+          }));
+        }
       }
+
+      // Load live BobbinPackagingRules from MySQL so box determination uses real rules
+      try {
+        const [ruleRows] = await pool.query<mysql.RowDataPacket[]>(
+          'SELECT `Id`, `Pattern`, `Classification`, `MaxCubeQty`, `MaxRateBoxQty`, `Notes`, `CreatedAt`, `UpdatedAt` FROM `BobbinPackagingRules` ORDER BY `Id` ASC'
+        );
+        if (ruleRows && ruleRows.length > 0) {
+          db.packagingRules = ruleRows.map((row: any) => ({
+            id: row.Id,
+            pattern: String(row.Pattern || ''),
+            classification: String(row.Classification || 'Standard'),
+            maxCubeQty: Number(row.MaxCubeQty) || 0,
+            maxRateBoxQty: Number(row.MaxRateBoxQty) || 0,
+            notes: row.Notes ? String(row.Notes) : '',
+            createdAt: row.CreatedAt ? new Date(row.CreatedAt).toISOString() : undefined,
+            updatedAt: row.UpdatedAt ? new Date(row.UpdatedAt).toISOString() : undefined,
+          }));
+        }
+      } catch {}
 
       // Check count in active shipping table; if empty and we have seed orders, populate MySQL
       const activeTable = getShippingTableName();
@@ -1424,6 +1527,7 @@ async function saveOrderToMssqlPool(pool: mysql.Pool, order: ShippingOrder) {
     const platformVal = order.marketplace || order.company || 'Web App';
     const totalWeightVal = order.weightOz || 16;
     const boxVal = order.boxId || null;
+    const overrideFlagVal = boxVal ? 1 : 0;
     const easypostShipmentIdVal = order.easypostShipmentId || null;
     const marketplaceNotifiedVal = order.marketplacenotified || 'No';
 
@@ -1454,7 +1558,7 @@ async function saveOrderToMssqlPool(pool: mysql.Pool, order: ShippingOrder) {
           \`postalCode\` = ?,
           \`phone\` = ?,
           \`email\` = ?,
-          \`OrderDetails\` = ?,
+          \`OrderDetails\` = COALESCE(?, \`OrderDetails\`),
           \`receiptID\` = ?,
           \`Carrier\` = ?,
           \`Service\` = ?,
@@ -1470,7 +1574,7 @@ async function saveOrderToMssqlPool(pool: mysql.Pool, order: ShippingOrder) {
         WHERE \`Id\` = ?`,
         [
           nameVal, address1Val, address2Val, cityVal, stateVal, postalCodeVal, countryVal,
-          receiptIdVal, boxVal, fulfilledVal,
+          receiptIdVal, overrideFlagVal, fulfilledVal,
           address1Val, address2Val, postalCodeVal, phoneVal, emailVal,
           orderDetailsString, receiptIdVal, carrierVal, serviceVal, trackingNumberVal,
           mysqlStatus, shippingCostVal, shippingDateVal, platformVal,
@@ -1502,7 +1606,7 @@ async function saveOrderToMssqlPool(pool: mysql.Pool, order: ShippingOrder) {
             \`postalCode\` = ?,
             \`phone\` = ?,
             \`email\` = ?,
-            \`OrderDetails\` = ?,
+            \`OrderDetails\` = COALESCE(?, \`OrderDetails\`),
             \`Carrier\` = ?,
             \`Service\` = ?,
             \`trackingNumber\` = ?,
@@ -1517,7 +1621,7 @@ async function saveOrderToMssqlPool(pool: mysql.Pool, order: ShippingOrder) {
           WHERE \`receiptID\` = ? OR \`OrderNumber\` = ?`,
           [
             nameVal, address1Val, address2Val, cityVal, stateVal, postalCodeVal, countryVal,
-            receiptIdVal, boxVal, fulfilledVal,
+            receiptIdVal, overrideFlagVal, fulfilledVal,
             address1Val, address2Val, postalCodeVal, phoneVal, emailVal,
             orderDetailsString, carrierVal, serviceVal, trackingNumberVal,
             mysqlStatus, shippingCostVal, shippingDateVal, platformVal,
@@ -1537,7 +1641,7 @@ async function saveOrderToMssqlPool(pool: mysql.Pool, order: ShippingOrder) {
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             transactionIdVal, nameVal, address1Val, address2Val, cityVal, stateVal, postalCodeVal, countryVal,
-            receiptIdVal, createdAtVal, boxVal, fulfilledVal,
+            receiptIdVal, createdAtVal, overrideFlagVal, fulfilledVal,
             address1Val, address2Val, postalCodeVal, phoneVal, emailVal,
             createdAtVal, orderDetailsString, receiptIdVal, carrierVal, serviceVal,
             trackingNumberVal, mysqlStatus, shippingCostVal, shippingDateVal, platformVal,
@@ -1686,20 +1790,30 @@ function parseOrderDetailsString(rawDetails: string | null | undefined): { items
   return { items, parseError };
 }
 
+// Helper: Return the first non-null, non-undefined, non-empty string value
+function firstNonEmptyString(...vals: any[]): string {
+  for (const v of vals) {
+    if (v !== null && v !== undefined) {
+      const str = String(v).trim();
+      if (str !== '') return str;
+    }
+  }
+  return '';
+}
+
 // Helper: Map raw database row from `Shipping` / `shippingdev` to ShippingOrder
 function mapDbRowToShippingOrder(row: any, tableName: string, externalItems?: OrderItem[]): ShippingOrder {
   const validationErrors: string[] = [];
 
-  const rawCountryVal = row.Country ?? row.country ?? 'US';
-  const rawCountry = String(rawCountryVal).trim().toUpperCase();
+  const country = firstNonEmptyString(row.Country, row.country) || 'US';
+  const rawCountry = country.toUpperCase();
   const isIntl = rawCountry !== 'US' && rawCountry !== 'USA' && rawCountry !== 'UNITED STATES' && rawCountry !== 'UNITED STATES OF AMERICA';
 
-  const street1 = String(row.Street1 ?? row.street1 ?? row.address1 ?? '');
-  const street2 = String(row.Street2 ?? row.street2 ?? row.address2 ?? '');
-  const city = String(row.City ?? row.city ?? '');
-  const state = String(row.State ?? row.state ?? '');
-  const zip = String(row.Zip ?? row.zip ?? row.postalCode ?? '');
-  const country = String(row.Country ?? row.country ?? 'US');
+  const street1 = firstNonEmptyString(row.address1, row.Street1, row.street1);
+  const street2 = firstNonEmptyString(row.address2, row.Street2, row.street2);
+  const city = firstNonEmptyString(row.City, row.city);
+  const state = firstNonEmptyString(row.State, row.state);
+  const zip = firstNonEmptyString(row.postalCode, row.Zip, row.zip);
 
   // Validate address syntax
   const addrVal = validateAddressWithEasyPost({ street1, street2, city, state, zip, country });
@@ -1713,25 +1827,26 @@ function mapDbRowToShippingOrder(row: any, tableName: string, externalItems?: Or
     validationErrors.push('Total Weight is set to 0 oz - Needs weight correction');
   }
 
-  // Parse OrderDetails or use items from `orderlist`
+  // Parse OrderDetails from Shipping row first; fall back to `orderlist` items if OrderDetails is blank
   let items: OrderItem[] = [];
-  if (externalItems && externalItems.length > 0) {
-    items = externalItems;
-  } else if (row.OrderDetails) {
-    const parsed = parseOrderDetailsString(row.OrderDetails);
+  const rawOrderDetails = firstNonEmptyString(row.OrderDetails, row.orderDetails);
+  if (rawOrderDetails) {
+    const parsed = parseOrderDetailsString(rawOrderDetails);
     items = parsed.items;
     if (parsed.parseError) {
       validationErrors.push(parsed.parseError);
     }
+  } else if (externalItems && externalItems.length > 0) {
+    items = externalItems;
   } else {
     items = [{ id: 'item-1', sku: 'BOBBIN-STD', name: 'BlueCat Bobbin', quantity: 1, price: 0, weightOz: 4 }];
   }
 
-  const rawTracking = row.trackingNumber ? String(row.trackingNumber).trim() : '';
+  const rawTracking = firstNonEmptyString(row.trackingNumber, row.TrackingNumber);
   const hasTracking = Boolean(rawTracking.length > 0);
   const fulfilledVal = row.Fulfilled ?? row.fulfilled;
-  const isFulfilled = Boolean(fulfilledVal);
-  const rawStatus = (row.status || '').toString().trim();
+  const isFulfilled = Boolean(fulfilledVal && new Date(fulfilledVal).getFullYear() > 1970);
+  const rawStatus = firstNonEmptyString(row.status, row.Status);
   const rawStatusLower = rawStatus.toLowerCase();
 
   const validStatuses: OrderStatus[] = ['pending_validation', 'address_error', 'ready_to_ship', 'shipped', 'cancelled'];
@@ -1757,17 +1872,17 @@ function mapDbRowToShippingOrder(row: any, tableName: string, externalItems?: Or
     ? (db.settings.defaultDomesticService || 'Priority')
     : (db.settings.defaultInternationalService || 'UPS Worldwide Expedited');
 
-  const rawCarrier = row.Carrier || row.carrier;
-  const rawService = row.Service || row.service;
-  const rawShippingMethod = row.shippingMethod ? String(row.shippingMethod).trim() : '';
+  const rawCarrier = firstNonEmptyString(row.Carrier, row.carrier);
+  const rawService = firstNonEmptyString(row.Service, row.service);
+  const rawShippingMethod = firstNonEmptyString(row.shippingMethod);
 
   let carrierVal: CarrierType = defaultCarrierSetting;
   let serviceLevelVal: string = defaultServiceSetting;
 
-  if (rawCarrier && String(rawCarrier).trim()) {
-    carrierVal = normalizeCarrierName(String(rawCarrier).trim());
-    if (rawService && String(rawService).trim()) {
-      serviceLevelVal = String(rawService).trim();
+  if (rawCarrier) {
+    carrierVal = normalizeCarrierName(rawCarrier);
+    if (rawService) {
+      serviceLevelVal = rawService;
     }
   } else if (rawShippingMethod) {
     const firstWord = rawShippingMethod.split(' ')[0].toUpperCase();
@@ -1778,14 +1893,13 @@ function mapDbRowToShippingOrder(row: any, tableName: string, externalItems?: Or
     } else {
       serviceLevelVal = rawShippingMethod;
     }
-  } else if (rawService && String(rawService).trim()) {
-    const svcStr = String(rawService).trim();
-    if (svcStr.toUpperCase().startsWith('UPS')) {
+  } else if (rawService) {
+    if (rawService.toUpperCase().startsWith('UPS')) {
       carrierVal = 'UPS';
-    } else if (svcStr.toUpperCase().startsWith('USPS')) {
+    } else if (rawService.toUpperCase().startsWith('USPS')) {
       carrierVal = 'USPS';
     }
-    serviceLevelVal = svcStr;
+    serviceLevelVal = rawService;
   }
 
   const hasLabelBinary = Boolean(
@@ -1794,12 +1908,13 @@ function mapDbRowToShippingOrder(row: any, tableName: string, externalItems?: Or
     (row.LabelData && (Buffer.isBuffer(row.LabelData) ? row.LabelData.length > 0 : true))
   );
 
-  // Resolve Box Packaging from database row (`box` or `Override`) or BobbinPackagingRules
-  const rawBox = String(row.box ?? row.Override ?? row.override ?? '').trim();
+  // Resolve Box Packaging from database row (`box`) or BobbinPackagingRules
+  // Note: `Override` in `Shipping` is TINYINT(1) (0 or 1 flag), not a box ID
+  const rawBox = firstNonEmptyString(row.box);
   let resolvedBoxId = '';
   let resolvedBoxName = '';
 
-  if (rawBox && rawBox !== 'pkg_medium' && rawBox !== 'undetermined' && rawBox !== 'Undetermined') {
+  if (rawBox && rawBox !== '0' && rawBox !== 'pkg_medium' && rawBox !== 'undetermined' && rawBox !== 'Undetermined') {
     const matchedPkg = (db.packages || []).find((p) => p.id === rawBox || p.name.toLowerCase() === rawBox.toLowerCase());
     if (matchedPkg) {
       resolvedBoxId = matchedPkg.id;
@@ -1832,16 +1947,33 @@ function mapDbRowToShippingOrder(row: any, tableName: string, externalItems?: Or
     statusVal = 'address_error';
   }
 
-  const orderNumberVal = row.OrderNumber ?? row.orderNumber ?? row.receiptID;
-  const recipientNameVal = row.Name ?? row.name;
-  const createDateVal = row.CreateDate ?? row.createDate ?? row.createdAt;
-  const shipDateVal = row.shippingDate ?? fulfilledVal;
-  const transactionIdVal = row.TransactionId ?? row.TransactionID ?? row.transactionId;
+  const orderNumberVal = firstNonEmptyString(row.receiptID, row.OrderNumber, row.orderNumber);
+  const recipientNameVal = firstNonEmptyString(row.Name, row.name);
+
+  // Prefer createdAt (original order timestamp) over CreateDate if valid (> 1970)
+  const rawCreatedAt = row.createdAt ? new Date(row.createdAt) : null;
+  const rawCreateDate = (row.CreateDate ?? row.createDate) ? new Date(row.CreateDate ?? row.createDate) : null;
+  const validOrderDate =
+    rawCreatedAt && !isNaN(rawCreatedAt.getTime()) && rawCreatedAt.getFullYear() > 1970
+      ? rawCreatedAt
+      : rawCreateDate && !isNaN(rawCreateDate.getTime()) && rawCreateDate.getFullYear() > 1970
+      ? rawCreateDate
+      : new Date();
+
+  // Ignore 1900-01-01 / 1899-12-31 zero dates on shippingDate
+  const rawShipDateCandidate = row.shippingDate ?? fulfilledVal;
+  const parsedShipDate = rawShipDateCandidate ? new Date(rawShipDateCandidate) : null;
+  const validShipDate =
+    parsedShipDate && !isNaN(parsedShipDate.getTime()) && parsedShipDate.getFullYear() > 1970
+      ? parsedShipDate.toISOString()
+      : undefined;
+
+  const transactionIdVal = firstNonEmptyString(row.TransactionId, row.TransactionID, row.transactionId);
 
   const mappedOrder: ShippingOrder & { transactionId?: string } = {
     id: String(row.Id),
-    orderNumber: orderNumberVal ? String(orderNumberVal) : `ORD-${row.Id}`,
-    recipientName: recipientNameVal ? String(recipientNameVal) : 'Valued Customer',
+    orderNumber: orderNumberVal || `ORD-${row.Id}`,
+    recipientName: recipientNameVal || 'Valued Customer',
     company: '',
     marketplace: row.platform ? String(row.platform) : '',
     street1,
@@ -1852,7 +1984,7 @@ function mapDbRowToShippingOrder(row: any, tableName: string, externalItems?: Or
     country,
     phone: row.phone ? String(row.phone) : '',
     email: row.email ? String(row.email) : '',
-    orderDate: createDateVal ? new Date(createDateVal).toISOString() : new Date().toISOString(),
+    orderDate: validOrderDate.toISOString(),
     status: statusVal,
     dbStatus: rawStatus || (hasTracking || statusVal === 'shipped' ? 'shipped' : 'New'),
     shippingStatus: rawStatus || (hasTracking || statusVal === 'shipped' ? 'shipped' : 'New'),
@@ -1871,7 +2003,7 @@ function mapDbRowToShippingOrder(row: any, tableName: string, externalItems?: Or
     carrier: carrierVal,
     serviceLevel: serviceLevelVal,
     shippingCost: row.shippingCost !== null && row.shippingCost !== undefined ? Number(row.shippingCost) : undefined,
-    shippingDate: shipDateVal ? new Date(shipDateVal).toISOString() : undefined,
+    shippingDate: validShipDate,
     easypostShipmentId: row.easypostShipmentId ? String(row.easypostShipmentId) : undefined,
     marketplacenotified: row.marketplacenotified ? String(row.marketplacenotified) : 'No',
     labelUrl: `/api/orders/${String(row.Id)}/label.pdf`,
@@ -1884,7 +2016,7 @@ function mapDbRowToShippingOrder(row: any, tableName: string, externalItems?: Or
   };
 
   if (transactionIdVal) {
-    mappedOrder.transactionId = String(transactionIdVal);
+    mappedOrder.transactionId = transactionIdVal;
   }
 
   return mappedOrder;
@@ -1898,21 +2030,9 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
   try {
     await ensureMssqlTables(pool);
     const tableName = getShippingTableName();
-    const isProd = getActiveAppEnv() === 'prod';
 
-    // 1. Run the unfulfilled shipments query on Shipping
-    let unfulfilledBaseRows: mysql.RowDataPacket[] = [];
-    if (isProd) {
-      try {
-        const [rows] = await pool.query<mysql.RowDataPacket[]>(
-          'SELECT Id, TransactionId, Name, Street1, Street2, City, State, Zip, Country, email, OrderNumber, CreateDate, Override, Service, Fulfilled FROM Shipping WHERE Fulfilled IS NULL ORDER BY CreateDate ASC'
-        );
-        unfulfilledBaseRows = rows;
-      } catch {}
-    }
-
-    // 2. Fetch full active rows with additional fulfillment metadata columns
-    const [activeFullRows] = await pool.query<mysql.RowDataPacket[]>(`
+    // 1. Fetch active unfulfilled orders (only rows that are NOT shipped and have no tracking number)
+    const [activeRows] = await pool.query<mysql.RowDataPacket[]>(`
       SELECT
         \`Id\`, \`TransactionId\`, \`Name\`, \`Street1\`, \`Street2\`, \`City\`, \`State\`, \`Zip\`, \`Country\`,
         \`OrderNumber\`, \`CreateDate\`, \`Override\`, \`Fulfilled\`,
@@ -1923,49 +2043,47 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
         CASE WHEN \`LabelData\` IS NOT NULL AND OCTET_LENGTH(\`LabelData\`) > 0 THEN 1 ELSE 0 END AS \`hasLabel\`
       FROM ${tableName}
       WHERE \`Fulfilled\` IS NULL
-        AND (\`status\` != 'shipped' OR \`status\` IS NULL)
+        AND (\`status\` IS NULL OR LOWER(TRIM(\`status\`)) != 'shipped')
         AND (\`trackingNumber\` IS NULL OR TRIM(\`trackingNumber\`) = '')
-      ORDER BY IFNULL(\`CreateDate\`, \`createdAt\`) ASC, \`Id\` DESC
+      ORDER BY IFNULL(\`createdAt\`, \`CreateDate\`) ASC, \`Id\` DESC
     `);
 
-    // Merge unfulfilledBaseRows and activeFullRows by Id
-    const activeById = new Map<number, any>();
-    for (const r of unfulfilledBaseRows) {
-      activeById.set(Number(r.Id), { ...r });
-    }
-    for (const r of activeFullRows) {
-      const existing = activeById.get(Number(r.Id)) || {};
-      activeById.set(Number(r.Id), { ...existing, ...r });
-    }
-    const activeRows = Array.from(activeById.values());
-
-    // 3. Load line items from `orderlist` table if available
+    // 2. Load line items from `orderlist` table as fallback if any row has empty OrderDetails
     const orderItemsMap = new Map<string, OrderItem[]>();
     try {
       const [itemRows] = await pool.query<mysql.RowDataPacket[]>('SELECT * FROM `orderlist`');
       for (const ir of itemRows) {
-        const key = String(ir.TransactionId ?? ir.TransactionID ?? ir.OrderNumber ?? ir.receiptID ?? '').trim();
-        if (!key) continue;
-        const list = orderItemsMap.get(key) || [];
-        const qty = Number(ir.Quantity ?? ir.quantity ?? ir.qty) || 1;
-        const itemName = String(ir.ItemName ?? ir.Name ?? ir.name ?? ir.ProductName ?? 'Bobbin');
-        const itemType = ir.ItemType ?? ir.Type ?? ir.itemType;
-        const color = ir.Color ?? ir.color;
-        list.push({
-          id: `ol-${ir.Id || list.length + 1}`,
-          sku: String(ir.SKU ?? ir.sku ?? itemName.slice(0, 8).toUpperCase()),
+        const keys = [
+          firstNonEmptyString(ir.receiptid, ir.receiptID, ir.ReceiptID),
+          firstNonEmptyString(ir.OrderNumber, ir.orderNumber),
+          firstNonEmptyString(ir.transactionid, ir.TransactionId, ir.TransactionID),
+        ].filter(Boolean);
+        if (keys.length === 0) continue;
+
+        const qty = Number(ir.quantity ?? ir.Quantity ?? ir.qty) || 1;
+        const itemName = firstNonEmptyString(ir.name, ir.Name, ir.ItemName, ir.ProductName) || 'Bobbin';
+        const itemType = firstNonEmptyString(ir.style, ir.Style, ir.ItemType, ir.Type, ir.itemType);
+        const color = firstNonEmptyString(ir.color, ir.Color);
+        const itemObj: OrderItem = {
+          id: `ol-${ir.id ?? ir.Id ?? Date.now()}`,
+          sku: firstNonEmptyString(ir.SKU, ir.sku) || itemName.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8).toUpperCase(),
           name: itemName,
-          itemType: itemType ? String(itemType) : undefined,
-          color: color ? String(color) : undefined,
+          itemType: itemType || undefined,
+          color: color || undefined,
           quantity: qty,
           price: Number(ir.Price ?? ir.price) || 0,
           weightOz: Number(ir.WeightOz ?? ir.Weight) || 4 * qty,
-        });
-        orderItemsMap.set(key, list);
+        };
+
+        for (const key of new Set(keys)) {
+          const list = orderItemsMap.get(key) || [];
+          list.push(itemObj);
+          orderItemsMap.set(key, list);
+        }
       }
     } catch {}
 
-    // 4. First 20 historical shipped records
+    // 3. First 20 historical shipped records
     const [shippedRows] = await pool.query<mysql.RowDataPacket[]>(`
       SELECT
         \`Id\`, \`TransactionId\`, \`Name\`, \`Street1\`, \`Street2\`, \`City\`, \`State\`, \`Zip\`, \`Country\`,
@@ -1976,24 +2094,24 @@ async function fetchOrdersFromMssql(): Promise<ShippingOrder[] | null> {
         \`TotalWeight\`, \`box\`, \`easypostShipmentId\`, \`marketplacenotified\`,
         CASE WHEN \`LabelData\` IS NOT NULL AND OCTET_LENGTH(\`LabelData\`) > 0 THEN 1 ELSE 0 END AS \`hasLabel\`
       FROM ${tableName}
-      WHERE (\`Fulfilled\` IS NOT NULL OR \`status\` = 'shipped' OR (\`trackingNumber\` IS NOT NULL AND TRIM(\`trackingNumber\`) != ''))
-      ORDER BY IFNULL(\`Fulfilled\`, IFNULL(\`shippingDate\`, IFNULL(\`CreateDate\`, \`createdAt\`))) DESC, \`Id\` DESC
+      WHERE (\`Fulfilled\` IS NOT NULL OR LOWER(TRIM(IFNULL(\`status\`, ''))) = 'shipped' OR (\`trackingNumber\` IS NOT NULL AND TRIM(\`trackingNumber\`) != ''))
+      ORDER BY IFNULL(\`Fulfilled\`, IFNULL(\`shippingDate\`, IFNULL(\`createdAt\`, \`CreateDate\`))) DESC, \`Id\` DESC
       LIMIT 20 OFFSET 0
     `);
 
-    // 5. Total count of historical shipped records
+    // 4. Total count of historical shipped records
     const [countRows] = await pool.query<mysql.RowDataPacket[]>(`
       SELECT COUNT(*) AS totalShippedCount
       FROM ${tableName}
-      WHERE (\`Fulfilled\` IS NOT NULL OR \`status\` = 'shipped' OR (\`trackingNumber\` IS NOT NULL AND TRIM(\`trackingNumber\`) != ''))
+      WHERE (\`Fulfilled\` IS NOT NULL OR LOWER(TRIM(IFNULL(\`status\`, ''))) = 'shipped' OR (\`trackingNumber\` IS NOT NULL AND TRIM(\`trackingNumber\`) != ''))
     `);
     const totalShippedCount = Number(countRows[0]?.totalShippedCount) ?? shippedRows.length;
 
     const resolveExternalItems = (row: any): OrderItem[] | undefined => {
-      const txId = String(row.TransactionId ?? row.TransactionID ?? '').trim();
-      const ordNum = String(row.OrderNumber ?? row.receiptID ?? '').trim();
-      if (txId && orderItemsMap.has(txId)) return orderItemsMap.get(txId);
+      const ordNum = firstNonEmptyString(row.receiptID, row.OrderNumber);
+      const txId = firstNonEmptyString(row.TransactionId, row.TransactionID);
       if (ordNum && orderItemsMap.has(ordNum)) return orderItemsMap.get(ordNum);
+      if (txId && orderItemsMap.has(txId)) return orderItemsMap.get(txId);
       return undefined;
     };
 
@@ -3432,8 +3550,14 @@ app.get('/api/shipments/unfulfilled', async (req, res) => {
   const pool = await getMssqlPool();
   if (pool) {
     try {
+      await ensureMssqlTables(pool);
       const [rows] = await pool.query<mysql.RowDataPacket[]>(
-        'SELECT Id, TransactionId, Name, Street1, Street2, City, State, Zip, Country, email, OrderNumber, CreateDate, Override, Service, Fulfilled FROM Shipping WHERE Fulfilled IS NULL ORDER BY CreateDate ASC'
+        `SELECT Id, TransactionId, Name, Street1, Street2, City, State, Zip, Country, email, OrderNumber, CreateDate, Override, Service, Fulfilled
+         FROM Shipping
+         WHERE Fulfilled IS NULL
+           AND (status IS NULL OR LOWER(TRIM(status)) != 'shipped')
+           AND (trackingNumber IS NULL OR TRIM(trackingNumber) = '')
+         ORDER BY CreateDate ASC`
       );
       return res.json(rows);
     } catch (err: any) {
