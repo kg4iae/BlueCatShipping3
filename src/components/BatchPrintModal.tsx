@@ -27,24 +27,78 @@ interface BatchPrintModalProps {
   settings: AppSetting;
   onClose: () => void;
   onPurchaseBatchLabels?: (orderIds: string[]) => Promise<void>;
+  onOrdersRecreated?: (updatedOrders: ShippingOrder[], updatedSettings: AppSetting) => void;
 }
 
 export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
-  orders,
-  settings,
+  orders: initialOrders,
+  settings: initialSettings,
   onClose,
   onPurchaseBatchLabels,
+  onOrdersRecreated,
 }) => {
+  const [orders, setOrders] = useState<ShippingOrder[]>(initialOrders);
+  const [settings, setSettings] = useState<AppSetting>(initialSettings);
   const [viewMode, setViewMode] = useState<'both' | 'labels' | 'slips'>('both');
   const [isExporting, setIsExporting] = useState(false);
   const [isPurchasing, setIsPurchasing] = useState(false);
+  const [isRecreatingSlips, setIsRecreatingSlips] = useState(false);
+  const [recreatedTimestamp, setRecreatedTimestamp] = useState<number | null>(null);
   const [qzPrinting, setQzPrinting] = useState(false);
   const [qzStatus, setQzStatus] = useState<{ type: 'success' | 'error'; msg: string } | null>(null);
   const [downloadingPdf, setDownloadingPdf] = useState<'labels' | 'slips' | 'both' | null>(null);
 
+  React.useEffect(() => {
+    setOrders(initialOrders);
+  }, [initialOrders]);
+
+  React.useEffect(() => {
+    setSettings(initialSettings);
+  }, [initialSettings]);
+
   const activeHomeEvents = getActiveHomeEvents(settings);
 
   const orderIdsStr = orders.map((o) => o.id).join(',');
+  const packingSlipQueryUrl = `/api/orders/batch-packing-slips.pdf?orderIds=${orderIdsStr}${
+    recreatedTimestamp ? `&recreate=true&t=${recreatedTimestamp}` : ''
+  }`;
+
+  const handleRecreatePackingSlips = async () => {
+    setIsRecreatingSlips(true);
+    setQzStatus(null);
+    try {
+      const res = await fetch('/api/orders/recreate-packing-slips', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderIds: orders.map((o) => o.id) }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to re-create packing slips.');
+      }
+      const freshOrders: ShippingOrder[] = Array.isArray(data.orders) && data.orders.length > 0 ? data.orders : orders;
+      const freshSettings: AppSetting = data.settings ? { ...settings, ...data.settings } : settings;
+      setOrders(freshOrders);
+      setSettings(freshSettings);
+      setRecreatedTimestamp(Date.now());
+      if (onOrdersRecreated) {
+        onOrdersRecreated(freshOrders, freshSettings);
+      }
+      setQzStatus({
+        type: 'success',
+        msg:
+          data.message ||
+          `Re-created ${freshOrders.length} packing slip(s) with latest Packing Slip Content, Return Address, and Recipient Addresses!`,
+      });
+    } catch (err: any) {
+      setQzStatus({
+        type: 'error',
+        msg: `Failed to re-create packing slips: ${err?.message || err}`,
+      });
+    } finally {
+      setIsRecreatingSlips(false);
+    }
+  };
 
   const handleDirectQZPrintLabels = async () => {
     setQzPrinting(true);
@@ -108,7 +162,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
       }
 
       // Fetch combined batch PDF packing slips binary
-      const pdfRes = await fetch(`/api/orders/batch-packing-slips.pdf?orderIds=${orderIdsStr}`);
+      const pdfRes = await fetch(packingSlipQueryUrl);
       if (!pdfRes.ok) {
         throw new Error(`Failed to generate batch PDF packing slips: HTTP ${pdfRes.status}`);
       }
@@ -159,7 +213,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
 
       const [labelRes, slipRes] = await Promise.all([
         fetch(`/api/orders/batch-labels.pdf?orderIds=${orderIdsStr}`),
-        fetch(`/api/orders/batch-packing-slips.pdf?orderIds=${orderIdsStr}`),
+        fetch(packingSlipQueryUrl),
       ]);
 
       if (!labelRes.ok || !slipRes.ok) {
@@ -259,7 +313,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
     try {
       const filename = `Batch_Packing_Slips_${orders.length}_Orders_${new Date().toISOString().slice(0, 10)}.pdf`;
       await downloadOrOpenPdf(
-        `/api/orders/batch-packing-slips.pdf?orderIds=${orderIdsStr}`,
+        packingSlipQueryUrl,
         filename,
         { mode: 'download' }
       );
@@ -288,7 +342,7 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
         { mode: 'download' }
       );
       await downloadOrOpenPdf(
-        `/api/orders/batch-packing-slips.pdf?orderIds=${orderIdsStr}`,
+        packingSlipQueryUrl,
         `Batch_Packing_Slips_${orders.length}_Orders_${new Date().toISOString().slice(0, 10)}.pdf`,
         { mode: 'download' }
       );
@@ -781,6 +835,16 @@ export const BatchPrintModal: React.FC<BatchPrintModalProps> = ({
           </div>
 
           <div className="flex items-center space-x-2 flex-wrap gap-y-1">
+            <button
+              onClick={handleRecreatePackingSlips}
+              disabled={isRecreatingSlips || qzPrinting || downloadingPdf !== null}
+              className="flex items-center space-x-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 px-3 py-1.5 rounded-lg text-xs font-bold shadow-2xs transition-all cursor-pointer disabled:opacity-50"
+              title="Re-create new packing slips using the latest Packing Slip Content, Return Address, and Order Addresses from the database"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-amber-600 ${isRecreatingSlips ? 'animate-spin' : ''}`} />
+              <span>{isRecreatingSlips ? 'Re-Creating Slips...' : 'Re-Create Packing Slips'}</span>
+            </button>
+
             <button
               onClick={handleDirectQZPrintLabels}
               disabled={qzPrinting}

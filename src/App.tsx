@@ -314,7 +314,18 @@ export default function App() {
         body: JSON.stringify(updates),
       });
       const updated = await res.json();
-      setOrders((prev) => prev.map((o) => (o.id === orderId ? updated : o)));
+      setOrders((prev) => {
+        const exists = prev.some((o) => o.id === orderId || o.orderNumber === orderId);
+        if (exists) {
+          return prev.map((o) => (o.id === orderId || o.orderNumber === orderId ? updated : o));
+        }
+        return [updated, ...prev];
+      });
+      if (printOrders) {
+        setPrintOrders((prev) =>
+          prev ? prev.map((o) => (o.id === orderId || o.orderNumber === orderId ? updated : o)) : prev
+        );
+      }
       showToast(`Order #${updated.orderNumber} updated & saved to database!`, 'success');
     } catch (err) {
       showToast('Error saving order updates to database.', 'error');
@@ -920,6 +931,24 @@ export default function App() {
           settings={settings}
           onClose={() => setPrintOrders(null)}
           onPurchaseBatchLabels={handlePurchaseBatchLabels}
+          onOrdersRecreated={(updatedOrders, updatedSettings) => {
+            setPrintOrders(updatedOrders);
+            if (updatedSettings) {
+              setSettings((prev) => (prev ? { ...prev, ...updatedSettings } : updatedSettings));
+            }
+            setOrders((prev) => {
+              const next = [...prev];
+              for (const uo of updatedOrders) {
+                const idx = next.findIndex((x) => x.id === uo.id || x.orderNumber === uo.orderNumber);
+                if (idx >= 0) {
+                  next[idx] = uo;
+                } else {
+                  next.push(uo);
+                }
+              }
+              return next;
+            });
+          }}
         />
       )}
 

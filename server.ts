@@ -3438,7 +3438,29 @@ app.post('/api/orders', async (req, res) => {
 // Update Order (Box selection, address fix, etc.)
 app.put('/api/orders/:id', async (req, res) => {
   const { id } = req.params;
-  const index = db.orders.findIndex((o) => o.id === id);
+  let index = db.orders.findIndex((o) => o.id === id || o.orderNumber === id);
+
+  if (index === -1) {
+    const pool = await getMssqlPool();
+    if (pool) {
+      try {
+        const tableName = getShippingTableName();
+        const numId = parseInt(id, 10);
+        const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+          `SELECT * FROM ${tableName} WHERE \`Id\` = ? OR CAST(\`Id\` AS CHAR) = ? OR \`receiptID\` = ? OR \`OrderNumber\` = ? LIMIT 1`,
+          [!isNaN(numId) ? numId : -1, id, id, id]
+        );
+        if (rows && rows.length > 0) {
+          const loaded = mapDbRowToShippingOrder(rows[0], tableName);
+          db.orders.push(loaded);
+          index = db.orders.length - 1;
+        }
+      } catch (e) {
+        console.warn('[MySQL] Order lookup on PUT /api/orders/:id failed:', e);
+      }
+    }
+  }
+
   if (index === -1) return res.status(404).json({ error: 'Order not found' });
 
   const current = db.orders[index];
@@ -5238,10 +5260,150 @@ function generatePackingSlipPdfBuffer(orders: ShippingOrder[], settings: AppSett
   return Buffer.from(doc.output('arraybuffer'));
 }
 
+// Helper: Pull fresh Configuration settings and fresh Shipping order rows from MySQL to re-create packing slips
+async function recreatePackingSlipsDataFromMysql(orderIds: string[]): Promise<{ orders: ShippingOrder[]; settings: AppSetting }> {
+  const pool = await getMssqlPool();
+  if (pool) {
+    try {
+      await ensureMssqlTables(pool);
+      const liveSettings = await fetchSettingsFromMssql();
+      if (liveSettings) {
+        db.settings = { ...db.settings, ...liveSettings };
+      }
+
+      if (orderIds.length > 0) {
+        const tableName = getShippingTableName(db.settings);
+        const placeholders = orderIds.map(() => '?').join(', ');
+
+        // Load line items fallback map from orderlist
+        const orderItemsMap = new Map<string, OrderItem[]>();
+        try {
+          const [itemRows] = await pool.query<mysql.RowDataPacket[]>('SELECT * FROM `orderlist`');
+          for (const ir of itemRows) {
+            const keys = [
+              firstNonEmptyString(ir.receiptid, ir.receiptID, ir.ReceiptID),
+              firstNonEmptyString(ir.OrderNumber, ir.orderNumber),
+              firstNonEmptyString(ir.transactionid, ir.TransactionId, ir.TransactionID),
+            ].filter(Boolean);
+            if (keys.length === 0) continue;
+
+            const qty = Number(ir.quantity ?? ir.Quantity ?? ir.qty) || 1;
+            const itemName = firstNonEmptyString(ir.name, ir.Name, ir.ItemName, ir.ProductName) || 'Bobbin';
+            const itemType = firstNonEmptyString(ir.style, ir.Style, ir.ItemType, ir.Type, ir.itemType);
+            const color = firstNonEmptyString(ir.color, ir.Color);
+            const itemObj: OrderItem = {
+              id: `ol-${ir.id ?? ir.Id ?? Date.now()}`,
+              sku: firstNonEmptyString(ir.SKU, ir.sku) || itemName.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8).toUpperCase(),
+              name: itemName,
+              itemType: itemType || undefined,
+              color: color || undefined,
+              quantity: qty,
+              price: Number(ir.Price ?? ir.price) || 0,
+              weightOz: Number(ir.WeightOz ?? ir.Weight) || 4 * qty,
+            };
+
+            for (const key of new Set(keys)) {
+              const list = orderItemsMap.get(key) || [];
+              list.push(itemObj);
+              orderItemsMap.set(key, list);
+            }
+          }
+        } catch {}
+
+        const [rows] = await pool.execute<mysql.RowDataPacket[]>(
+          `SELECT
+            \`Id\`, \`TransactionId\`, \`Name\`, \`Street1\`, \`Street2\`, \`City\`, \`State\`, \`Zip\`, \`Country\`,
+            \`OrderNumber\`, \`CreateDate\`, \`Override\`, \`Fulfilled\`,
+            \`address1\`, \`address2\`, \`postalCode\`, \`phone\`, \`email\`,
+            \`createdAt\`, \`OrderDetails\`, \`receiptID\`, \`Carrier\`, \`Service\`,
+            \`trackingNumber\`, \`status\`, \`shippingCost\`, \`shippingDate\`, \`platform\`,
+            \`TotalWeight\`, \`box\`, \`easypostShipmentId\`, \`marketplacenotified\`,
+            CASE WHEN \`LabelData\` IS NOT NULL AND OCTET_LENGTH(\`LabelData\`) > 0 THEN 1 ELSE 0 END AS \`hasLabel\`
+           FROM ${tableName}
+           WHERE CAST(\`Id\` AS CHAR) IN (${placeholders}) OR \`receiptID\` IN (${placeholders}) OR \`OrderNumber\` IN (${placeholders})`,
+          [...orderIds, ...orderIds, ...orderIds]
+        );
+
+        if (rows && rows.length > 0) {
+          const freshMapped = rows.map((row: any) => {
+            const ordNum = firstNonEmptyString(row.receiptID, row.OrderNumber);
+            const txId = firstNonEmptyString(row.TransactionId, row.TransactionID);
+            const extItems = (ordNum && orderItemsMap.get(ordNum)) || (txId && orderItemsMap.get(txId)) || undefined;
+            const existing = db.orders.find((o) => o.id === String(row.Id) || o.orderNumber === ordNum);
+            const mapped = mapDbRowToShippingOrder(row, tableName, extItems);
+            if (existing?.labelBinary && !mapped.labelBinary) {
+              mapped.labelBinary = existing.labelBinary;
+            }
+            return mapped;
+          });
+
+          // Update in-memory cache with freshly fetched order data
+          for (const freshOrder of freshMapped) {
+            const idx = db.orders.findIndex((o) => o.id === freshOrder.id || o.orderNumber === freshOrder.orderNumber);
+            if (idx >= 0) {
+              db.orders[idx] = freshOrder;
+            } else {
+              db.orders.push(freshOrder);
+            }
+          }
+
+          // Preserve requested order sequence
+          const orderedList: ShippingOrder[] = [];
+          for (const reqId of orderIds) {
+            const match = freshMapped.find((o) => o.id === reqId || o.orderNumber === reqId);
+            if (match && !orderedList.some((x) => x.id === match.id)) {
+              orderedList.push(match);
+            }
+          }
+          return { orders: orderedList.length > 0 ? orderedList : freshMapped, settings: db.settings };
+        }
+      }
+    } catch (err) {
+      console.warn('[Re-Create Packing Slips] MySQL refresh notice:', err);
+    }
+  }
+
+  const fallbackOrders = orderIds.length > 0
+    ? db.orders.filter((o) => orderIds.includes(o.id) || orderIds.includes(o.orderNumber))
+    : db.orders;
+  return { orders: fallbackOrders, settings: db.settings };
+}
+
+// Re-Create Packing Slips Endpoint (Pulls latest Configuration & Order Addresses from MySQL)
+app.post('/api/orders/recreate-packing-slips', async (req, res) => {
+  const rawOrderIds = Array.isArray(req.body?.orderIds) ? req.body.orderIds : [];
+  const orderIds = rawOrderIds.map((id: any) => String(id).trim()).filter(Boolean);
+
+  try {
+    const { orders, settings } = await recreatePackingSlipsDataFromMysql(orderIds);
+    const { appPassword, mssqlPassword, ...safeSettings } = settings;
+    res.json({
+      success: true,
+      orders,
+      settings: safeSettings,
+      message: `Successfully re-created ${orders.length} packing slip(s) using the latest Packing Slip Content, Return Address, and Order Addresses from database.`,
+    });
+  } catch (err: any) {
+    res.status(500).json({
+      success: false,
+      error: err?.message || 'Failed to re-create packing slips from database.',
+    });
+  }
+});
+
 // Single Order Packing Slip PDF Endpoint
-app.get('/api/orders/:id/packing-slip.pdf', (req, res) => {
+app.get('/api/orders/:id/packing-slip.pdf', async (req, res) => {
   const { id } = req.params;
-  const order = db.orders.find((o) => o.id === id || o.orderNumber === id);
+  const shouldRecreate = req.query.recreate === 'true' || req.query.recreate === '1';
+
+  let order = db.orders.find((o) => o.id === id || o.orderNumber === id);
+  if (shouldRecreate || !order) {
+    const refreshed = await recreatePackingSlipsDataFromMysql([id]);
+    if (refreshed.orders.length > 0) {
+      order = refreshed.orders[0];
+    }
+  }
+
   if (!order) {
     return res.status(404).send('Order not found');
   }
@@ -5249,6 +5411,7 @@ app.get('/api/orders/:id/packing-slip.pdf', (req, res) => {
   try {
     const pdfBuffer = generatePackingSlipPdfBuffer([order], db.settings);
     res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.setHeader('Content-Disposition', `inline; filename="PackingSlip_${order.orderNumber}.pdf"`);
     res.send(pdfBuffer);
   } catch (err: any) {
@@ -5259,36 +5422,25 @@ app.get('/api/orders/:id/packing-slip.pdf', (req, res) => {
 // Batch Packing Slips PDF Endpoint
 app.get('/api/orders/batch-packing-slips.pdf', async (req, res) => {
   const orderIdsParam = req.query.orderIds as string;
+  const shouldRecreate = req.query.recreate === 'true' || req.query.recreate === '1';
+  const ids = orderIdsParam
+    ? orderIdsParam.split(',').map((s) => s.trim()).filter(Boolean)
+    : [];
+
   let targetOrders: ShippingOrder[] = [];
 
-  if (orderIdsParam) {
-    const ids = orderIdsParam.split(',').map((s) => s.trim()).filter(Boolean);
+  if (shouldRecreate && ids.length > 0) {
+    const refreshed = await recreatePackingSlipsDataFromMysql(ids);
+    targetOrders = refreshed.orders;
+  } else if (ids.length > 0) {
     targetOrders = db.orders.filter((o) => ids.includes(o.id) || ids.includes(o.orderNumber));
+    // If any requested orders are missing from in-memory cache, fetch them from MySQL
+    if (targetOrders.length < ids.length) {
+      const refreshed = await recreatePackingSlipsDataFromMysql(ids);
+      targetOrders = refreshed.orders;
+    }
   } else {
     targetOrders = db.orders;
-  }
-
-  // If no matching orders found in memory, query MySQL database
-  if (targetOrders.length === 0 && orderIdsParam) {
-    const ids = orderIdsParam.split(',').map((s) => s.trim()).filter(Boolean);
-    const pool = await getMssqlPool();
-    if (pool && ids.length > 0) {
-      try {
-        const tableName = getShippingTableName(db.settings);
-        const placeholders = ids.map(() => '?').join(', ');
-
-        const [rows] = await pool.execute<mysql.RowDataPacket[]>(
-          `SELECT * FROM ${tableName} WHERE CAST(\`Id\` AS CHAR) IN (${placeholders}) OR \`receiptID\` IN (${placeholders}) OR \`OrderNumber\` IN (${placeholders})`,
-          [...ids, ...ids, ...ids]
-        );
-
-        if (rows && rows.length > 0) {
-          targetOrders = rows.map((row) => mapDbRowToShippingOrder(row, tableName));
-        }
-      } catch (err) {
-        console.warn('[Batch Packing Slips PDF] MySQL lookup notice:', err);
-      }
-    }
   }
 
   if (targetOrders.length === 0) {
@@ -5302,6 +5454,7 @@ app.get('/api/orders/batch-packing-slips.pdf', async (req, res) => {
   try {
     const pdfBuffer = generatePackingSlipPdfBuffer(targetOrders, db.settings);
     res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.setHeader('Content-Disposition', `attachment; filename="Batch_Packing_Slips_${Date.now()}.pdf"`);
     res.send(pdfBuffer);
   } catch (err: any) {

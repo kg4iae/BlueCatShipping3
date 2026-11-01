@@ -71,6 +71,17 @@ export const SearchShipped: React.FC<SearchShippedProps> = ({
     }
   }, [initialTotalCount]);
 
+  useEffect(() => {
+    if (shippedOrders && shippedOrders.length > 0) {
+      setDisplayedOrders((prev) =>
+        prev.map((row) => {
+          const match = shippedOrders.find((s) => s.id === row.id || s.orderNumber === row.orderNumber);
+          return match ? { ...row, ...match } : row;
+        })
+      );
+    }
+  }, [shippedOrders]);
+
   // Fetch paginated data from server
   const fetchPage = useCallback(
     async (page: number, limit: number, carrier: string, query: string) => {
