@@ -38,7 +38,7 @@ jobs:
           password: ${{ secrets.SERVER_PASSWORD }}
           port: 21
           local-dir: ./
-          server-dir: ${{ secrets.WEBSITE_NAME }}
+          server-dir: /ship
           state-name: .ftp-deploy-sync-state.json
           exclude: |
             **/.git*
